@@ -1,0 +1,103 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+	--bg: #0B1120;
+	--bg-surface: #111827;
+	--bg-elevated: #1a2235;
+	--bg-hover: #1e2d45;
+	--accent-teal: #3B8A8C;
+	--accent-teal-dim: #2a6365;
+	--accent-amber: #D4A843;
+	--success: #4CAF82;
+	--danger: #CF5C5C;
+	--warning: #D4A843;
+	--pending: #8B9DC3;
+	--text-primary: #E2E8F0;
+	--text-secondary: #8B9DC3;
+	--text-muted: #4a5568;
+	--border: #1e2d45;
+	--border-bright: #2d3f5e;
+	--font-ui: 'Inter', system-ui, sans-serif;
+	--font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+*, *::before, *::after {
+	box-sizing: border-box;
+	margin: 0;
+	padding: 0;
+}
+
+html, body {
+	height: 100%;
+	background-color: var(--bg);
+	color: var(--text-primary);
+	font-family: var(--font-ui);
+	font-size: 14px;
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
+}
+
+a {
+	color: inherit;
+	text-decoration: none;
+}
+
+button {
+	font-family: var(--font-ui);
+	cursor: pointer;
+}
+
+table {
+	border-collapse: collapse;
+	width: 100%;
+}
+
+th {
+	font-family: var(--font-ui);
+	font-weight: 500;
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--text-secondary);
+	text-align: left;
+	padding: 8px 12px;
+	border-bottom: 1px solid var(--border);
+	white-space: nowrap;
+}
+
+td {
+	padding: 10px 12px;
+	border-bottom: 1px solid var(--border);
+	vertical-align: middle;
+}
+
+tr:last-child td {
+	border-bottom: none;
+}
+
+.mono {
+	font-family: var(--font-mono);
+}
+
+.text-success { color: var(--success); }
+.text-danger { color: var(--danger); }
+.text-warning { color: var(--warning); }
+.text-pending { color: var(--pending); }
+.text-secondary { color: var(--text-secondary); }
+.text-muted { color: var(--text-muted); }
+
+/* Scrollbar */
+::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+}
+::-webkit-scrollbar-track {
+	background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+	background: var(--border-bright);
+	border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+	background: var(--accent-teal-dim);
+}

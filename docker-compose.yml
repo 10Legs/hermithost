@@ -1,0 +1,27 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5113:3000"
+    networks:
+      - hermithost-net
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "3013:3001"
+    environment:
+      PORT: "3001"
+      CORS_ORIGIN: "http://localhost:5113"
+    networks:
+      - hermithost-net
+    restart: unless-stopped
+
+networks:
+  hermithost-net:
+    driver: bridge
