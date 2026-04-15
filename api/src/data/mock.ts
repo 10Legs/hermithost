@@ -426,3 +426,21 @@ export const SITES: Site[] = [
 export function getSite(slug: string): Site | undefined {
   return SITES.find((s) => s.slug === slug);
 }
+
+export function addSite(site: Site): void {
+  SITES.push(site);
+}
+
+export function removeSite(slug: string): boolean {
+  const idx = SITES.findIndex((s) => s.slug === slug);
+  if (idx === -1) return false;
+  SITES.splice(idx, 1);
+  return true;
+}
+
+export function updateSite(slug: string, fields: Partial<Site>): Site | undefined {
+  const site = SITES.find((s) => s.slug === slug);
+  if (!site) return undefined;
+  Object.assign(site, fields);
+  return site;
+}

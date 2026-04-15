@@ -18,10 +18,14 @@ services:
     environment:
       PORT: "3001"
       CORS_ORIGIN: "http://localhost:5113"
+      SITES_DIR: "/app/sites"
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
       COOLIFY_API_URL: ""        # e.g. http://192.168.3.250:8000/api/v1 — empty = mock mode
       COOLIFY_API_TOKEN: ""      # Coolify API token
       TECHNITIUM_URL: ""         # e.g. http://192.168.3.250:5380 — empty = mock mode
       TECHNITIUM_TOKEN: ""       # Technitium API token
+    volumes:
+      - hermithost-sites:/app/sites
     networks:
       - hermithost-net
     restart: unless-stopped
@@ -29,3 +33,6 @@ services:
 networks:
   hermithost-net:
     driver: bridge
+
+volumes:
+  hermithost-sites:
