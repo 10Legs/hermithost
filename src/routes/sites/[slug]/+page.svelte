@@ -7,9 +7,47 @@
 
 	$: site = data.site;
 	$: dns = data.dns;
-	$: deploys = data.deploys;
+	let deploys = data.deploys;
 
 	let activeTab: 'overview' | 'dns' | 'deployments' | 'settings' = 'overview';
+
+	// Deploy button state
+	type DeployState = 'idle' | 'loading' | 'success' | 'error' | 'unavailable';
+	let deployState: DeployState = 'idle';
+	let deployMessage: string = '';
+
+	async function triggerDeploy(): Promise<void> {
+		deployState = 'loading';
+		deployMessage = '';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/deploy`, { method: 'POST' });
+			if (res.status === 503) {
+				deployState = 'unavailable';
+				deployMessage = 'Deploy unavailable — Coolify not connected';
+				setTimeout(() => { deployState = 'idle'; deployMessage = ''; }, 6000);
+				return;
+			}
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				deployState = 'error';
+				deployMessage = body.error ?? `Deploy failed (${res.status})`;
+				setTimeout(() => { deployState = 'idle'; deployMessage = ''; }, 6000);
+				return;
+			}
+			deployState = 'success';
+			deployMessage = 'Deploy queued';
+			// Refresh deployments list
+			const deploysRes = await fetch(`/api/sites/${site.slug}/deployments`);
+			if (deploysRes.ok) {
+				deploys = await deploysRes.json();
+			}
+			setTimeout(() => { deployState = 'idle'; deployMessage = ''; }, 4000);
+		} catch {
+			deployState = 'error';
+			deployMessage = 'Network error — could not reach server';
+			setTimeout(() => { deployState = 'idle'; deployMessage = ''; }, 6000);
+		}
+	}
 	let logModal: Deploy | null = null;
 	let showDeleteDnsConfirm: string | null = null; // stores the record ID pending confirmation, null when no dialog open
 	let showAddDns = false;
@@ -81,7 +119,24 @@
 		</div>
 		<div class="header-actions">
 			<button class="btn btn-ghost">Refresh checks</button>
-			<button class="btn btn-primary">Deploy now</button>
+			<div class="deploy-wrapper">
+				<button
+					class="btn btn-primary"
+					class:btn-loading={deployState === 'loading'}
+					disabled={deployState === 'loading'}
+					on:click={triggerDeploy}
+				>
+					{deployState === 'loading' ? 'Deploying…' : 'Deploy'}
+				</button>
+				{#if deployMessage}
+					<span
+						class="deploy-status"
+						class:deploy-status-success={deployState === 'success'}
+						class:deploy-status-error={deployState === 'error'}
+						class:deploy-status-unavailable={deployState === 'unavailable'}
+					>{deployMessage}</span>
+				{/if}
+			</div>
 		</div>
 	</header>
 
@@ -1150,5 +1205,34 @@
 	@keyframes blink {
 		0%, 100% { opacity: 1; }
 		50% { opacity: 0; }
+	}
+
+	/* Deploy button */
+	.deploy-wrapper {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+
+	.btn-loading {
+		opacity: 0.7;
+		cursor: not-allowed;
+	}
+
+	.deploy-status {
+		font-size: 12px;
+		font-weight: 500;
+	}
+
+	.deploy-status-success {
+		color: var(--accent-teal);
+	}
+
+	.deploy-status-error {
+		color: var(--danger);
+	}
+
+	.deploy-status-unavailable {
+		color: var(--accent-amber);
 	}
 </style>
