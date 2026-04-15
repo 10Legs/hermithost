@@ -2,6 +2,8 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import healthRouter from './routes/health';
 import sitesRouter from './routes/sites';
+import hostedRouter from './routes/hosted';
+import { getDeployedSite } from './services/githubDeploy';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -13,6 +15,18 @@ app.use(express.json());
 // Routes
 app.use('/api/health', healthRouter);
 app.use('/api/sites', sitesRouter);
+app.use('/api/hosted', hostedRouter);
+
+// Dynamic static file serving for deployed sites
+// GET /hosted/:slug/* → serves from the site's detected serveDir
+app.use('/hosted/:slug', (req: Request, res: Response, next: NextFunction) => {
+  const site = getDeployedSite(req.params.slug);
+  if (!site) {
+    res.status(404).json({ error: 'Deployed site not found' });
+    return;
+  }
+  express.static(site.serveDir, { index: 'index.html' })(req, res, next);
+});
 
 // 404 handler
 app.use((_req: Request, res: Response) => {

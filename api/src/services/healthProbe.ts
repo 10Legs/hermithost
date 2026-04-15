@@ -110,7 +110,38 @@ export interface ProbeResult {
   dns: DnsStatus;
 }
 
+// ── Probe result cache (60s TTL) ──────────────────────────────────────────────
+
+interface CacheEntry {
+  result: ProbeResult;
+  expiresAt: number;
+}
+
+const PROBE_CACHE_TTL_MS = 60_000;
+const probeCache = new Map<string, CacheEntry>();
+
+function getCached(domain: string): ProbeResult | null {
+  const entry = probeCache.get(domain);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    probeCache.delete(domain);
+    return null;
+  }
+  return entry.result;
+}
+
+function setCached(domain: string, result: ProbeResult): void {
+  probeCache.set(domain, { result, expiresAt: Date.now() + PROBE_CACHE_TTL_MS });
+}
+
+export function clearProbeCache(domain: string): void {
+  probeCache.delete(domain);
+}
+
 export async function probeSite(domain: string): Promise<ProbeResult> {
+  const cached = getCached(domain);
+  if (cached) return cached;
+
   const [httpResult, sslResult, dnsResult] = await Promise.allSettled([
     probeHttp(domain),
     probeSsl(domain),
@@ -134,5 +165,7 @@ export async function probeSite(domain: string): Promise<ProbeResult> {
       ? dnsResult.value
       : { resolving: false, propagated: false, checkedAt: now };
 
-  return { http, ssl, dns };
+  const result: ProbeResult = { http, ssl, dns };
+  setCached(domain, result);
+  return result;
 }

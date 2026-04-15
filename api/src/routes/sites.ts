@@ -1,6 +1,10 @@
 import { Router, Request, Response } from 'express';
-import { SITES, getSite, DnsRecord } from '../data/mock';
-import { createCoolifyClient } from '../services/coolify';
+import { SITES, getSite, addSite, removeSite, updateSite, DnsRecord } from '../data/mock';
+import {
+  createCoolifyClient,
+  CoolifyCreateApplicationPayload,
+  CoolifyUpdateApplicationPayload,
+} from '../services/coolify';
 import { mapSite, mapDeploy } from '../services/mapper';
 import { createTechnitiumClient } from '../services/technitium';
 import {
@@ -76,6 +80,144 @@ router.get('/:slug', async (req: Request, res: Response) => {
     }
     res.setHeader('x-data-source', 'mock');
     res.status(200).json(site);
+  }
+});
+
+// ── POST /api/sites — create a new site ──────────────────────────────────────
+router.post('/', async (req: Request, res: Response) => {
+  // Mock mode accepts the frontend's simplified shape: name, domain, gitRepo, gitBranch.
+  // Coolify mode requires the full CoolifyCreateApplicationPayload fields.
+  if (useMock) {
+    const { name, domain, gitRepo, gitBranch } = req.body as {
+      name?: string;
+      domain?: string;
+      gitRepo?: string;
+      gitBranch?: string;
+    };
+    if (!name || !domain) {
+      res.status(400).json({ error: 'Missing required fields: name, domain' });
+      return;
+    }
+    const slug = name.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    const now = new Date().toISOString();
+    const newSite = {
+      slug,
+      name: name.trim(),
+      domain: domain.trim(),
+      description: '',
+      repository: gitRepo?.trim() ?? '',
+      server: '',
+      overallStatus: 'pending' as const,
+      http: { reachable: false, statusCode: null, responseTimeMs: null, checkedAt: now },
+      ssl: { valid: false, expiresAt: null, daysUntilExpiry: null, issuer: null, checkedAt: now },
+      dns: { resolving: false, propagated: false, checkedAt: now },
+      dnsRecords: [],
+      deploys: [],
+      ...(gitBranch ? {} : {}),
+    };
+    addSite(newSite);
+    res.status(201).json(newSite);
+    return;
+  }
+
+  const body = req.body as Partial<CoolifyCreateApplicationPayload>;
+  if (!body.name || !body.git_repository || !body.git_branch || !body.server_uuid || !body.destination_uuid) {
+    res.status(400).json({
+      error: 'Missing required fields: name, git_repository, git_branch, server_uuid, destination_uuid',
+    });
+    return;
+  }
+  try {
+    const client = createCoolifyClient()!;
+    const payload: CoolifyCreateApplicationPayload = {
+      name: body.name,
+      git_repository: body.git_repository,
+      git_branch: body.git_branch,
+      server_uuid: body.server_uuid,
+      destination_uuid: body.destination_uuid,
+      ...(body.description !== undefined ? { description: body.description } : {}),
+      ...(body.fqdn !== undefined ? { fqdn: body.fqdn } : {}),
+      ...(body.build_pack !== undefined ? { build_pack: body.build_pack } : {}),
+    };
+    const app = await client.createApplication(payload);
+    res.status(201).json(mapSite(app, []));
+  } catch (err) {
+    console.warn('[coolify] POST /applications failed:', (err as Error).message);
+    res.status(502).json({ error: 'Failed to create application via Coolify' });
+  }
+});
+
+// ── DELETE /api/sites/:slug — delete a site ───────────────────────────────────
+router.delete('/:slug', async (req: Request, res: Response) => {
+  if (useMock) {
+    const removed = removeSite(req.params.slug);
+    if (!removed) {
+      res.status(404).json({ error: 'Site not found' });
+      return;
+    }
+    res.status(204).send();
+    return;
+  }
+  try {
+    const client = createCoolifyClient()!;
+    await client.deleteApplication(req.params.slug);
+    res.status(204).send();
+  } catch (err) {
+    console.warn(`[coolify] DELETE /applications/${req.params.slug} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to delete application via Coolify' });
+  }
+});
+
+// ── PATCH /api/sites/:slug — update site settings ────────────────────────────
+//
+// Field alignment: the frontend Settings tab sends Site-typed fields
+// (repository, server, description) rather than Coolify API fields
+// (git_repository, build_pack, fqdn). Accepting the frontend's field names
+// here keeps the frontend decoupled from Coolify internals. In Coolify mode
+// we translate: repository → git_repository. The `server` field has no
+// Coolify equivalent and is only applied in mock mode.
+router.patch('/:slug', async (req: Request, res: Response) => {
+  // Accept both frontend Site fields and raw Coolify fields.
+  const body = req.body as Partial<CoolifyUpdateApplicationPayload & {
+    repository?: string;
+    server?: string;
+  }>;
+  if (Object.keys(body).length === 0) {
+    res.status(400).json({ error: 'Request body must include at least one field to update' });
+    return;
+  }
+  if (useMock) {
+    const site = getSite(req.params.slug);
+    if (!site) {
+      res.status(404).json({ error: 'Site not found' });
+      return;
+    }
+    const updates: Partial<import('../data/mock').Site> = {};
+    if (body.repository !== undefined) updates.repository = body.repository;
+    if (body.git_repository !== undefined) updates.repository = body.git_repository;
+    if (body.server !== undefined) updates.server = body.server;
+    if (body.description !== undefined) updates.description = body.description;
+    if (body.name !== undefined) updates.name = body.name;
+    const updated = updateSite(req.params.slug, updates);
+    res.status(200).json(updated);
+    return;
+  }
+  try {
+    const client = createCoolifyClient()!;
+    const payload: CoolifyUpdateApplicationPayload = {};
+    if (body.name !== undefined) payload.name = body.name;
+    if (body.description !== undefined) payload.description = body.description;
+    if (body.fqdn !== undefined) payload.fqdn = body.fqdn;
+    // Accept frontend 'repository' field and translate to git_repository
+    if (body.repository !== undefined) payload.git_repository = body.repository;
+    if (body.git_repository !== undefined) payload.git_repository = body.git_repository;
+    if (body.git_branch !== undefined) payload.git_branch = body.git_branch;
+    if (body.build_pack !== undefined) payload.build_pack = body.build_pack;
+    const app = await client.updateApplication(req.params.slug, payload);
+    res.status(200).json(mapSite(app, []));
+  } catch (err) {
+    console.warn(`[coolify] PATCH /applications/${req.params.slug} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to update application via Coolify' });
   }
 });
 

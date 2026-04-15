@@ -44,6 +44,26 @@ export interface CoolifyTriggerDeployResponse {
   status: string;
 }
 
+export interface CoolifyCreateApplicationPayload {
+  name: string;
+  description?: string;
+  fqdn?: string;
+  git_repository: string;
+  git_branch: string;
+  build_pack?: string;
+  server_uuid: string;
+  destination_uuid: string;
+}
+
+export interface CoolifyUpdateApplicationPayload {
+  name?: string;
+  description?: string;
+  fqdn?: string;
+  git_repository?: string;
+  git_branch?: string;
+  build_pack?: string;
+}
+
 async function handleResponse<T>(res: Response, context: string): Promise<T> {
   if (!res.ok) {
     const body = await res.text().catch(() => '(unreadable)');
@@ -90,6 +110,35 @@ export class CoolifyClient {
   async getDeployment(deploymentUuid: string): Promise<CoolifyDeploymentQueue> {
     const res = await fetch(`${this.baseUrl}/deployments/${deploymentUuid}`, { headers: this.headers });
     return handleResponse<CoolifyDeploymentQueue>(res, `GET /deployments/${deploymentUuid}`);
+  }
+
+  async createApplication(payload: CoolifyCreateApplicationPayload): Promise<CoolifyApplication> {
+    const res = await fetch(`${this.baseUrl}/applications`, {
+      method: 'POST',
+      headers: this.headers,
+      body: JSON.stringify(payload),
+    });
+    return handleResponse<CoolifyApplication>(res, 'POST /applications');
+  }
+
+  async deleteApplication(uuid: string): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/applications/${uuid}`, {
+      method: 'DELETE',
+      headers: this.headers,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '(unreadable)');
+      throw new Error(`Coolify DELETE /applications/${uuid} failed: HTTP ${res.status} — ${body}`);
+    }
+  }
+
+  async updateApplication(uuid: string, payload: CoolifyUpdateApplicationPayload): Promise<CoolifyApplication> {
+    const res = await fetch(`${this.baseUrl}/applications/${uuid}`, {
+      method: 'PATCH',
+      headers: this.headers,
+      body: JSON.stringify(payload),
+    });
+    return handleResponse<CoolifyApplication>(res, `PATCH /applications/${uuid}`);
   }
 }
 

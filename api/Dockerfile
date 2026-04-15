@@ -18,6 +18,9 @@ ENV NODE_ENV=production
 ENV PORT=3001
 ENV HOST=0.0.0.0
 
+# git required for cloning hosted sites
+RUN apk add --no-cache git
+
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json ./package.json
 RUN npm install --omit=dev
