@@ -11,6 +11,7 @@ import {
   buildDeleteParams,
   decodeId,
 } from '../services/technitiumMapper';
+import { probeSite } from '../services/healthProbe';
 
 const router = Router();
 
@@ -47,14 +48,25 @@ router.get('/:slug', async (req: Request, res: Response) => {
       res.status(404).json({ error: 'Site not found' });
       return;
     }
-    res.status(200).json(site);
+    const probe = site.domain ? await probeSite(site.domain).catch(() => null) : null;
+    res.status(200).json(probe ? { ...site, ...probe } : site);
     return;
   }
   try {
     const client = createCoolifyClient()!;
     const app = await client.getApplication(req.params.slug);
-    const deployments = await client.listDeployments(app.uuid).catch(() => []);
-    res.status(200).json(mapSite(app, deployments));
+    const domain = app.fqdn
+      ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '')
+      : '';
+
+    const [deployments, probe] = await Promise.all([
+      client.listDeployments(app.uuid).catch(() => []),
+      domain
+        ? probeSite(domain).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    res.status(200).json(mapSite(app, deployments, probe));
   } catch (err) {
     console.warn(`[coolify] GET /applications/${req.params.slug} failed, falling back to mock:`, (err as Error).message);
     const site = getSite(req.params.slug);

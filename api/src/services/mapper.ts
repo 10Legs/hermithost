@@ -14,6 +14,7 @@ import type {
   SslStatus,
   DnsStatus,
 } from '../data/mock';
+import type { ProbeResult } from './healthProbe';
 
 // ── Status mappers ────────────────────────────────────────────────────────────
 
@@ -140,7 +141,8 @@ export function mapDeploy(
 
 export function mapSite(
   app: CoolifyApplication,
-  deployments: CoolifyDeploymentQueue[]
+  deployments: CoolifyDeploymentQueue[],
+  probe: ProbeResult | null = null
 ): Site {
   const deploys: Deploy[] = deployments.map((d) =>
     mapDeploy(d, app.git_branch)
@@ -148,6 +150,10 @@ export function mapSite(
 
   const latestDeployment = deployments[0];
   const serverName = latestDeployment?.server_name ?? 'unknown';
+
+  const http: HttpStatus = probe ? probe.http : stubHttpStatus(app.status);
+  const ssl: SslStatus = probe ? probe.ssl : stubSslStatus();
+  const dns: DnsStatus = probe ? probe.dns : stubDnsStatus();
 
   return {
     slug: app.uuid,
@@ -157,9 +163,9 @@ export function mapSite(
     repository: app.git_repository,
     server: serverName,
     overallStatus: mapAppStatus(app.status),
-    http: stubHttpStatus(app.status),
-    ssl: stubSslStatus(),
-    dns: stubDnsStatus(),
+    http,
+    ssl,
+    dns,
     // TODO: populate from Technitium integration
     dnsRecords: [],
     deploys,
