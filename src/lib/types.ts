@@ -56,6 +56,6 @@ export interface Site {
 	ssl: SslStatus;
 	dns: DnsStatus;
 	overallStatus: SiteStatus;
-	dnsRecords: DnsRecord[];
-	deploys: Deploy[];
+	dnsRecords?: DnsRecord[];
+	deploys?: Deploy[];
 }
