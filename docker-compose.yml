@@ -47,8 +47,9 @@ services:
       GITHUB_TOKEN: "${GITHUB_TOKEN}"
       COOLIFY_API_URL: "${COOLIFY_API_URL:-}"
       COOLIFY_API_TOKEN: "${COOLIFY_API_TOKEN:-}"
-      TECHNITIUM_URL: "${TECHNITIUM_URL:-}"
+      TECHNITIUM_URL: "${TECHNITIUM_URL:-http://technitium:5380}"
       TECHNITIUM_TOKEN: "${TECHNITIUM_TOKEN:-}"
+      DNS_MOCK: "${DNS_MOCK:-}"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.api.rule=PathPrefix(`/api`)"
@@ -61,6 +62,17 @@ services:
       - hermithost-net
     restart: unless-stopped
 
+  # ── Technitium DNS Server ──────────────────────────────────────
+  technitium:
+    image: technitium/dns-server:latest
+    restart: unless-stopped
+    ports:
+      - "5380:5380"
+    volumes:
+      - technitium-config:/etc/dns
+    networks:
+      - hermithost-net
+
 networks:
   hermithost-net:
     driver: bridge
@@ -68,3 +80,4 @@ networks:
 volumes:
   hermithost-sites:
   traefik-acme:
+  technitium-config:
