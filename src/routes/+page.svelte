@@ -1,6 +1,10 @@
 <script lang="ts">
-	import { SITES, formatRelativeTime } from '$lib/data';
+	import { formatRelativeTime } from '$lib/data';
+	import type { PageData } from './$types';
 	import type { Site } from '$lib/types';
+
+	export let data: PageData;
+	$: sites = data.sites;
 
 	function getStatusLabel(site: Site): string {
 		const labels: Record<string, string> = {
@@ -42,13 +46,13 @@
 	}
 
 	function lastDeployLabel(site: Site): string {
-		const latest = site.deploys[0];
+		const latest = site.deploys?.[0];
 		if (!latest) return 'Never deployed';
 		return formatRelativeTime(latest.startedAt);
 	}
 
 	function lastDeployClass(site: Site): string {
-		const latest = site.deploys[0];
+		const latest = site.deploys?.[0];
 		if (!latest) return 'text-muted';
 		if (latest.status === 'failed') return 'text-danger';
 		if (latest.status === 'running' || latest.status === 'pending') return 'text-pending';
@@ -56,7 +60,7 @@
 	}
 
 	function lastDeployStatus(site: Site): string {
-		const latest = site.deploys[0];
+		const latest = site.deploys?.[0];
 		if (!latest) return '';
 		if (latest.status === 'failed') return ' · failed';
 		if (latest.status === 'running') return ' · running';
@@ -64,17 +68,17 @@
 		return '';
 	}
 
-	$: healthySites = SITES.filter(s => s.overallStatus === 'healthy').length;
-	$: warningSites = SITES.filter(s => s.overallStatus === 'warning').length;
-	$: errorSites = SITES.filter(s => s.overallStatus === 'error').length;
-	$: pendingSites = SITES.filter(s => s.overallStatus === 'pending').length;
+	$: healthySites = sites.filter(s => s.overallStatus === 'healthy').length;
+	$: warningSites = sites.filter(s => s.overallStatus === 'warning').length;
+	$: errorSites = sites.filter(s => s.overallStatus === 'error').length;
+	$: pendingSites = sites.filter(s => s.overallStatus === 'pending').length;
 </script>
 
 <div class="page">
 	<header class="page-header">
 		<div>
 			<h1 class="page-title">Sites</h1>
-			<p class="page-sub">{SITES.length} sites across 2 servers · last checked 7 minutes ago</p>
+			<p class="page-sub">{sites.length} sites · last checked 7 minutes ago</p>
 		</div>
 		<div class="header-actions">
 			<div class="stat-pills">
@@ -107,7 +111,7 @@
 				</tr>
 			</thead>
 			<tbody>
-				{#each SITES as site}
+				{#each sites as site}
 					<tr class="site-row" class:row-error={site.overallStatus === 'error'} class:row-warning={site.overallStatus === 'warning'}>
 						<td class="cell-site">
 							<div class="site-name-row">

@@ -6,6 +6,8 @@
 	export let data: PageData;
 
 	$: site = data.site;
+	$: dns = data.dns;
+	$: deploys = data.deploys;
 
 	let activeTab: 'overview' | 'dns' | 'deployments' | 'settings' = 'overview';
 	let logModal: Deploy | null = null;
@@ -86,8 +88,8 @@
 	<!-- Tabs -->
 	<div class="tabs">
 		<button class="tab" class:tab-active={activeTab === 'overview'} on:click={() => activeTab = 'overview'}>Overview</button>
-		<button class="tab" class:tab-active={activeTab === 'dns'} on:click={() => activeTab = 'dns'}>DNS Records <span class="tab-count">{site.dnsRecords.length}</span></button>
-		<button class="tab" class:tab-active={activeTab === 'deployments'} on:click={() => activeTab = 'deployments'}>Deployments <span class="tab-count">{site.deploys.length}</span></button>
+		<button class="tab" class:tab-active={activeTab === 'dns'} on:click={() => activeTab = 'dns'}>DNS Records <span class="tab-count">{dns.length}</span></button>
+		<button class="tab" class:tab-active={activeTab === 'deployments'} on:click={() => activeTab = 'deployments'}>Deployments <span class="tab-count">{deploys.length}</span></button>
 		<button class="tab" class:tab-active={activeTab === 'settings'} on:click={() => activeTab = 'settings'}>Settings</button>
 	</div>
 
@@ -178,21 +180,21 @@
 				</div>
 
 				<!-- Last Deploy -->
-				<div class="status-card" class:card-danger={site.deploys[0]?.status === 'failed'}>
+				<div class="status-card" class:card-danger={deploys[0]?.status === 'failed'}>
 					<div class="status-card-header">
 						<span class="status-card-label">Last Deploy</span>
-						{#if site.deploys.length === 0}
+						{#if deploys.length === 0}
 							<span class="status-badge badge-pending">None</span>
-						{:else if site.deploys[0].status === 'success'}
+						{:else if deploys[0].status === 'success'}
 							<span class="status-badge badge-success">Success</span>
-						{:else if site.deploys[0].status === 'failed'}
+						{:else if deploys[0].status === 'failed'}
 							<span class="status-badge badge-danger">Failed</span>
-						{:else if site.deploys[0].status === 'running' || site.deploys[0].status === 'pending'}
+						{:else if deploys[0].status === 'running' || deploys[0].status === 'pending'}
 							<span class="status-badge badge-pending">In Progress</span>
 						{/if}
 					</div>
-					{#if site.deploys.length > 0}
-						{@const latest = site.deploys[0]}
+					{#if deploys.length > 0}
+						{@const latest = deploys[0]}
 						<div class="status-card-value mono">{latest.commitRef}</div>
 						<div class="status-card-detail text-secondary truncate" title={latest.commitMessage}>
 							{latest.commitMessage}
@@ -214,7 +216,7 @@
 				<div class="alert-banner" class:alert-danger={site.overallStatus === 'error'} class:alert-warning={site.overallStatus === 'warning'}>
 					<span class="alert-icon">{site.overallStatus === 'error' ? '✗' : '⚠'}</span>
 					<div>
-						{#if site.overallStatus === 'error' && site.deploys[0]?.status === 'failed'}
+						{#if site.overallStatus === 'error' && deploys[0]?.status === 'failed'}
 							<strong>Last deploy failed.</strong> The site is running the previous build. Check the deploy log for details and fix the underlying issue before re-deploying.
 						{:else if site.overallStatus === 'warning' && site.ssl.daysUntilExpiry !== null && site.ssl.daysUntilExpiry <= 14}
 							<strong>SSL certificate expires in {site.ssl.daysUntilExpiry} days.</strong> Auto-renewal should have triggered by now. Verify certbot is running: <code>systemctl status certbot.timer</code>
@@ -289,7 +291,7 @@
 						</tr>
 					</thead>
 					<tbody>
-						{#each site.dnsRecords as record}
+						{#each dns as record}
 							<tr>
 								<td>
 									<span class="dns-type-badge dns-type-{record.type.toLowerCase()}">{record.type}</span>
@@ -326,13 +328,13 @@
 			<div class="section-header">
 				<div>
 					<h2 class="section-title">Deployments</h2>
-					<p class="section-sub">{site.deploys.length} deploy{site.deploys.length !== 1 ? 's' : ''}</p>
+					<p class="section-sub">{deploys.length} deploy{deploys.length !== 1 ? 's' : ''}</p>
 				</div>
 				<button class="btn btn-primary btn-sm">Deploy HEAD</button>
 			</div>
 
 			<div class="deploys-list">
-				{#each site.deploys as deploy}
+				{#each deploys as deploy}
 					<div class="deploy-row" class:deploy-failed={deploy.status === 'failed'}>
 						<div class="deploy-status-icon {deployStatusClass(deploy.status)}">
 							{deployStatusIcon(deploy.status)}
@@ -410,7 +412,9 @@
 <!-- Deploy Log Modal -->
 {#if logModal !== null}
 	{@const deploy = logModal}
+	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 	<div class="modal-backdrop" on:click={closeLog} role="presentation">
+		<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 		<div class="modal" on:click|stopPropagation role="dialog" aria-modal="true" aria-label="Deploy log">
 			<div class="modal-header">
 				<div class="modal-title-row">
