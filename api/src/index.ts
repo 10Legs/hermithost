@@ -27,6 +27,12 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 
 app.listen(PORT, () => {
   console.log(`hermithost API running on http://localhost:${PORT}`);
+  const coolifyUrl = process.env.COOLIFY_API_URL;
+  if (coolifyUrl) {
+    console.log(`[coolify] Integration active — base URL: ${coolifyUrl}`);
+  } else {
+    console.log('[coolify] No COOLIFY_API_URL set — running in mock data mode');
+  }
 });
 
 export default app;
