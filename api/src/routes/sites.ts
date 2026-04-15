@@ -6,24 +6,17 @@ import {
   CoolifyUpdateApplicationPayload,
 } from '../services/coolify';
 import { mapSite, mapDeploy } from '../services/mapper';
-import { createTechnitiumClient } from '../services/technitium';
-import {
-  mapRecord,
-  shouldIncludeRecord,
-  buildAddParams,
-  buildUpdateParams,
-  buildDeleteParams,
-  decodeId,
-} from '../services/technitiumMapper';
 import { probeSite } from '../services/healthProbe';
+import { createDnsProvider, DnsOperationError } from '../services/dns';
 
 const router = Router();
 
-const useMock = !process.env.COOLIFY_API_URL;
+const useCoolifyMock = !process.env.COOLIFY_API_URL;
+const dnsProvider = createDnsProvider();
 
 // ── GET /api/sites — list all sites ──────────────────────────────────────────
 router.get('/', async (_req: Request, res: Response) => {
-  if (useMock) {
+  if (useCoolifyMock) {
     res.status(200).json(SITES);
     return;
   }
@@ -46,7 +39,7 @@ router.get('/', async (_req: Request, res: Response) => {
 
 // ── GET /api/sites/:slug — single site detail ─────────────────────────────────
 router.get('/:slug', async (req: Request, res: Response) => {
-  if (useMock) {
+  if (useCoolifyMock) {
     const site = getSite(req.params.slug);
     if (!site) {
       res.status(404).json({ error: 'Site not found' });
@@ -87,7 +80,7 @@ router.get('/:slug', async (req: Request, res: Response) => {
 router.post('/', async (req: Request, res: Response) => {
   // Mock mode accepts the frontend's simplified shape: name, domain, gitRepo, gitBranch.
   // Coolify mode requires the full CoolifyCreateApplicationPayload fields.
-  if (useMock) {
+  if (useCoolifyMock) {
     const { name, domain, gitRepo, gitBranch } = req.body as {
       name?: string;
       domain?: string;
@@ -149,7 +142,7 @@ router.post('/', async (req: Request, res: Response) => {
 
 // ── DELETE /api/sites/:slug — delete a site ───────────────────────────────────
 router.delete('/:slug', async (req: Request, res: Response) => {
-  if (useMock) {
+  if (useCoolifyMock) {
     const removed = removeSite(req.params.slug);
     if (!removed) {
       res.status(404).json({ error: 'Site not found' });
@@ -186,7 +179,7 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'Request body must include at least one field to update' });
     return;
   }
-  if (useMock) {
+  if (useCoolifyMock) {
     const site = getSite(req.params.slug);
     if (!site) {
       res.status(404).json({ error: 'Site not found' });
@@ -224,144 +217,70 @@ router.patch('/:slug', async (req: Request, res: Response) => {
 // ── GET /api/sites/:slug/dns — DNS records for a site ────────────────────────
 router.get('/:slug/dns', async (req: Request, res: Response) => {
   const site = getSite(req.params.slug);
-  if (!site) {
-    res.status(404).json({ error: 'Site not found' });
-    return;
-  }
-  const technitium = createTechnitiumClient();
-  if (!technitium) {
-    res.setHeader('x-data-source', 'mock');
-    res.status(200).json(site.dnsRecords);
-    return;
-  }
+  if (!site) { res.status(404).json({ error: 'Site not found' }); return; }
   try {
-    const { zone, records } = await technitium.getRecords(site.domain);
-    const mapped = records
-      .filter((r) => shouldIncludeRecord(r, zone.name))
-      .map((r) => mapRecord(r, zone.name));
-    res.status(200).json(mapped);
+    const records = await dnsProvider.getRecords(site.domain);
+    res.status(200).json(records);
   } catch (err) {
-    console.warn(`[technitium] GET records for ${site.domain} failed, falling back to mock:`, (err as Error).message);
-    res.setHeader('x-data-source', 'mock');
-    res.status(200).json(site.dnsRecords);
+    console.warn('[dns] getRecords failed:', err instanceof DnsOperationError ? err.originalCause : err);
+    res.status(500).json({ error: 'DNS operation failed' });
   }
 });
 
 // ── POST /api/sites/:slug/dns — add a DNS record ─────────────────────────────
 router.post('/:slug/dns', async (req: Request, res: Response) => {
   const site = getSite(req.params.slug);
-  if (!site) {
-    res.status(404).json({ error: 'Site not found' });
-    return;
-  }
+  if (!site) { res.status(404).json({ error: 'Site not found' }); return; }
   const body = req.body as Partial<DnsRecord>;
   if (!body.type || !body.name || !body.value || !body.ttl) {
     res.status(400).json({ error: 'Missing required fields: type, name, value, ttl' });
     return;
   }
-  const technitium = createTechnitiumClient();
-  if (!technitium) {
-    res.status(503).json({ error: 'DNS integration unavailable — TECHNITIUM_URL not configured' });
-    return;
-  }
   try {
-    const record: DnsRecord = {
-      id: '',
+    const record = await dnsProvider.addRecord(site.domain, {
       type: body.type,
       name: body.name,
       value: body.value,
       ttl: body.ttl,
       ...(body.priority !== undefined ? { priority: body.priority } : {}),
-    };
-    // Build full domain: name '@' means apex (site.domain), otherwise prepend subdomain
-    const domain = record.name === '@' ? site.domain : `${record.name}.${site.domain}`;
-    const params = buildAddParams(domain, record);
-    const raw = await technitium.addRecord(domain, params);
-    const { zone } = await technitium.getRecords(site.domain);
-    res.status(201).json(mapRecord(raw, zone.name));
+    });
+    res.status(201).json(record);
   } catch (err) {
-    console.warn(`[technitium] POST add record for ${site.domain} failed:`, (err as Error).message);
-    res.status(502).json({ error: 'Failed to add DNS record via Technitium' });
+    console.warn('[dns] addRecord failed:', err instanceof DnsOperationError ? err.originalCause : err);
+    res.status(500).json({ error: 'DNS operation failed' });
   }
 });
 
 // ── PUT /api/sites/:slug/dns/:id — update a DNS record ───────────────────────
 router.put('/:slug/dns/:id', async (req: Request, res: Response) => {
   const site = getSite(req.params.slug);
-  if (!site) {
-    res.status(404).json({ error: 'Site not found' });
-    return;
-  }
-  const technitium = createTechnitiumClient();
-  if (!technitium) {
-    res.status(503).json({ error: 'DNS integration unavailable — TECHNITIUM_URL not configured' });
-    return;
-  }
-  let identity: { domain: string; type: string; value: string };
+  if (!site) { res.status(404).json({ error: 'Site not found' }); return; }
   try {
-    identity = decodeId(req.params.id);
-  } catch {
-    res.status(400).json({ error: 'Invalid record ID' });
-    return;
-  }
-  try {
-    const existing: DnsRecord = {
-      id: req.params.id,
-      type: identity.type as DnsRecord['type'],
-      name: identity.domain,
-      value: identity.value,
-      ttl: 3600,
-    };
-    const updates = req.body as Partial<DnsRecord>;
-    const params = buildUpdateParams(identity.domain, existing, updates);
-    const raw = await technitium.updateRecord(identity.domain, params);
-    const { zone } = await technitium.getRecords(site.domain);
-    res.status(200).json(mapRecord(raw, zone.name));
+    const updates = req.body as Partial<Omit<DnsRecord, 'id'>>;
+    const record = await dnsProvider.updateRecord(site.domain, req.params.id, updates);
+    res.status(200).json(record);
   } catch (err) {
-    console.warn(`[technitium] PUT update record ${req.params.id} failed:`, (err as Error).message);
-    res.status(502).json({ error: 'Failed to update DNS record via Technitium' });
+    console.warn('[dns] updateRecord failed:', err instanceof DnsOperationError ? err.originalCause : err);
+    res.status(500).json({ error: 'DNS operation failed' });
   }
 });
 
 // ── DELETE /api/sites/:slug/dns/:id — delete a DNS record ────────────────────
 router.delete('/:slug/dns/:id', async (req: Request, res: Response) => {
   const site = getSite(req.params.slug);
-  if (!site) {
-    res.status(404).json({ error: 'Site not found' });
-    return;
-  }
-  const technitium = createTechnitiumClient();
-  if (!technitium) {
-    res.status(503).json({ error: 'DNS integration unavailable — TECHNITIUM_URL not configured' });
-    return;
-  }
-  let identity: { domain: string; type: string; value: string };
+  if (!site) { res.status(404).json({ error: 'Site not found' }); return; }
   try {
-    identity = decodeId(req.params.id);
-  } catch {
-    res.status(400).json({ error: 'Invalid record ID' });
-    return;
-  }
-  try {
-    const record: DnsRecord = {
-      id: req.params.id,
-      type: identity.type as DnsRecord['type'],
-      name: identity.domain,
-      value: identity.value,
-      ttl: 0,
-    };
-    const params = buildDeleteParams(identity.domain, record);
-    await technitium.deleteRecord(identity.domain, params);
+    await dnsProvider.deleteRecord(site.domain, req.params.id);
     res.status(204).send();
   } catch (err) {
-    console.warn(`[technitium] DELETE record ${req.params.id} failed:`, (err as Error).message);
-    res.status(502).json({ error: 'Failed to delete DNS record via Technitium' });
+    console.warn('[dns] deleteRecord failed:', err instanceof DnsOperationError ? err.originalCause : err);
+    res.status(500).json({ error: 'DNS operation failed' });
   }
 });
 
 // ── GET /api/sites/:slug/deployments — deployment history ────────────────────
 router.get('/:slug/deployments', async (req: Request, res: Response) => {
-  if (useMock) {
+  if (useCoolifyMock) {
     const site = getSite(req.params.slug);
     if (!site) {
       res.status(404).json({ error: 'Site not found' });
@@ -390,7 +309,7 @@ router.get('/:slug/deployments', async (req: Request, res: Response) => {
 
 // ── POST /api/sites/:slug/deploy — trigger a deploy ──────────────────────────
 router.post('/:slug/deploy', async (req: Request, res: Response) => {
-  if (useMock) {
+  if (useCoolifyMock) {
     const site = getSite(req.params.slug);
     if (!site) {
       res.status(404).json({ error: 'Site not found' });
@@ -411,7 +330,7 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
 
 // ── GET /api/sites/:slug/deployments/:id/log — deploy log lines ───────────────
 router.get('/:slug/deployments/:id/log', async (req: Request, res: Response) => {
-  if (useMock) {
+  if (useCoolifyMock) {
     const site = getSite(req.params.slug);
     if (!site) {
       res.status(404).json({ error: 'Site not found' });
