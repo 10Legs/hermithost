@@ -2,6 +2,15 @@ import { Router, Request, Response } from 'express';
 import { SITES, getSite, DnsRecord } from '../data/mock';
 import { createCoolifyClient } from '../services/coolify';
 import { mapSite, mapDeploy } from '../services/mapper';
+import { createTechnitiumClient } from '../services/technitium';
+import {
+  mapRecord,
+  shouldIncludeRecord,
+  buildAddParams,
+  buildUpdateParams,
+  buildDeleteParams,
+  decodeId,
+} from '../services/technitiumMapper';
 
 const router = Router();
 
@@ -59,21 +68,33 @@ router.get('/:slug', async (req: Request, res: Response) => {
 });
 
 // ── GET /api/sites/:slug/dns — DNS records for a site ────────────────────────
-// TODO: replace with Technitium API call
-// GET http://<technitium-host>:5380/api/zones/records/get?token=<token>&domain=<domain>
-router.get('/:slug/dns', (req: Request, res: Response) => {
+router.get('/:slug/dns', async (req: Request, res: Response) => {
   const site = getSite(req.params.slug);
   if (!site) {
     res.status(404).json({ error: 'Site not found' });
     return;
   }
-  res.status(200).json(site.dnsRecords);
+  const technitium = createTechnitiumClient();
+  if (!technitium) {
+    res.setHeader('x-data-source', 'mock');
+    res.status(200).json(site.dnsRecords);
+    return;
+  }
+  try {
+    const { zone, records } = await technitium.getRecords(site.domain);
+    const mapped = records
+      .filter((r) => shouldIncludeRecord(r, zone.name))
+      .map((r) => mapRecord(r, zone.name));
+    res.status(200).json(mapped);
+  } catch (err) {
+    console.warn(`[technitium] GET records for ${site.domain} failed, falling back to mock:`, (err as Error).message);
+    res.setHeader('x-data-source', 'mock');
+    res.status(200).json(site.dnsRecords);
+  }
 });
 
-// ── POST /api/sites/:slug/dns — add a DNS record (stub) ──────────────────────
-// TODO: replace with Technitium API call
-// POST http://<technitium-host>:5380/api/zones/records/add?token=<token>
-router.post('/:slug/dns', (req: Request, res: Response) => {
+// ── POST /api/sites/:slug/dns — add a DNS record ─────────────────────────────
+router.post('/:slug/dns', async (req: Request, res: Response) => {
   const site = getSite(req.params.slug);
   if (!site) {
     res.status(404).json({ error: 'Site not found' });
@@ -84,50 +105,104 @@ router.post('/:slug/dns', (req: Request, res: Response) => {
     res.status(400).json({ error: 'Missing required fields: type, name, value, ttl' });
     return;
   }
-  const created: DnsRecord = {
-    id: `r-${Date.now()}`,
-    type: body.type,
-    name: body.name,
-    value: body.value,
-    ttl: body.ttl,
-    ...(body.priority !== undefined ? { priority: body.priority } : {})
-  };
-  res.status(201).json(created);
+  const technitium = createTechnitiumClient();
+  if (!technitium) {
+    res.status(503).json({ error: 'DNS integration unavailable — TECHNITIUM_URL not configured' });
+    return;
+  }
+  try {
+    const record: DnsRecord = {
+      id: '',
+      type: body.type,
+      name: body.name,
+      value: body.value,
+      ttl: body.ttl,
+      ...(body.priority !== undefined ? { priority: body.priority } : {}),
+    };
+    // Build full domain: name '@' means apex (site.domain), otherwise prepend subdomain
+    const domain = record.name === '@' ? site.domain : `${record.name}.${site.domain}`;
+    const params = buildAddParams(domain, record);
+    const raw = await technitium.addRecord(domain, params);
+    const { zone } = await technitium.getRecords(site.domain);
+    res.status(201).json(mapRecord(raw, zone.name));
+  } catch (err) {
+    console.warn(`[technitium] POST add record for ${site.domain} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to add DNS record via Technitium' });
+  }
 });
 
-// ── PUT /api/sites/:slug/dns/:id — update a DNS record (stub) ────────────────
-// TODO: replace with Technitium API call
-// POST http://<technitium-host>:5380/api/zones/records/update?token=<token>
-router.put('/:slug/dns/:id', (req: Request, res: Response) => {
+// ── PUT /api/sites/:slug/dns/:id — update a DNS record ───────────────────────
+router.put('/:slug/dns/:id', async (req: Request, res: Response) => {
   const site = getSite(req.params.slug);
   if (!site) {
     res.status(404).json({ error: 'Site not found' });
     return;
   }
-  const existing = site.dnsRecords.find((r) => r.id === req.params.id);
-  if (!existing) {
-    res.status(404).json({ error: 'DNS record not found' });
+  const technitium = createTechnitiumClient();
+  if (!technitium) {
+    res.status(503).json({ error: 'DNS integration unavailable — TECHNITIUM_URL not configured' });
     return;
   }
-  const updated: DnsRecord = { ...existing, ...(req.body as Partial<DnsRecord>), id: existing.id };
-  res.status(200).json(updated);
+  let identity: { domain: string; type: string; value: string };
+  try {
+    identity = decodeId(req.params.id);
+  } catch {
+    res.status(400).json({ error: 'Invalid record ID' });
+    return;
+  }
+  try {
+    const existing: DnsRecord = {
+      id: req.params.id,
+      type: identity.type as DnsRecord['type'],
+      name: identity.domain,
+      value: identity.value,
+      ttl: 3600,
+    };
+    const updates = req.body as Partial<DnsRecord>;
+    const params = buildUpdateParams(identity.domain, existing, updates);
+    const raw = await technitium.updateRecord(identity.domain, params);
+    const { zone } = await technitium.getRecords(site.domain);
+    res.status(200).json(mapRecord(raw, zone.name));
+  } catch (err) {
+    console.warn(`[technitium] PUT update record ${req.params.id} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to update DNS record via Technitium' });
+  }
 });
 
-// ── DELETE /api/sites/:slug/dns/:id — delete a DNS record (stub) ─────────────
-// TODO: replace with Technitium API call
-// GET http://<technitium-host>:5380/api/zones/records/delete?token=<token>&domain=<domain>&type=<type>&value=<value>
-router.delete('/:slug/dns/:id', (req: Request, res: Response) => {
+// ── DELETE /api/sites/:slug/dns/:id — delete a DNS record ────────────────────
+router.delete('/:slug/dns/:id', async (req: Request, res: Response) => {
   const site = getSite(req.params.slug);
   if (!site) {
     res.status(404).json({ error: 'Site not found' });
     return;
   }
-  const existing = site.dnsRecords.find((r) => r.id === req.params.id);
-  if (!existing) {
-    res.status(404).json({ error: 'DNS record not found' });
+  const technitium = createTechnitiumClient();
+  if (!technitium) {
+    res.status(503).json({ error: 'DNS integration unavailable — TECHNITIUM_URL not configured' });
     return;
   }
-  res.status(204).send();
+  let identity: { domain: string; type: string; value: string };
+  try {
+    identity = decodeId(req.params.id);
+  } catch {
+    res.status(400).json({ error: 'Invalid record ID' });
+    return;
+  }
+  try {
+    const record: DnsRecord = {
+      id: req.params.id,
+      type: identity.type as DnsRecord['type'],
+      name: identity.domain,
+      value: identity.value,
+      ttl: 0,
+    };
+    const params = buildDeleteParams(identity.domain, record);
+    await technitium.deleteRecord(identity.domain, params);
+    res.status(204).send();
+  } catch (err) {
+    console.warn(`[technitium] DELETE record ${req.params.id} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to delete DNS record via Technitium' });
+  }
 });
 
 // ── GET /api/sites/:slug/deployments — deployment history ────────────────────

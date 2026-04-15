@@ -33,6 +33,12 @@ app.listen(PORT, () => {
   } else {
     console.log('[coolify] No COOLIFY_API_URL set — running in mock data mode');
   }
+  const technitiumUrl = process.env.TECHNITIUM_URL;
+  if (technitiumUrl) {
+    console.log(`[technitium] Integration active — base URL: ${technitiumUrl}`);
+  } else {
+    console.log('[technitium] No TECHNITIUM_URL set — DNS in mock mode');
+  }
 });
 
 export default app;
