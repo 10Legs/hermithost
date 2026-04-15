@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { PageData } from './$types';
 	import { formatRelativeTime, formatDuration } from '$lib/data';
-	import type { DnsRecord, Deploy } from '$lib/types';
+	import type { DnsRecord, Deploy, Site } from '$lib/types';
 
 	export let data: PageData;
 
@@ -15,6 +15,75 @@
 	type DeployState = 'idle' | 'loading' | 'success' | 'error' | 'unavailable';
 	let deployState: DeployState = 'idle';
 	let deployMessage: string = '';
+
+	// Refresh checks state
+	let refreshState: 'idle' | 'loading' = 'idle';
+
+	async function refreshChecks(): Promise<void> {
+		refreshState = 'loading';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}`);
+			if (res.ok) {
+				const fresh: Site = await res.json();
+				data = { ...data, site: fresh };
+			}
+		} catch {
+			// silently fail — status stays as-is
+		} finally {
+			refreshState = 'idle';
+		}
+	}
+
+	// Settings form state
+	let settingsDomain = site.domain;
+	let settingsRepo = site.repository;
+	let settingsServer = site.server;
+	let settingsDesc = site.description;
+
+	$: {
+		// Keep settings fields in sync when site changes (e.g. after refresh)
+		settingsDomain = site.domain;
+		settingsRepo = site.repository;
+		settingsServer = site.server;
+		settingsDesc = site.description;
+	}
+
+	type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+	let saveState: SaveState = 'idle';
+	let saveMessage = '';
+
+	async function saveSettings(): Promise<void> {
+		saveState = 'saving';
+		saveMessage = '';
+		const payload: Record<string, string> = {};
+		if (settingsRepo !== site.repository) payload.repository = settingsRepo;
+		if (settingsServer !== site.server) payload.server = settingsServer;
+		if (settingsDesc !== site.description) payload.description = settingsDesc;
+
+		try {
+			const res = await fetch(`/api/sites/${site.slug}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				saveState = 'error';
+				saveMessage = body.error ?? `Save failed (${res.status})`;
+				setTimeout(() => { saveState = 'idle'; saveMessage = ''; }, 6000);
+				return;
+			}
+			const updated: Site = await res.json();
+			data = { ...data, site: updated };
+			saveState = 'saved';
+			saveMessage = 'Saved';
+			setTimeout(() => { saveState = 'idle'; saveMessage = ''; }, 3000);
+		} catch {
+			saveState = 'error';
+			saveMessage = 'Network error — could not save';
+			setTimeout(() => { saveState = 'idle'; saveMessage = ''; }, 6000);
+		}
+	}
 
 	async function triggerDeploy(): Promise<void> {
 		deployState = 'loading';
@@ -118,7 +187,18 @@
 			</div>
 		</div>
 		<div class="header-actions">
-			<button class="btn btn-ghost">Refresh checks</button>
+			<button
+				class="btn btn-ghost"
+				class:btn-loading={refreshState === 'loading'}
+				disabled={refreshState === 'loading'}
+				on:click={refreshChecks}
+			>
+				{#if refreshState === 'loading'}
+					<span class="spinner" aria-hidden="true"></span>Refreshing…
+				{:else}
+					Refresh checks
+				{/if}
+			</button>
 			<div class="deploy-wrapper">
 				<button
 					class="btn btn-primary"
@@ -429,22 +509,35 @@
 					<div class="settings-form">
 						<div class="form-field">
 							<label for="cfg-domain">Domain</label>
-							<input id="cfg-domain" value={site.domain} class="input mono" readonly />
+							<input id="cfg-domain" bind:value={settingsDomain} class="input mono" readonly />
 						</div>
 						<div class="form-field">
 							<label for="cfg-repo">Repository</label>
-							<input id="cfg-repo" value={site.repository} class="input mono" />
+							<input id="cfg-repo" bind:value={settingsRepo} class="input mono" />
 						</div>
 						<div class="form-field">
 							<label for="cfg-server">Server</label>
-							<input id="cfg-server" value={site.server} class="input mono" />
+							<input id="cfg-server" bind:value={settingsServer} class="input mono" />
 						</div>
 						<div class="form-field">
 							<label for="cfg-desc">Description</label>
-							<input id="cfg-desc" value={site.description} class="input" />
+							<input id="cfg-desc" bind:value={settingsDesc} class="input" />
 						</div>
 						<div class="form-actions">
-							<button class="btn btn-primary btn-sm">Save Changes</button>
+							<button
+								class="btn btn-primary btn-sm"
+								disabled={saveState === 'saving'}
+								on:click={saveSettings}
+							>
+								{saveState === 'saving' ? 'Saving…' : 'Save Changes'}
+							</button>
+							{#if saveMessage}
+								<span
+									class="save-feedback"
+									class:save-feedback-success={saveState === 'saved'}
+									class:save-feedback-error={saveState === 'error'}
+								>{saveMessage}</span>
+							{/if}
 						</div>
 					</div>
 				</div>
@@ -1234,5 +1327,35 @@
 
 	.deploy-status-unavailable {
 		color: var(--accent-amber);
+	}
+
+	/* Spinner */
+	.spinner {
+		display: inline-block;
+		width: 12px;
+		height: 12px;
+		border: 2px solid var(--border-bright);
+		border-top-color: var(--text-secondary);
+		border-radius: 50%;
+		animation: spin 0.6s linear infinite;
+		flex-shrink: 0;
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
+	}
+
+	/* Save feedback */
+	.save-feedback {
+		font-size: 12px;
+		font-weight: 500;
+	}
+
+	.save-feedback-success {
+		color: var(--accent-teal);
+	}
+
+	.save-feedback-error {
+		color: var(--danger);
 	}
 </style>

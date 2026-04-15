@@ -1,10 +1,119 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { invalidateAll } from '$app/navigation';
 	import { formatRelativeTime } from '$lib/data';
 	import type { PageData } from './$types';
-	import type { Site } from '$lib/types';
+	import type { Site, SiteStatus } from '$lib/types';
 
 	export let data: PageData;
 	$: sites = data.sites;
+
+	// ── Add Site Modal ─────────────────────────────────────────────────────────
+	let showAddSite = false;
+	let addName = '';
+	let addDomain = '';
+	let addGitRepo = '';
+	let addGitBranch = 'main';
+	type AddState = 'idle' | 'loading' | 'error';
+	let addState: AddState = 'idle';
+	let addError = '';
+	let addNameError = '';
+	let addDomainError = '';
+
+	function openAddSite() {
+		addName = '';
+		addDomain = '';
+		addGitRepo = '';
+		addGitBranch = 'main';
+		addState = 'idle';
+		addError = '';
+		addNameError = '';
+		addDomainError = '';
+		showAddSite = true;
+	}
+
+	function closeAddSite() {
+		if (addState === 'loading') return;
+		showAddSite = false;
+	}
+
+	function handleAddKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') closeAddSite();
+	}
+
+	async function submitAddSite() {
+		addNameError = '';
+		addDomainError = '';
+		addError = '';
+		let valid = true;
+		if (!addName.trim()) { addNameError = 'Name is required'; valid = false; }
+		if (!addDomain.trim()) { addDomainError = 'Domain is required'; valid = false; }
+		if (!valid) return;
+
+		addState = 'loading';
+		try {
+			const res = await fetch('/api/sites', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					name: addName.trim(),
+					domain: addDomain.trim(),
+					gitRepo: addGitRepo.trim(),
+					gitBranch: addGitBranch.trim() || 'main'
+				})
+			});
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				addState = 'error';
+				addError = body.error ?? `Failed to add site (${res.status})`;
+				return;
+			}
+			showAddSite = false;
+			await invalidateAll();
+		} catch {
+			addState = 'error';
+			addError = 'Network error — could not reach server';
+		}
+	}
+
+	// ── Sequential status probes ───────────────────────────────────────────────
+	// Overlay map: slug → partial Site data fetched after mount
+	let probeOverrides: Record<string, Partial<Pick<Site, 'http' | 'ssl' | 'dns' | 'overallStatus'>>> = {};
+	let probePending: Set<string> = new Set();
+
+	function effectiveSite(site: Site): Site {
+		const over = probeOverrides[site.slug];
+		if (!over) return site;
+		return { ...site, ...over };
+	}
+
+	onMount(async () => {
+		const slugs = data.sites.map((s: Site) => s.slug);
+		for (const slug of slugs) {
+			probePending = new Set([...probePending, slug]);
+			try {
+				const res = await fetch(`/api/sites/${slug}`);
+				if (res.ok) {
+					const fresh: Site = await res.json();
+					probeOverrides = {
+						...probeOverrides,
+						[slug]: {
+							http: fresh.http,
+							ssl: fresh.ssl,
+							dns: fresh.dns,
+							overallStatus: fresh.overallStatus
+						}
+					};
+				}
+			} catch {
+				// best-effort probe — leave existing status in place
+			} finally {
+				const next = new Set(probePending);
+				next.delete(slug);
+				probePending = next;
+			}
+		}
+	});
 
 	function getStatusLabel(site: Site): string {
 		const labels: Record<string, string> = {
@@ -74,6 +183,8 @@
 	$: pendingSites = sites.filter(s => s.overallStatus === 'pending').length;
 </script>
 
+<svelte:window on:keydown={handleAddKeydown} />
+
 <div class="page">
 	<header class="page-header">
 		<div>
@@ -93,7 +204,7 @@
 				{/if}
 				<span class="stat-pill pill-success">{healthySites} healthy</span>
 			</div>
-			<button class="btn btn-primary">+ Add Site</button>
+			<button class="btn btn-primary" on:click={openAddSite}>+ Add Site</button>
 		</div>
 	</header>
 
@@ -111,11 +222,17 @@
 				</tr>
 			</thead>
 			<tbody>
-				{#each sites as site}
+				{#each sites as rawSite}
+					{@const site = effectiveSite(rawSite)}
+					{@const probing = probePending.has(rawSite.slug)}
 					<tr class="site-row" class:row-error={site.overallStatus === 'error'} class:row-warning={site.overallStatus === 'warning'}>
 						<td class="cell-site">
 							<div class="site-name-row">
-								<span class="status-dot status-{site.overallStatus}"></span>
+								{#if probing}
+									<span class="probe-spinner" title="Checking…" aria-label="Checking status"></span>
+								{:else}
+									<span class="status-dot status-{site.overallStatus}"></span>
+								{/if}
 								<div>
 									<a href="/sites/{site.slug}" class="site-domain">{site.domain}</a>
 									<div class="site-desc">{site.description}</div>
@@ -152,6 +269,80 @@
 		</table>
 	</div>
 </div>
+
+<!-- Add Site Modal -->
+{#if showAddSite}
+	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+	<div class="modal-backdrop" on:click={closeAddSite} role="presentation">
+		<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+		<div class="modal" on:click|stopPropagation role="dialog" aria-modal="true" aria-labelledby="add-site-title">
+			<div class="modal-header">
+				<h2 class="modal-title" id="add-site-title">Add Site</h2>
+				<button class="modal-close" on:click={closeAddSite} aria-label="Close">✕</button>
+			</div>
+			<div class="modal-body">
+				{#if addError}
+					<div class="form-error-banner">{addError}</div>
+				{/if}
+				<div class="form-field">
+					<label for="add-name">Name <span class="required">*</span></label>
+					<input
+						id="add-name"
+						bind:value={addName}
+						class="input"
+						class:input-error={addNameError}
+						placeholder="My Site"
+						disabled={addState === 'loading'}
+					/>
+					{#if addNameError}<span class="field-error">{addNameError}</span>{/if}
+				</div>
+				<div class="form-field">
+					<label for="add-domain">Domain <span class="required">*</span></label>
+					<input
+						id="add-domain"
+						bind:value={addDomain}
+						class="input mono"
+						class:input-error={addDomainError}
+						placeholder="example.com"
+						disabled={addState === 'loading'}
+					/>
+					{#if addDomainError}<span class="field-error">{addDomainError}</span>{/if}
+				</div>
+				<div class="form-field">
+					<label for="add-git-repo">Git Repo URL</label>
+					<input
+						id="add-git-repo"
+						bind:value={addGitRepo}
+						class="input mono"
+						placeholder="https://github.com/org/repo"
+						disabled={addState === 'loading'}
+					/>
+				</div>
+				<div class="form-field">
+					<label for="add-git-branch">Git Branch</label>
+					<input
+						id="add-git-branch"
+						bind:value={addGitBranch}
+						class="input mono"
+						placeholder="main"
+						disabled={addState === 'loading'}
+					/>
+				</div>
+			</div>
+			<div class="modal-footer">
+				<button class="btn btn-ghost" on:click={closeAddSite} disabled={addState === 'loading'}>Cancel</button>
+				<button
+					class="btn btn-primary"
+					class:btn-loading={addState === 'loading'}
+					disabled={addState === 'loading'}
+					on:click={submitAddSite}
+				>
+					{addState === 'loading' ? 'Adding…' : 'Add Site'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <style>
 	.page {
@@ -340,5 +531,153 @@
 	.cell-actions {
 		text-align: right;
 		width: 80px;
+	}
+
+	/* Probe spinner (replaces status-dot while probing) */
+	.probe-spinner {
+		display: inline-block;
+		width: 8px;
+		height: 8px;
+		border: 1.5px solid var(--border-bright);
+		border-top-color: var(--pending);
+		border-radius: 50%;
+		flex-shrink: 0;
+		margin-top: 4px;
+		animation: spin 0.7s linear infinite;
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
+	}
+
+	/* Add Site Modal */
+	.modal-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.7);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 100;
+		padding: 24px;
+	}
+
+	.modal {
+		background: var(--bg-surface);
+		border: 1px solid var(--border-bright);
+		border-radius: 10px;
+		width: 100%;
+		max-width: 480px;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+
+	.modal-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 16px 20px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.modal-title {
+		font-size: 15px;
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+
+	.modal-close {
+		background: none;
+		border: none;
+		color: var(--text-secondary);
+		font-size: 14px;
+		cursor: pointer;
+		padding: 4px;
+		line-height: 1;
+		transition: color 0.1s;
+	}
+
+	.modal-close:hover {
+		color: var(--text-primary);
+	}
+
+	.modal-body {
+		padding: 20px;
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+	}
+
+	.modal-footer {
+		padding: 14px 20px;
+		border-top: 1px solid var(--border);
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
+	}
+
+	.form-field {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+	}
+
+	label {
+		font-size: 11px;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-secondary);
+	}
+
+	.required {
+		color: var(--danger);
+		text-transform: none;
+		letter-spacing: 0;
+	}
+
+	.input {
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-bright);
+		border-radius: 5px;
+		color: var(--text-primary);
+		font-size: 13px;
+		padding: 7px 10px;
+		outline: none;
+		transition: border-color 0.1s;
+		width: 100%;
+	}
+
+	.input:focus {
+		border-color: var(--accent-teal);
+	}
+
+	.input:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+
+	.input-error {
+		border-color: var(--danger);
+	}
+
+	.field-error {
+		font-size: 11px;
+		color: var(--danger);
+	}
+
+	.form-error-banner {
+		background: rgba(207, 92, 92, 0.12);
+		border: 1px solid rgba(207, 92, 92, 0.3);
+		border-radius: 5px;
+		padding: 8px 12px;
+		font-size: 12px;
+		color: var(--danger);
+	}
+
+	.btn-loading {
+		opacity: 0.7;
+		cursor: not-allowed;
 	}
 </style>
