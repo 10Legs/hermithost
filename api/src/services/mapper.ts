@@ -13,7 +13,7 @@ import type {
   HttpStatus,
   SslStatus,
   DnsStatus,
-} from '../data/mock';
+} from '../types';
 import type { ProbeResult } from './healthProbe';
 
 // ── Status mappers ────────────────────────────────────────────────────────────

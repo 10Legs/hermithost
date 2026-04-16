@@ -1,4 +1,4 @@
-import type { DnsRecord } from '../../data/mock';
+import type { DnsRecord } from '../../types';
 
 export interface DnsProvider {
   /** Fetch all records for a domain. */
