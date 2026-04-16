@@ -5,7 +5,7 @@ import * as tls from 'node:tls';
 import * as dns from 'node:dns';
 import { performance } from 'node:perf_hooks';
 
-import type { HttpStatus, SslStatus, DnsStatus } from '../data/mock';
+import type { HttpStatus, SslStatus, DnsStatus } from '../types';
 
 // ── HTTP probe ────────────────────────────────────────────────────────────────
 

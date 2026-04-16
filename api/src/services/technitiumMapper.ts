@@ -1,7 +1,7 @@
 // Maps Technitium raw API types → HermitHost internal DnsRecord type.
 
 import type { TechnitiumRecord } from './technitium';
-import type { DnsRecord, DnsRecordType } from '../data/mock';
+import type { DnsRecord, DnsRecordType } from '../types';
 
 // ── ID encoding ───────────────────────────────────────────────────────────────
 // Technitium has no record UUIDs; encode {domain, type, value} as base64url

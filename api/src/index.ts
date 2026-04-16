@@ -45,13 +45,13 @@ app.listen(PORT, () => {
   if (coolifyUrl) {
     console.log(`[coolify] Integration active — base URL: ${coolifyUrl}`);
   } else {
-    console.log('[coolify] No COOLIFY_API_URL set — running in mock data mode');
+    console.warn('[coolify] COOLIFY_API_URL not set — all Coolify routes will return 502');
   }
   const technitiumUrl = process.env.TECHNITIUM_URL;
   if (technitiumUrl) {
     console.log(`[technitium] Integration active — base URL: ${technitiumUrl}`);
   } else {
-    console.log('[technitium] No TECHNITIUM_URL set — DNS in mock mode');
+    console.warn('[technitium] TECHNITIUM_URL not set — DNS routes will fail at startup');
   }
 });
 

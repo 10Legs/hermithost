@@ -1,5 +1,5 @@
 import type { DnsProvider } from './DnsProvider';
-import type { DnsRecord } from '../../data/mock';
+import type { DnsRecord } from '../../types';
 import { TechnitiumClient } from '../technitium';
 import {
   mapRecord,
