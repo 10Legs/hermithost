@@ -440,7 +440,11 @@ router.patch('/:slug', async (req: Request, res: Response) => {
         : cleanBase;
     }
 
-    const app = await client.updateApplication(req.params.slug, payload);
+    let app = await client.updateApplication(req.params.slug, payload);
+
+    // Refetch to ensure git_repository is updated (especially for auth switches)
+    const refreshed = await client.getApplication(req.params.slug).catch(() => null);
+    if (refreshed) app = refreshed;
 
     // Post-update auth side effects (link/unlink SSH deploy key)
     if (switchingAuth) {
