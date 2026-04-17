@@ -1,0 +1,14 @@
+http:
+  routers:
+    site-smm1r5ot3dcm5xvz0kgr6eeu:
+      rule: "Host(`probablyfine.shallowfordroad.com`)"
+      entryPoints:
+        - http
+        - https
+      service: site-smm1r5ot3dcm5xvz0kgr6eeu
+
+  services:
+    site-smm1r5ot3dcm5xvz0kgr6eeu:
+      loadBalancer:
+        servers:
+          - url: "http://smm1r5ot3dcm5xvz0kgr6eeu-041630115142:3000"
