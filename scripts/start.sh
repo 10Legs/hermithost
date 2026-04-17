@@ -4,8 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
-PORT=5113
-API_PORT=3013
+PORT="${TRAEFIK_HTTP_PORT:-8080}"
 LOG_DIR="$ROOT/logs"
 export DOCKER_HOST=unix:///Users/rdemeritt/.docker/run/docker.sock
 
@@ -36,25 +35,9 @@ for i in $(seq 1 60); do
   sleep 0.5
 done
 
-# Wait for API port
-echo "   Waiting for port $API_PORT..."
-for i in $(seq 1 60); do
-  if nc -z 127.0.0.1 "$API_PORT" 2>/dev/null; then
-    echo "   API ready"
-    break
-  fi
-  if [[ $i -eq 60 ]]; then
-    echo "   API did not become ready. Check logs:"
-    echo "   docker compose logs api"
-    exit 1
-  fi
-  sleep 0.5
-done
-
 echo ""
 echo "   hermithost fully running"
 echo "   Dashboard  ->  http://localhost:${PORT}"
-echo "   API        ->  http://localhost:${API_PORT}"
 echo ""
 echo "   Logs:   docker compose logs -f"
 echo "   Stop:   bash $SCRIPT_DIR/stop.sh"

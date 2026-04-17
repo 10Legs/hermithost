@@ -25,6 +25,9 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json ./package.json
 RUN npm install --omit=dev
 
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 EXPOSE 3001
 
-CMD ["node", "dist/index.js"]
+ENTRYPOINT ["/entrypoint.sh"]

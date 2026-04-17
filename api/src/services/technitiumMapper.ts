@@ -48,7 +48,7 @@ function extractValue(raw: TechnitiumRecord): string {
     case 'AAAA':
       return r.ipAddress ?? '';
     case 'CNAME':
-      return r.cName ?? '';
+      return r.cname ?? '';
     case 'MX':
       return r.exchange ?? '';
     case 'TXT':

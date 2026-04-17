@@ -39,26 +39,49 @@ export interface CoolifyDeploymentQueue {
 }
 
 export interface CoolifyTriggerDeployResponse {
-  message: string;
-  deployment_uuid: string;
-  status: string;
+  deployments: Array<{
+    message: string;
+    resource_uuid: string;
+    deployment_uuid: string;
+  }>;
 }
 
 export interface CoolifyCreateApplicationPayload {
+  type: 'public';
   name: string;
   description?: string;
   fqdn?: string;
   git_repository: string;
   git_branch: string;
-  build_pack?: string;
+  build_pack: string;
+  ports_exposes: string;
   server_uuid: string;
   destination_uuid: string;
+  project_uuid: string;
+  environment_name: string;
+  instant_deploy?: boolean;
+  private_key_uuid?: string;
+}
+
+export interface CoolifyServer {
+  uuid: string;
+  name: string;
+  ip: string;
+  is_reachable: boolean;
+  is_usable: boolean;
+}
+
+export interface CoolifyProject {
+  uuid: string;
+  name: string;
+  environments: Array<{ name: string; uuid: string }>;
 }
 
 export interface CoolifyUpdateApplicationPayload {
   name?: string;
   description?: string;
-  fqdn?: string;
+  domains?: string;  // sets fqdn — Coolify PATCH uses 'domains', not 'fqdn'
+  force_domain_override?: boolean;
   git_repository?: string;
   git_branch?: string;
   build_pack?: string;
@@ -98,7 +121,8 @@ export class CoolifyClient {
   async listDeployments(uuid: string, limit = 10): Promise<CoolifyDeploymentQueue[]> {
     const url = `${this.baseUrl}/deployments/applications/${uuid}?limit=${limit}`;
     const res = await fetch(url, { headers: this.headers });
-    return handleResponse<CoolifyDeploymentQueue[]>(res, `GET /deployments/applications/${uuid}`);
+    const data = await handleResponse<{ deployments: CoolifyDeploymentQueue[] } | CoolifyDeploymentQueue[]>(res, `GET /deployments/applications/${uuid}`);
+    return Array.isArray(data) ? data : (data as { deployments: CoolifyDeploymentQueue[] }).deployments ?? [];
   }
 
   async triggerDeploy(uuid: string): Promise<CoolifyTriggerDeployResponse> {
@@ -112,13 +136,40 @@ export class CoolifyClient {
     return handleResponse<CoolifyDeploymentQueue>(res, `GET /deployments/${deploymentUuid}`);
   }
 
+  async getServers(): Promise<CoolifyServer[]> {
+    const res = await fetch(`${this.baseUrl}/servers`, { headers: this.headers });
+    return handleResponse<CoolifyServer[]>(res, 'GET /servers');
+  }
+
+  async getProjects(): Promise<CoolifyProject[]> {
+    const res = await fetch(`${this.baseUrl}/projects`, { headers: this.headers });
+    return handleResponse<CoolifyProject[]>(res, 'GET /projects');
+  }
+
+  async createProject(name: string): Promise<CoolifyProject> {
+    const res = await fetch(`${this.baseUrl}/projects`, {
+      method: 'POST',
+      headers: this.headers,
+      body: JSON.stringify({ name }),
+    });
+    return handleResponse<CoolifyProject>(res, 'POST /projects');
+  }
+
   async createApplication(payload: CoolifyCreateApplicationPayload): Promise<CoolifyApplication> {
-    const res = await fetch(`${this.baseUrl}/applications`, {
+    const res = await fetch(`${this.baseUrl}/applications/public`, {
       method: 'POST',
       headers: this.headers,
       body: JSON.stringify(payload),
     });
-    return handleResponse<CoolifyApplication>(res, 'POST /applications');
+    return handleResponse<CoolifyApplication>(res, 'POST /applications/public');
+  }
+
+  async deployApplication(uuid: string): Promise<CoolifyTriggerDeployResponse> {
+    const res = await fetch(`${this.baseUrl}/applications/${uuid}/start`, {
+      method: 'POST',
+      headers: this.headers,
+    });
+    return handleResponse<CoolifyTriggerDeployResponse>(res, `POST /applications/${uuid}/start`);
   }
 
   async deleteApplication(uuid: string): Promise<void> {
@@ -144,7 +195,14 @@ export class CoolifyClient {
 
 export function createCoolifyClient(): CoolifyClient | null {
   const baseUrl = process.env.COOLIFY_API_URL;
-  const token = process.env.COOLIFY_API_TOKEN;
+  // Prefer token file — setup script always refreshes it on boot, so it's always valid
+  let token: string | undefined;
+  try {
+    const { readFileSync } = require('fs') as typeof import('fs');
+    token = readFileSync('/coolify-api-token/token', 'utf8').trim() || undefined;
+  } catch { /* file not present */ }
+  // Fall back to env var
+  if (!token) token = process.env.COOLIFY_API_TOKEN;
   if (!baseUrl || !token) return null;
   return new CoolifyClient(baseUrl, token);
 }

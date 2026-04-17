@@ -3,6 +3,7 @@ import cors from 'cors';
 import healthRouter from './routes/health';
 import sitesRouter from './routes/sites';
 import hostedRouter from './routes/hosted';
+import dnsRouter from './routes/dns';
 import { getDeployedSite } from './services/githubDeploy';
 
 const app = express();
@@ -16,6 +17,7 @@ app.use(express.json());
 app.use('/api/health', healthRouter);
 app.use('/api/sites', sitesRouter);
 app.use('/api/hosted', hostedRouter);
+app.use('/api/dns', dnsRouter);
 
 // Dynamic static file serving for deployed sites
 // GET /hosted/:slug/* → serves from the site's detected serveDir

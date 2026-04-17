@@ -17,15 +17,8 @@ export const load: PageLoad = async ({ fetch, params }) => {
 		fetch(`/api/sites/${params.slug}/deployments`)
 	]);
 
-	if (!dnsRes.ok) {
-		throw new Error(`Failed to load DNS records: ${dnsRes.status}`);
-	}
-	if (!deploysRes.ok) {
-		throw new Error(`Failed to load deployments: ${deploysRes.status}`);
-	}
-
-	const dns: DnsRecord[] = await dnsRes.json();
-	const deploys: Deploy[] = await deploysRes.json();
+	const dns: DnsRecord[] = dnsRes.ok ? await dnsRes.json() : [];
+	const deploys: Deploy[] = deploysRes.ok ? await deploysRes.json() : [];
 
 	return { site, dns, deploys };
 };
