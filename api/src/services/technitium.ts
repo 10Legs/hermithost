@@ -14,7 +14,7 @@ export interface TechnitiumRData {
   // A / AAAA
   ipAddress?: string;
   // CNAME
-  cName?: string;
+  cname?: string;
   // MX
   preference?: number;
   exchange?: string;
@@ -35,6 +35,17 @@ export interface TechnitiumRecord {
   type: string;
   ttl: number;
   rData: TechnitiumRData;
+}
+
+export interface TechnitiumZoneListResponse {
+  response: { zones: TechnitiumZone[] };
+  status: string;
+  errorMessage?: string;
+}
+
+export interface TechnitiumZoneResponse {
+  status: string;
+  errorMessage?: string;
 }
 
 export interface TechnitiumGetRecordsResponse {
@@ -74,8 +85,8 @@ async function handleResponse<T extends { status: string; errorMessage?: string 
     throw new Error(`Technitium ${context} failed: HTTP ${res.status} — ${body}`);
   }
   const data = (await res.json()) as T;
-  if (data.status === 'error') {
-    throw new Error(`Technitium ${context} error: ${data.errorMessage ?? 'unknown error'}`);
+  if (data.status !== 'ok') {
+    throw new Error(`Technitium ${context} error: ${data.errorMessage ?? data.status}`);
   }
   return data;
 }
@@ -104,12 +115,12 @@ export class TechnitiumClient {
 
   async getRecords(domain: string): Promise<TechnitiumGetRecordsResult> {
     const body = this.buildParams({ domain, listZone: 'true' });
-    const res = await fetch(`${this.baseUrl}/api/zone/getRecords`, {
+    const res = await fetch(`${this.baseUrl}/api/zones/records/get`, {
       method: 'POST',
       headers: this.postHeaders,
       body,
     });
-    const data = await handleResponse<TechnitiumGetRecordsResponse>(res, 'POST /api/zone/getRecords');
+    const data = await handleResponse<TechnitiumGetRecordsResponse>(res, 'POST /api/zones/records/get');
     return {
       zone: data.response.zone,
       records: data.response.records,
@@ -153,6 +164,37 @@ export class TechnitiumClient {
     return updated;
   }
 
+  async listZones(): Promise<TechnitiumZone[]> {
+    const body = this.buildParams({});
+    const res = await fetch(`${this.baseUrl}/api/zones/list`, {
+      method: 'POST',
+      headers: this.postHeaders,
+      body,
+    });
+    const data = await handleResponse<TechnitiumZoneListResponse>(res, 'POST /api/zones/list');
+    return data.response.zones;
+  }
+
+  async createZone(name: string, type = 'Primary'): Promise<void> {
+    const body = this.buildParams({ zone: name, type });
+    const res = await fetch(`${this.baseUrl}/api/zones/create`, {
+      method: 'POST',
+      headers: this.postHeaders,
+      body,
+    });
+    await handleResponse<TechnitiumZoneResponse>(res, 'POST /api/zones/create');
+  }
+
+  async deleteZone(name: string): Promise<void> {
+    const body = this.buildParams({ zone: name });
+    const res = await fetch(`${this.baseUrl}/api/zones/delete`, {
+      method: 'POST',
+      headers: this.postHeaders,
+      body,
+    });
+    await handleResponse<TechnitiumZoneResponse>(res, 'POST /api/zones/delete');
+  }
+
   async deleteRecord(
     domain: string,
     params: URLSearchParams
@@ -173,7 +215,14 @@ export function createTechnitiumClient(
   token?: string
 ): TechnitiumClient | null {
   const url = baseUrl ?? process.env.TECHNITIUM_URL;
-  const tok = token ?? process.env.TECHNITIUM_TOKEN;
+  let tok = token ?? process.env.TECHNITIUM_TOKEN;
+  // Fall back to token file — setup script refreshes it on every boot
+  if (!tok) {
+    try {
+      const { readFileSync } = require('fs') as typeof import('fs');
+      tok = readFileSync('/coolify-api-token/technitium_token', 'utf8').trim();
+    } catch { /* file not present */ }
+  }
   if (!url || !tok) return null;
   return new TechnitiumClient(url, tok);
 }

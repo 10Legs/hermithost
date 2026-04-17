@@ -58,8 +58,8 @@
 				body: JSON.stringify({
 					name: addName.trim(),
 					domain: addDomain.trim(),
-					gitRepo: addGitRepo.trim(),
-					gitBranch: addGitBranch.trim() || 'main'
+					git_repository: addGitRepo.trim(),
+					git_branch: addGitBranch.trim() || 'main'
 				})
 			});
 			if (!res.ok) {

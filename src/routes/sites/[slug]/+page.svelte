@@ -35,10 +35,10 @@
 	}
 
 	// Settings form state
-	let settingsDomain = site.domain;
-	let settingsRepo = site.repository;
-	let settingsServer = site.server;
-	let settingsDesc = site.description;
+	let settingsDomain = data.site.domain;
+	let settingsRepo = data.site.repository;
+	let settingsServer = data.site.server;
+	let settingsDesc = data.site.description;
 
 	$: {
 		// Keep settings fields in sync when site changes (e.g. after refresh)
@@ -118,11 +118,119 @@
 		}
 	}
 	let logModal: Deploy | null = null;
+	let showDeleteSiteConfirm = false;
+	let deleteSiteState: 'idle' | 'deleting' | 'error' = 'idle';
+	let deleteSiteError = '';
+
+	async function deleteSite(): Promise<void> {
+		deleteSiteState = 'deleting';
+		deleteSiteError = '';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}`, { method: 'DELETE' });
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				deleteSiteError = body.error ?? `Delete failed (${res.status})`;
+				deleteSiteState = 'error';
+				return;
+			}
+			window.location.href = '/';
+		} catch {
+			deleteSiteError = 'Network error — could not delete site';
+			deleteSiteState = 'error';
+		}
+	}
+
 	let showDeleteDnsConfirm: string | null = null; // stores the record ID pending confirmation, null when no dialog open
 	let showAddDns = false;
 
 	// New DNS record form state
 	let newRecord = { type: 'A', name: '', value: '', ttl: 3600, priority: '' };
+
+	// DNS add/edit state
+	let editingRecord: DnsRecord | null = null;
+	let dnsFormSaving = false;
+	let dnsFormError = '';
+	let deletingRecordId: string | null = null;
+	let deleteError: string | null = null;
+
+	function resetDnsForm() {
+		newRecord = { type: 'A', name: '', value: '', ttl: 3600, priority: '' };
+		editingRecord = null;
+		dnsFormError = '';
+		showAddDns = false;
+	}
+
+	async function addRecord(): Promise<void> {
+		dnsFormSaving = true;
+		dnsFormError = '';
+		const isEditing = editingRecord !== null;
+		const url = isEditing
+			? `/api/sites/${site.slug}/dns/${editingRecord!.id}`
+			: `/api/sites/${site.slug}/dns`;
+		const method = isEditing ? 'PUT' : 'POST';
+		const payload: Record<string, string | number | undefined> = {
+			type: newRecord.type,
+			name: newRecord.name,
+			value: newRecord.value,
+			ttl: Number(newRecord.ttl),
+			priority: newRecord.priority !== '' ? Number(newRecord.priority) : undefined
+		};
+		try {
+			const res = await fetch(url, {
+				method,
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				dnsFormError = body.error ?? `Failed to save record (${res.status})`;
+				dnsFormSaving = false;
+				return;
+			}
+			const saved: DnsRecord = await res.json();
+			if (isEditing) {
+				dns = dns.map((r) => (r.id === saved.id ? saved : r));
+			} else {
+				dns = [...dns, saved];
+			}
+			resetDnsForm();
+		} catch {
+			dnsFormError = 'Network error — could not save record';
+		} finally {
+			dnsFormSaving = false;
+		}
+	}
+
+	function startEditRecord(record: DnsRecord): void {
+		editingRecord = record;
+		newRecord = {
+			type: record.type,
+			name: record.name,
+			value: record.value,
+			ttl: record.ttl,
+			priority: record.priority !== undefined ? String(record.priority) : ''
+		};
+		showAddDns = true;
+	}
+
+	async function deleteRecord(id: string): Promise<void> {
+		deletingRecordId = id;
+		deleteError = null;
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/dns/${id}`, { method: 'DELETE' });
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				deleteError = body.error ?? `Delete failed (${res.status})`;
+				deletingRecordId = null;
+				return;
+			}
+			dns = dns.filter((r) => r.id !== id);
+			showDeleteDnsConfirm = null;
+		} catch {
+			deleteError = 'Network error — delete failed';
+			deletingRecordId = null;
+		}
+	}
 
 	function openLog(deploy: Deploy) {
 		logModal = deploy;
@@ -156,7 +264,9 @@
 		if (e.key === 'Escape') {
 			logModal = null;
 			showDeleteDnsConfirm = null;
+			showDeleteSiteConfirm = false;
 			showAddDns = false;
+			editingRecord = null;
 		}
 	}
 </script>
@@ -370,14 +480,18 @@
 					<h2 class="section-title">DNS Records</h2>
 					<p class="section-sub mono">{site.domain}</p>
 				</div>
-				<button class="btn btn-primary btn-sm" on:click={() => showAddDns = !showAddDns}>
+				<button
+					class="btn btn-primary btn-sm"
+					disabled={showAddDns && editingRecord !== null}
+					on:click={() => { if (showAddDns) { resetDnsForm(); } else { showAddDns = true; } }}
+				>
 					{showAddDns ? 'Cancel' : '+ Add Record'}
 				</button>
 			</div>
 
 			{#if showAddDns}
 				<div class="add-record-form">
-					<div class="form-title">New DNS Record</div>
+					<div class="form-title">{editingRecord ? 'Edit Record' : 'New DNS Record'}</div>
 					<div class="form-row">
 						<div class="form-field">
 							<label for="dns-type">Type</label>
@@ -390,6 +504,7 @@
 						<div class="form-field">
 							<label for="dns-name">Name</label>
 							<input id="dns-name" bind:value={newRecord.name} placeholder="@ or subdomain" class="input mono" />
+							<p class="dns-preview mono text-secondary">{newRecord.name === '@' || newRecord.name === '' ? site.domain : `${newRecord.name}.${site.domain}`}</p>
 						</div>
 						<div class="form-field form-field-wide">
 							<label for="dns-value">Value</label>
@@ -407,53 +522,69 @@
 						{/if}
 					</div>
 					<div class="form-actions">
-						<button class="btn btn-primary btn-sm">Save Record</button>
-						<button class="btn btn-ghost btn-sm" on:click={() => showAddDns = false}>Cancel</button>
+						<button class="btn btn-primary btn-sm" disabled={dnsFormSaving} on:click={addRecord}>
+							{dnsFormSaving ? 'Saving…' : editingRecord ? 'Update Record' : 'Save Record'}
+						</button>
+						<button class="btn btn-ghost btn-sm" on:click={resetDnsForm}>Cancel</button>
+						{#if dnsFormError}
+							<span class="text-danger">{dnsFormError}</span>
+						{/if}
 					</div>
 				</div>
 			{/if}
 
-			<div class="table-wrapper">
-				<table class="dns-table">
-					<thead>
-						<tr>
-							<th>Type</th>
-							<th>Name</th>
-							<th>Value</th>
-							<th>TTL</th>
-							<th>Priority</th>
-							<th></th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each dns as record}
+			{#if dns.length === 0 && !showAddDns}
+				<div class="dns-empty">
+					<p class="text-secondary">No DNS records yet.</p>
+					<button class="btn btn-ghost btn-sm" on:click={() => showAddDns = true}>+ Add first record</button>
+				</div>
+			{:else if dns.length > 0}
+				<div class="table-wrapper">
+					<table class="dns-table">
+						<thead>
 							<tr>
-								<td>
-									<span class="dns-type-badge dns-type-{record.type.toLowerCase()}">{record.type}</span>
-								</td>
-								<td class="mono">{record.name}</td>
-								<td class="mono dns-value">{record.value}</td>
-								<td class="mono text-secondary">{record.ttl}</td>
-								<td class="mono text-secondary">{record.priority ?? '—'}</td>
-								<td class="cell-actions">
-									{#if showDeleteDnsConfirm === record.id}
-										<div class="delete-confirm">
-											<span class="text-danger">Delete {record.type} {record.name}?</span>
-											<button class="btn btn-danger btn-xs">Confirm delete</button>
-											<button class="btn btn-ghost btn-xs" on:click={() => showDeleteDnsConfirm = null}>Cancel</button>
-										</div>
-									{:else}
-										<div class="row-actions">
-											<button class="btn btn-ghost btn-xs">Edit</button>
-											<button class="btn btn-ghost btn-xs text-danger" on:click={() => showDeleteDnsConfirm = record.id}>Delete</button>
-										</div>
-									{/if}
-								</td>
+								<th>Type</th>
+								<th>Name</th>
+								<th>Value</th>
+								<th>TTL</th>
+								<th>Priority</th>
+								<th></th>
 							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
+						</thead>
+						<tbody>
+							{#each dns as record}
+								<tr style={deletingRecordId === record.id ? 'opacity: 0.4' : ''}>
+									<td>
+										<span class="dns-type-badge dns-type-{record.type.toLowerCase()}">{record.type}</span>
+									</td>
+									<td class="mono">{record.name}</td>
+									<td class="mono dns-value">{record.value}</td>
+									<td class="mono text-secondary">{record.ttl}</td>
+									<td class="mono text-secondary">{record.priority ?? '—'}</td>
+									<td class="cell-actions">
+										{#if deletingRecordId === record.id}
+											<span class="text-secondary">Deleting…</span>
+										{:else if deleteError && showDeleteDnsConfirm === record.id}
+											<span class="text-danger">{deleteError} <button class="btn btn-ghost btn-xs" on:click={() => deleteRecord(record.id)}>Retry?</button></span>
+										{:else if showDeleteDnsConfirm === record.id}
+											<div class="delete-confirm">
+												<span class="text-danger">Delete {record.type} {record.name}?</span>
+												<button class="btn btn-danger btn-xs" on:click={() => deleteRecord(record.id)}>Confirm delete</button>
+												<button class="btn btn-ghost btn-xs" on:click={() => { showDeleteDnsConfirm = null; deleteError = null; }}>Cancel</button>
+											</div>
+										{:else}
+											<div class="row-actions">
+												<button class="btn btn-ghost btn-xs" on:click={() => startEditRecord(record)}>Edit</button>
+												<button class="btn btn-ghost btn-xs text-danger" on:click={() => { showDeleteDnsConfirm = record.id; deleteError = null; }}>Delete</button>
+											</div>
+										{/if}
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{/if}
 		</div>
 	{/if}
 
@@ -465,7 +596,12 @@
 					<h2 class="section-title">Deployments</h2>
 					<p class="section-sub">{deploys.length} deploy{deploys.length !== 1 ? 's' : ''}</p>
 				</div>
-				<button class="btn btn-primary btn-sm">Deploy HEAD</button>
+				<button
+					class="btn btn-primary btn-sm"
+					class:btn-loading={deployState === 'loading'}
+					disabled={deployState === 'loading'}
+					on:click={triggerDeploy}
+				>{deployState === 'loading' ? 'Deploying…' : 'Deploy HEAD'}</button>
 			</div>
 
 			<div class="deploys-list">
@@ -549,7 +685,20 @@
 							<div class="danger-label">Remove site from HermitHost</div>
 							<div class="danger-desc text-secondary">Removes the site from this dashboard. Does not delete files from the server or DNS records.</div>
 						</div>
-						<button class="btn btn-danger-outline">Remove site…</button>
+						{#if !showDeleteSiteConfirm}
+							<button class="btn btn-danger-outline" on:click={() => { showDeleteSiteConfirm = true; deleteSiteError = ''; }}>Remove site…</button>
+						{:else}
+							<div class="delete-site-confirm">
+								<span class="danger-desc">Remove <strong class="mono">{site.domain}</strong>?</span>
+								<button
+									class="btn btn-danger btn-sm"
+									disabled={deleteSiteState === 'deleting'}
+									on:click={deleteSite}
+								>{deleteSiteState === 'deleting' ? 'Removing…' : 'Yes, remove'}</button>
+								<button class="btn btn-ghost btn-sm" on:click={() => { showDeleteSiteConfirm = false; deleteSiteError = ''; }}>Cancel</button>
+								{#if deleteSiteError}<span class="save-feedback save-feedback-error">{deleteSiteError}</span>{/if}
+							</div>
+						{/if}
 					</div>
 				</div>
 			</div>
@@ -1195,6 +1344,13 @@
 		gap: 16px;
 	}
 
+	.delete-site-confirm {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
 	.danger-label {
 		font-size: 13px;
 		font-weight: 500;
@@ -1357,5 +1513,20 @@
 
 	.save-feedback-error {
 		color: var(--danger);
+	}
+
+	/* DNS empty state */
+	.dns-empty {
+		text-align: center;
+		padding: 2rem;
+		border: 1px dashed var(--border);
+		border-radius: 6px;
+	}
+
+	/* DNS domain preview */
+	.dns-preview {
+		font-size: 0.75rem;
+		margin-top: 0.25rem;
+		margin-bottom: 0;
 	}
 </style>

@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { readFileSync } from 'fs';
 import { DnsRecord } from '../types';
 import {
   createCoolifyClient,
@@ -8,10 +9,79 @@ import {
 import { mapSite, mapDeploy } from '../services/mapper';
 import { probeSite } from '../services/healthProbe';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
+import { createTechnitiumClient } from '../services/technitium';
 
 const router = Router();
 
-const dnsProvider = createDnsProvider();
+// ── DNS auto-provisioning ─────────────────────────────────────────────────────
+// Creates a zone + A record for the given domain pointing at NS_HOSTNAME.
+// Non-fatal: logs warnings but never throws — site ops should not fail due to DNS.
+async function provisionDns(fqdn: string): Promise<void> {
+  const serverIp = process.env.NS_HOSTNAME;
+  if (!serverIp) {
+    console.warn('[dns-provision] NS_HOSTNAME not set — skipping DNS provisioning');
+    return;
+  }
+  // Strip protocol and trailing slashes to get bare domain
+  const domain = fqdn.replace(/^https?:\/\//, '').replace(/\/.*$/, '').trim();
+  if (!domain) return;
+
+  const client = createTechnitiumClient();
+  if (!client) {
+    console.warn('[dns-provision] Technitium not configured — skipping DNS provisioning');
+    return;
+  }
+
+  try {
+    await client.createZone(domain, 'Primary');
+    console.log(`[dns-provision] Zone created: ${domain}`);
+  } catch (err) {
+    // Zone may already exist — that's fine
+    const msg = (err as Error).message ?? '';
+    if (!msg.includes('already exists') && !msg.toLowerCase().includes('already exists')) {
+      console.warn(`[dns-provision] Zone create warning for ${domain}:`, msg);
+    }
+  }
+
+  try {
+    const params = new URLSearchParams();
+    params.set('type', 'A');
+    params.set('ttl', '3600');
+    params.set('ipAddress', serverIp);
+    await client.addRecord(domain, params);
+    console.log(`[dns-provision] A record created: ${domain} @ → ${serverIp}`);
+  } catch (err) {
+    console.warn(`[dns-provision] A record create warning for ${domain}:`, (err as Error).message);
+  }
+}
+
+// ── GitHub key linking ────────────────────────────────────────────────────────
+// Coolify's create API ignores private_key_uuid — link via DB instead.
+// Non-fatal: deployment will fail gracefully if key not linked.
+async function linkGithubKey(appUuid: string): Promise<void> {
+  try {
+    const { readFileSync } = require('fs') as typeof import('fs');
+    const keyUuid = readFileSync('/coolify-api-token/github_key_uuid', 'utf8').trim();
+    if (!keyUuid) return;
+    const { Client } = require('pg') as typeof import('pg');
+    const pg = new Client({
+      host: process.env.PGHOST ?? 'coolify-db',
+      port: Number(process.env.PGPORT ?? 5432),
+      database: process.env.PGDATABASE ?? 'coolify',
+      user: process.env.PGUSER ?? 'coolify',
+      password: process.env.PGPASSWORD,
+    });
+    await pg.connect();
+    await pg.query(
+      `UPDATE applications SET private_key_id = (SELECT id FROM private_keys WHERE uuid=$1 LIMIT 1) WHERE uuid=$2`,
+      [keyUuid, appUuid]
+    );
+    await pg.end();
+    console.log(`[github-key] Linked github-deploy key to app ${appUuid}`);
+  } catch (err) {
+    console.warn(`[github-key] Could not link key to app ${appUuid}:`, (err as Error).message);
+  }
+}
 
 // ── GET /api/sites — list all sites ──────────────────────────────────────────
 router.get('/', async (_req: Request, res: Response) => {
@@ -55,31 +125,91 @@ router.get('/:slug', async (req: Request, res: Response) => {
 });
 
 // ── POST /api/sites — create a new site ──────────────────────────────────────
-// Requires full Coolify payload: name, git_repository, git_branch, server_uuid, destination_uuid
+// Accepts: name, git_repository, git_branch, build_pack (default: nixpacks), port (default: 3000)
 router.post('/', async (req: Request, res: Response) => {
-  const body = req.body as Partial<CoolifyCreateApplicationPayload>;
-  if (!body.name || !body.git_repository || !body.git_branch || !body.server_uuid || !body.destination_uuid) {
+  const body = req.body as {
+    name?: string;
+    git_repository?: string;
+    git_branch?: string;
+    build_pack?: string;
+    port?: number | string;
+    description?: string;
+    fqdn?: string;
+    domain?: string;  // alias for fqdn accepted from frontend
+  };
+  if (!body.name || !body.git_repository || !body.git_branch) {
     res.status(400).json({
-      error: 'Missing required fields: name, git_repository, git_branch, server_uuid, destination_uuid',
+      error: 'Missing required fields: name, git_repository, git_branch',
     });
     return;
   }
   try {
     const client = createCoolifyClient()!;
+
+    // Auto-discover server_uuid
+    const servers = await client.getServers();
+    if (!servers.length) {
+      res.status(502).json({ error: 'No Coolify servers found' });
+      return;
+    }
+    const server_uuid = servers[0].uuid;
+
+    // Auto-discover destination_uuid from file written by coolify-setup.sh
+    let destination_uuid: string;
+    try {
+      destination_uuid = readFileSync('/coolify-api-token/destination_uuid', 'utf8').trim();
+    } catch {
+      res.status(500).json({ error: 'destination_uuid not available — ensure coolify-setup.sh has run' });
+      return;
+    }
+    if (!destination_uuid) {
+      res.status(500).json({ error: 'destination_uuid file is empty — ensure coolify-setup.sh has run' });
+      return;
+    }
+
+    // Auto-discover or create project
+    let projects = await client.getProjects();
+    let project_uuid: string;
+    if (projects.length > 0) {
+      project_uuid = projects[0].uuid;
+    } else {
+      const created = await client.createProject('hermithost-sites');
+      project_uuid = created.uuid;
+    }
+
     const payload: CoolifyCreateApplicationPayload = {
+      type: 'public',
       name: body.name,
       git_repository: body.git_repository,
       git_branch: body.git_branch,
-      server_uuid: body.server_uuid,
-      destination_uuid: body.destination_uuid,
+      build_pack: body.build_pack ?? 'nixpacks',
+      ports_exposes: String(body.port ?? 3000),
+      server_uuid,
+      destination_uuid,
+      project_uuid,
+      environment_name: 'production',
+      instant_deploy: false,
       ...(body.description !== undefined ? { description: body.description } : {}),
-      ...(body.fqdn !== undefined ? { fqdn: body.fqdn } : {}),
-      ...(body.build_pack !== undefined ? { build_pack: body.build_pack } : {}),
     };
-    const app = await client.createApplication(payload);
+    let app = await client.createApplication(payload);
+    await linkGithubKey(app.uuid);
+
+    // fqdn is not accepted at creation time — patch it immediately after using 'domains' field
+    const resolvedFqdn = body.fqdn ?? body.domain;
+    if (resolvedFqdn) {
+      // Coolify requires full URL format — add https:// if no protocol present
+      const coolifyDomain = /^https?:\/\//i.test(resolvedFqdn) ? resolvedFqdn : `https://${resolvedFqdn}`;
+      await client.updateApplication(app.uuid, { domains: coolifyDomain, force_domain_override: true }).catch((e: Error) => {
+        console.warn(`[coolify] domains patch failed for ${app.uuid}:`, e.message);
+      });
+      // Re-fetch to get full app with updated fqdn
+      const refreshed = await client.getApplication(app.uuid).catch(() => null);
+      if (refreshed) app = refreshed;
+      await provisionDns(resolvedFqdn);
+    }
     res.status(201).json(mapSite(app, []));
   } catch (err) {
-    console.error('[coolify] POST /applications failed:', (err as Error).message);
+    console.error('[coolify] POST /applications/public failed:', (err as Error).message);
     res.status(502).json({ error: 'Failed to create application via Coolify' });
   }
 });
@@ -103,6 +233,8 @@ router.delete('/:slug', async (req: Request, res: Response) => {
 // keeps the frontend decoupled from Coolify internals.
 router.patch('/:slug', async (req: Request, res: Response) => {
   const body = req.body as Partial<CoolifyUpdateApplicationPayload & {
+    fqdn?: string;    // alias — maps to domains
+    domain?: string;  // alias — maps to domains
     repository?: string;
     server?: string;
   }>;
@@ -115,13 +247,20 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     const payload: CoolifyUpdateApplicationPayload = {};
     if (body.name !== undefined) payload.name = body.name;
     if (body.description !== undefined) payload.description = body.description;
-    if (body.fqdn !== undefined) payload.fqdn = body.fqdn;
+    // fqdn/domain → 'domains' (Coolify PATCH field name); requires full URL with protocol
+    const incomingFqdn = (body as any).fqdn ?? (body as any).domain ?? body.domains;
+    if (incomingFqdn !== undefined) {
+      payload.domains = /^https?:\/\//i.test(incomingFqdn) ? incomingFqdn : `https://${incomingFqdn}`;
+    }
     // Accept frontend 'repository' field and translate to git_repository
-    if (body.repository !== undefined) payload.git_repository = body.repository;
+    if ((body as any).repository !== undefined) payload.git_repository = (body as any).repository;
     if (body.git_repository !== undefined) payload.git_repository = body.git_repository;
     if (body.git_branch !== undefined) payload.git_branch = body.git_branch;
     if (body.build_pack !== undefined) payload.build_pack = body.build_pack;
     const app = await client.updateApplication(req.params.slug, payload);
+    if (payload.domains) {
+      await provisionDns(payload.domains);
+    }
     res.status(200).json(mapSite(app, []));
   } catch (err) {
     console.error(`[coolify] PATCH /applications/${req.params.slug} failed:`, (err as Error).message);
@@ -141,10 +280,15 @@ router.get('/:slug/dns', async (req: Request, res: Response) => {
       res.status(422).json({ error: 'Site has no domain configured' });
       return;
     }
-    const records = await dnsProvider.getRecords(domain);
+    const records = await createDnsProvider().getRecords(domain);
     res.status(200).json(records);
   } catch (err) {
     if (err instanceof DnsOperationError) {
+      const msg = (err.originalCause as Error)?.message ?? '';
+      if (msg.includes('No such zone')) {
+        res.status(200).json([]);
+        return;
+      }
       console.warn('[dns] getRecords failed:', err.originalCause);
       res.status(500).json({ error: 'DNS operation failed' });
     } else {
@@ -171,7 +315,7 @@ router.post('/:slug/dns', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'Missing required fields: type, name, value, ttl' });
       return;
     }
-    const record = await dnsProvider.addRecord(domain, {
+    const record = await createDnsProvider().addRecord(domain, {
       type: body.type,
       name: body.name,
       value: body.value,
@@ -203,7 +347,7 @@ router.put('/:slug/dns/:id', async (req: Request, res: Response) => {
       return;
     }
     const updates = req.body as Partial<Omit<DnsRecord, 'id'>>;
-    const record = await dnsProvider.updateRecord(domain, req.params.id, updates);
+    const record = await createDnsProvider().updateRecord(domain, req.params.id, updates);
     res.status(200).json(record);
   } catch (err) {
     if (err instanceof DnsOperationError) {
@@ -228,7 +372,7 @@ router.delete('/:slug/dns/:id', async (req: Request, res: Response) => {
       res.status(422).json({ error: 'Site has no domain configured' });
       return;
     }
-    await dnsProvider.deleteRecord(domain, req.params.id);
+    await createDnsProvider().deleteRecord(domain, req.params.id);
     res.status(204).send();
   } catch (err) {
     if (err instanceof DnsOperationError) {
@@ -260,7 +404,8 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
     const result = await client.triggerDeploy(req.params.slug);
-    res.status(202).json({ jobId: result.deployment_uuid, status: result.status, message: result.message });
+    const dep = result.deployments?.[0];
+    res.status(202).json({ jobId: dep?.deployment_uuid, message: dep?.message });
   } catch (err) {
     console.error(`[coolify] POST /deploy for ${req.params.slug} failed:`, (err as Error).message);
     res.status(502).json({ error: 'Failed to trigger deploy via Coolify' });

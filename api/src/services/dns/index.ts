@@ -5,29 +5,17 @@ import { createTechnitiumClient } from '../technitium';
 export type { DnsProvider } from './DnsProvider';
 export { DnsOperationError } from './errors';
 
-let _instance: DnsProvider | null = null;
-
 /**
- * Returns the singleton DnsProvider.
- *
- * Selection:
- *   TECHNITIUM_URL + TECHNITIUM_TOKEN set  → TechnitiumProvider
- *   Otherwise                              → throws at startup (fail fast)
+ * Returns a DnsProvider with a fresh token on every call.
+ * Technitium tokens are session-scoped and expire; reading the token file
+ * each time ensures the provider always uses the current token written by
+ * coolify-setup.sh on boot (or by a token refresh).
  */
 export function createDnsProvider(): DnsProvider {
-  if (_instance) return _instance;
-
   const client = createTechnitiumClient();
   if (client) {
-    console.log('[dns] Technitium provider active');
-    _instance = new TechnitiumProvider(client);
-    return _instance;
+    return new TechnitiumProvider(client);
   }
 
   throw new Error('DNS provider not configured: set TECHNITIUM_URL and TECHNITIUM_TOKEN');
-}
-
-/** Reset singleton — for testing only. */
-export function resetDnsProvider(): void {
-  _instance = null;
 }

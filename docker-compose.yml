@@ -1,4 +1,164 @@
 services:
+  # ── Coolify — Deployment Engine ────────────────────────────────
+  coolify:
+    image: "ghcr.io/coollabsio/coolify:latest"
+    restart: unless-stopped
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - coolify-storage:/var/www/html/storage/app
+    environment:
+      APP_ENV: "production"
+      APP_ID: "${COOLIFY_APP_ID}"
+      APP_NAME: "Coolify"
+      APP_KEY: "${COOLIFY_APP_KEY}"
+      DB_CONNECTION: "pgsql"
+      DB_HOST: "coolify-db"
+      DB_PORT: "5432"
+      DB_DATABASE: "coolify"
+      DB_USERNAME: "coolify"
+      DB_PASSWORD: "${COOLIFY_DB_PASSWORD}"
+      REDIS_HOST: "coolify-redis"
+      REDIS_PASSWORD: "${COOLIFY_REDIS_PASSWORD}"
+      PUSHER_APP_ID: "${COOLIFY_PUSHER_APP_ID}"
+      PUSHER_APP_KEY: "${COOLIFY_PUSHER_APP_KEY}"
+      PUSHER_APP_SECRET: "${COOLIFY_PUSHER_APP_SECRET}"
+      ROOT_USER_EMAIL: "${COOLIFY_ADMIN_EMAIL}"
+      ROOT_USER_PASSWORD: "${COOLIFY_ADMIN_PASSWORD}"
+      PHP_MEMORY_LIMIT: "256M"
+    ports:
+      - "${COOLIFY_PORT:-8000}:8080"
+    depends_on:
+      coolify-db:
+        condition: service_healthy
+      coolify-redis:
+        condition: service_healthy
+      coolify-realtime:
+        condition: service_healthy
+    networks:
+      - hermithost-net
+    healthcheck:
+      test: curl --fail http://127.0.0.1:8080/api/health || exit 1
+      interval: 10s
+      retries: 15
+      timeout: 3s
+
+  coolify-db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "coolify"
+      POSTGRES_PASSWORD: "${COOLIFY_DB_PASSWORD}"
+      POSTGRES_DB: "coolify"
+    volumes:
+      - coolify-db:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - hermithost-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coolify -d coolify"]
+      interval: 5s
+      retries: 10
+      timeout: 2s
+
+  coolify-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 20 1 --loglevel warning --requirepass ${COOLIFY_REDIS_PASSWORD}
+    environment:
+      REDIS_PASSWORD: "${COOLIFY_REDIS_PASSWORD}"
+    volumes:
+      - coolify-redis:/data
+    networks:
+      - hermithost-net
+    healthcheck:
+      test: redis-cli -a ${COOLIFY_REDIS_PASSWORD} ping
+      interval: 5s
+      retries: 10
+      timeout: 2s
+
+  coolify-realtime:
+    image: "ghcr.io/coollabsio/coolify-realtime:1.0.13"
+    restart: unless-stopped
+    environment:
+      APP_NAME: "Coolify"
+      SOKETI_DEBUG: "false"
+      SOKETI_DEFAULT_APP_ID: "${COOLIFY_PUSHER_APP_ID}"
+      SOKETI_DEFAULT_APP_KEY: "${COOLIFY_PUSHER_APP_KEY}"
+      SOKETI_DEFAULT_APP_SECRET: "${COOLIFY_PUSHER_APP_SECRET}"
+      SOKETI_HOST: "0.0.0.0"
+    networks:
+      - hermithost-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:6001/ready || exit 1"]
+      interval: 5s
+      retries: 10
+      timeout: 2s
+
+  # ── Coolify Keys Init (one-shot) ──────────────────────────────
+  coolify-keys-init:
+    image: alpine
+    restart: "no"
+    volumes:
+      - coolify-keys:/coolify-keys
+    command: >
+      sh -c "apk add --no-cache openssh-client -q &&
+        if [ ! -f /coolify-keys/hermithost_deploy ]; then
+          ssh-keygen -t ed25519 -f /coolify-keys/hermithost_deploy -N '' -C 'coolify@hermithost' -q &&
+          echo '[keys-init] Key generated.';
+        else echo '[keys-init] Key exists, reusing.'; fi"
+
+  # ── SSH Bridge ────────────────────────────────────────────────
+  ssh-bridge:
+    build:
+      context: ./docker/ssh-bridge
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      coolify-keys-init:
+        condition: service_completed_successfully
+    volumes:
+      - coolify-keys:/coolify-keys:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ssh-bridge-host-keys:/etc/ssh/host_keys
+    networks:
+      - hermithost-net
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 22 || exit 1"]
+      interval: 5s
+      retries: 12
+      timeout: 2s
+
+  # ── Coolify Server Setup (one-shot) ───────────────────────────
+  coolify-server-setup:
+    image: alpine
+    restart: "no"
+    depends_on:
+      coolify:
+        condition: service_healthy
+      coolify-db:
+        condition: service_healthy
+      ssh-bridge:
+        condition: service_healthy
+      technitium:
+        condition: service_healthy
+    volumes:
+      - coolify-keys:/coolify-keys
+      - coolify-api-token:/coolify-api-token
+      - ./scripts/coolify-setup.sh:/setup.sh:ro
+    environment:
+      COOLIFY_API_TOKEN: "${COOLIFY_API_TOKEN}"
+      PGHOST: "coolify-db"
+      PGPORT: "5432"
+      PGDATABASE: "coolify"
+      PGUSER: "coolify"
+      PGPASSWORD: "${COOLIFY_DB_PASSWORD}"
+    command: >
+      sh -c "apk add --no-cache openssh-client curl jq postgresql-client -q && sh /setup.sh"
+    networks:
+      - hermithost-net
+
   # ── Reverse Proxy ──────────────────────────────────────────────
   traefik:
     image: traefik:v3.2
@@ -40,27 +200,46 @@ services:
       CORS_ORIGIN: "*"
       SITES_DIR: "/app/sites"
       GITHUB_TOKEN: "${GITHUB_TOKEN}"
-      COOLIFY_API_URL: "${COOLIFY_API_URL:-}"
-      COOLIFY_API_TOKEN: "${COOLIFY_API_TOKEN:-}"
+      COOLIFY_API_URL: "http://coolify:8080/api/v1"
+      COOLIFY_API_TOKEN: "${COOLIFY_API_TOKEN}"
       TECHNITIUM_URL: "${TECHNITIUM_URL:-http://technitium:5380}"
       TECHNITIUM_TOKEN: "${TECHNITIUM_TOKEN:-}"
       DNS_MOCK: "${DNS_MOCK:-}"
+      NS_HOSTNAME: "${NS_HOSTNAME:-}"
+      PGHOST: "coolify-db"
+      PGPORT: "5432"
+      PGDATABASE: "coolify"
+      PGUSER: "coolify"
+      PGPASSWORD: "${COOLIFY_DB_PASSWORD}"
     volumes:
       - hermithost-sites:/app/sites
+      - coolify-api-token:/coolify-api-token:ro
     networks:
       - hermithost-net
     restart: unless-stopped
+    depends_on:
+      coolify:
+        condition: service_healthy
+      coolify-server-setup:
+        condition: service_completed_successfully
 
   # ── Technitium DNS Server ──────────────────────────────────────
   technitium:
     image: technitium/dns-server:latest
     restart: unless-stopped
     ports:
-      - "5380:5380"
+      - "5380:5380"         # Technitium web UI / API
+      - "53:53/udp"         # DNS queries (required)
+      - "53:53/tcp"         # DNS over TCP (required)
     volumes:
       - technitium-config:/etc/dns
     networks:
       - hermithost-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5380/api/user/login?user=admin&pass=admin > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      retries: 12
+      timeout: 3s
 
 networks:
   hermithost-net:
@@ -70,3 +249,9 @@ volumes:
   hermithost-sites:
   traefik-acme:
   technitium-config:
+  coolify-storage:
+  coolify-db:
+  coolify-redis:
+  coolify-keys:
+  coolify-api-token:
+  ssh-bridge-host-keys:
