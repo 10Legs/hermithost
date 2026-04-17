@@ -223,18 +223,30 @@ router.get('/:slug', async (req: Request, res: Response) => {
   }
 });
 
+// ── SSH → HTTPS URL conversion ────────────────────────────────────────────────
+// Converts git@github.com:owner/repo.git → https://github.com/owner/repo.git
+// Required before embedding a PAT — PAT auth uses HTTPS, not SSH transport.
+function sshUrlToHttps(url: string): string {
+  const m = url.match(/^git@([^:]+):(.+?)(?:\.git)?$/);
+  if (m) return `https://${m[1]}/${m[2]}.git`;
+  return url;
+}
+
 // ── Embed PAT into a GitHub HTTPS clone URL ───────────────────────────────────
 // Converts https://github.com/org/repo to https://TOKEN@github.com/org/repo.
+// Handles SSH-format URLs (git@github.com:...) by converting to HTTPS first.
 // Handles URLs that already have auth embedded (idempotent).
 export function embedPatInRepoUrl(repoUrl: string, token: string): string {
+  // SSH URLs can't carry a PAT — convert to HTTPS first
+  const httpsUrl = /^git@/.test(repoUrl) ? sshUrlToHttps(repoUrl) : repoUrl;
   try {
-    const url = new URL(repoUrl);
+    const url = new URL(httpsUrl);
     url.username = token;
     url.password = '';
     return url.toString();
   } catch {
     // Fallback: string replacement for bare github.com/org/repo
-    return repoUrl.replace(/^https?:\/\//, `https://${token}@`);
+    return httpsUrl.replace(/^https?:\/\//, `https://${token}@`);
   }
 }
 
