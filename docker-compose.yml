@@ -220,8 +220,11 @@ services:
     volumes:
       - hermithost-sites:/app/sites
       - coolify-api-token:/coolify-api-token:ro
+      - ./traefik/conf.d:/app/traefik-conf.d
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - hermithost-net
+      - coolify
     restart: unless-stopped
     depends_on:
       coolify:

@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync, unlinkSync } from 'fs';
+import * as http from 'http';
+import * as path from 'path';
 import { DnsRecord } from '../types';
 import {
   createCoolifyClient,
@@ -80,6 +82,73 @@ async function linkGithubKey(appUuid: string): Promise<void> {
     console.log(`[github-key] Linked github-deploy key to app ${appUuid}`);
   } catch (err) {
     console.warn(`[github-key] Could not link key to app ${appUuid}:`, (err as Error).message);
+  }
+}
+
+// ── Traefik route provisioning ────────────────────────────────────────────────
+// Queries Docker API for the running Coolify container for a given slug,
+// then writes (or removes) a Traefik conf.d route file so the site domain
+// is proxied to the correct container. Non-fatal.
+const TRAEFIK_CONF_DIR = process.env.TRAEFIK_CONF_DIR ?? '/app/traefik-conf.d';
+
+function dockerGet(path: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const req = http.get(
+      { socketPath: '/var/run/docker.sock', path, headers: { Host: 'localhost' } },
+      (res) => {
+        let body = '';
+        res.on('data', (d: Buffer) => { body += d; });
+        res.on('end', () => {
+          try { resolve(JSON.parse(body)); }
+          catch { reject(new Error(`Docker API parse error: ${body.slice(0, 200)}`)); }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.setTimeout(3000, () => { req.destroy(); reject(new Error('Docker API timeout')); });
+  });
+}
+
+async function provisionTraefikRoute(slug: string, domain: string, port: number | string = 3000): Promise<void> {
+  const confDir = TRAEFIK_CONF_DIR;
+  const filePath = path.join(confDir, `site-${slug}.yml`);
+  try {
+    // Find running container with coolify.name=slug label
+    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
+    const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[] }>;
+    if (!containers.length) {
+      console.warn(`[traefik-route] No running container for slug ${slug} — route not written`);
+      return;
+    }
+    const containerName = containers[0].Names[0].replace(/^\//, '');
+    const yml = `http:
+  routers:
+    site-${slug}:
+      rule: "Host(\`${domain}\`)"
+      entryPoints:
+        - http
+        - https
+      service: site-${slug}
+
+  services:
+    site-${slug}:
+      loadBalancer:
+        servers:
+          - url: "http://${containerName}:${port}"
+`;
+    writeFileSync(filePath, yml, 'utf8');
+    console.log(`[traefik-route] Route written for ${domain} → ${containerName}:${port}`);
+  } catch (err) {
+    console.warn(`[traefik-route] Failed to provision route for ${slug}:`, (err as Error).message);
+  }
+}
+
+function removeTraefikRoute(slug: string): void {
+  try {
+    unlinkSync(path.join(TRAEFIK_CONF_DIR, `site-${slug}.yml`));
+    console.log(`[traefik-route] Route removed for slug ${slug}`);
+  } catch {
+    // File may not exist — that's fine
   }
 }
 
@@ -206,6 +275,7 @@ router.post('/', async (req: Request, res: Response) => {
       const refreshed = await client.getApplication(app.uuid).catch(() => null);
       if (refreshed) app = refreshed;
       await provisionDns(resolvedFqdn);
+      // Route file written after first deploy (container doesn't exist yet at creation time)
     }
     res.status(201).json(mapSite(app, []));
   } catch (err) {
@@ -219,6 +289,7 @@ router.delete('/:slug', async (req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
     await client.deleteApplication(req.params.slug);
+    removeTraefikRoute(req.params.slug);
     res.status(204).send();
   } catch (err) {
     console.error(`[coolify] DELETE /applications/${req.params.slug} failed:`, (err as Error).message);
@@ -260,6 +331,9 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     const app = await client.updateApplication(req.params.slug, payload);
     if (payload.domains) {
       await provisionDns(payload.domains);
+      const domain = payload.domains.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      const port = (app as any).ports_exposes ?? 3000;
+      await provisionTraefikRoute(req.params.slug, domain, port);
     }
     res.status(200).json(mapSite(app, []));
   } catch (err) {
@@ -403,9 +477,35 @@ router.get('/:slug/deployments', async (req: Request, res: Response) => {
 router.post('/:slug/deploy', async (req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
     const result = await client.triggerDeploy(req.params.slug);
     const dep = result.deployments?.[0];
     res.status(202).json({ jobId: dep?.deployment_uuid, message: dep?.message });
+
+    // Async: update Traefik route once the container is running.
+    // Poll up to 3 minutes for the new container to appear.
+    if (app.fqdn) {
+      const domain = app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '');
+      const port = (app as any).ports_exposes ?? 3000;
+      const slug = req.params.slug;
+      (async () => {
+        const maxAttempts = 18; // 18 × 10s = 3 min
+        for (let i = 0; i < maxAttempts; i++) {
+          await new Promise(r => setTimeout(r, 10_000));
+          try {
+            const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
+            const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; State: string }>;
+            const running = containers.find(c => c.State === 'running');
+            if (running) {
+              await provisionTraefikRoute(slug, domain, port);
+              break;
+            }
+          } catch {
+            // keep polling
+          }
+        }
+      })();
+    }
   } catch (err) {
     console.error(`[coolify] POST /deploy for ${req.params.slug} failed:`, (err as Error).message);
     res.status(502).json({ error: 'Failed to trigger deploy via Coolify' });
