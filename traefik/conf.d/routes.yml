@@ -1,19 +1,22 @@
 http:
   routers:
+    # ── HermitHost Admin UI ───────────────────────────────────────
+    # Fallback: serves admin when no site-specific Host rule matches.
+    # Site routers (higher priority via longer rule) take precedence.
     api:
       rule: "PathPrefix(`/api`)"
       priority: 10
       entryPoints:
-        - web
-        - websecure
+        - http
+        - https
       service: api
 
     frontend:
       rule: "PathPrefix(`/`)"
       priority: 1
       entryPoints:
-        - web
-        - websecure
+        - http
+        - https
       service: frontend
 
   services:

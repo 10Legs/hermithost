@@ -165,13 +165,13 @@ services:
     restart: unless-stopped
     command:
       - "--api.insecure=true"
-      - "--providers.file.filename=/etc/traefik/routes.yml"
+      - "--providers.file.directory=/etc/traefik/conf.d"
       - "--providers.file.watch=true"
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
-      - "--entrypoints.websecure.http.tls.certresolver=letsencrypt"
+      - "--entrypoints.http.address=:80"
+      - "--entrypoints.https.address=:443"
+      - "--entrypoints.https.http.tls.certresolver=letsencrypt"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
-      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=http"
       - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/acme/acme.json"
     ports:
@@ -179,10 +179,11 @@ services:
       - "${TRAEFIK_HTTPS_PORT:-8443}:443"
       - "8081:8080"
     volumes:
-      - ./traefik/routes.yml:/etc/traefik/routes.yml:ro
+      - ./traefik/conf.d:/etc/traefik/conf.d
       - traefik-acme:/acme
     networks:
       - hermithost-net
+      - coolify
 
   # ── SvelteKit Dashboard ────────────────────────────────────────
   frontend:
@@ -249,6 +250,8 @@ services:
 networks:
   hermithost-net:
     driver: bridge
+  coolify:
+    external: true
 
 volumes:
   hermithost-sites:
