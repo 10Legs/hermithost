@@ -12,14 +12,15 @@ import { mapSite, mapDeploy } from '../services/mapper';
 import { probeSite } from '../services/healthProbe';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
 import { createTechnitiumClient } from '../services/technitium';
+import { readNsHostname } from './config';
 
 const router = Router();
 
 // ── DNS auto-provisioning ─────────────────────────────────────────────────────
 // Creates a zone + A record for the given domain pointing at NS_HOSTNAME.
 // Non-fatal: logs warnings but never throws — site ops should not fail due to DNS.
-async function provisionDns(fqdn: string): Promise<void> {
-  const serverIp = process.env.NS_HOSTNAME;
+export async function provisionDns(fqdn: string): Promise<void> {
+  const serverIp = readNsHostname();
   if (!serverIp) {
     console.warn('[dns-provision] NS_HOSTNAME not set — skipping DNS provisioning');
     return;
@@ -60,7 +61,7 @@ async function provisionDns(fqdn: string): Promise<void> {
 // ── GitHub key linking ────────────────────────────────────────────────────────
 // Coolify's create API ignores private_key_uuid — link via DB instead.
 // Non-fatal: deployment will fail gracefully if key not linked.
-async function linkGithubKey(appUuid: string): Promise<void> {
+export async function linkGithubKey(appUuid: string): Promise<void> {
   try {
     const { readFileSync } = require('fs') as typeof import('fs');
     const keyUuid = readFileSync('/coolify-api-token/github_key_uuid', 'utf8').trim();
@@ -82,6 +83,28 @@ async function linkGithubKey(appUuid: string): Promise<void> {
     console.log(`[github-key] Linked github-deploy key to app ${appUuid}`);
   } catch (err) {
     console.warn(`[github-key] Could not link key to app ${appUuid}:`, (err as Error).message);
+  }
+}
+
+// ── GitHub key unlinking ──────────────────────────────────────────────────────
+// Sets private_key_id = NULL in Coolify DB — used when switching to PAT auth.
+// Non-fatal: logs warnings but never throws.
+export async function unlinkGithubKey(appUuid: string): Promise<void> {
+  try {
+    const { Client } = require('pg') as typeof import('pg');
+    const pg = new Client({
+      host: process.env.PGHOST ?? 'coolify-db',
+      port: Number(process.env.PGPORT ?? 5432),
+      database: process.env.PGDATABASE ?? 'coolify',
+      user: process.env.PGUSER ?? 'coolify',
+      password: process.env.PGPASSWORD,
+    });
+    await pg.connect();
+    await pg.query(`UPDATE applications SET private_key_id = NULL WHERE uuid=$1`, [appUuid]);
+    await pg.end();
+    console.log(`[github-key] Unlinked github-deploy key from app ${appUuid}`);
+  } catch (err) {
+    console.warn(`[github-key] Could not unlink key from app ${appUuid}:`, (err as Error).message);
   }
 }
 
@@ -109,7 +132,7 @@ function dockerGet(path: string): Promise<unknown> {
   });
 }
 
-async function provisionTraefikRoute(slug: string, domain: string, port: number | string = 3000): Promise<void> {
+export async function provisionTraefikRoute(slug: string, domain: string, port: number | string = 3000): Promise<void> {
   const confDir = TRAEFIK_CONF_DIR;
   const filePath = path.join(confDir, `site-${slug}.yml`);
   try {
@@ -203,7 +226,7 @@ router.get('/:slug', async (req: Request, res: Response) => {
 // ── Embed PAT into a GitHub HTTPS clone URL ───────────────────────────────────
 // Converts https://github.com/org/repo to https://TOKEN@github.com/org/repo.
 // Handles URLs that already have auth embedded (idempotent).
-function embedPatInRepoUrl(repoUrl: string, token: string): string {
+export function embedPatInRepoUrl(repoUrl: string, token: string): string {
   try {
     const url = new URL(repoUrl);
     url.username = token;
@@ -343,15 +366,26 @@ router.delete('/:slug', async (req: Request, res: Response) => {
 // Accepts both frontend Site fields (repository, description) and raw Coolify
 // fields (git_repository, build_pack, fqdn). repository → git_repository translation
 // keeps the frontend decoupled from Coolify internals.
+//
+// deploy_auth switching: accepts deploy_auth ('ssh_key'|'pat') + deploy_token (required for pat).
+// PAT is embedded in Coolify's git_repository transparently — never exposed to the frontend.
+// When updating repository URL on a PAT site, the existing PAT is re-embedded automatically.
 router.patch('/:slug', async (req: Request, res: Response) => {
   const body = req.body as Partial<CoolifyUpdateApplicationPayload & {
     fqdn?: string;    // alias — maps to domains
     domain?: string;  // alias — maps to domains
     repository?: string;
     server?: string;
+    deploy_auth?: 'ssh_key' | 'pat';
+    deploy_token?: string;  // required when deploy_auth === 'pat'
   }>;
   if (Object.keys(body).length === 0) {
     res.status(400).json({ error: 'Request body must include at least one field to update' });
+    return;
+  }
+  const switchingAuth = body.deploy_auth !== undefined;
+  if (switchingAuth && body.deploy_auth === 'pat' && !body.deploy_token?.trim()) {
+    res.status(400).json({ error: 'deploy_token required when deploy_auth is pat' });
     return;
   }
   try {
@@ -364,12 +398,59 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     if (incomingFqdn !== undefined) {
       payload.domains = /^https?:\/\//i.test(incomingFqdn) ? incomingFqdn : `https://${incomingFqdn}`;
     }
-    // Accept frontend 'repository' field and translate to git_repository
-    if ((body as any).repository !== undefined) payload.git_repository = (body as any).repository;
-    if (body.git_repository !== undefined) payload.git_repository = body.git_repository;
     if (body.git_branch !== undefined) payload.git_branch = body.git_branch;
     if (body.build_pack !== undefined) payload.build_pack = body.build_pack;
+
+    // Auth-aware repository URL handling:
+    // - Always stores clean base URL in the frontend-facing Site response
+    // - Transparently re-embeds PAT in Coolify's git_repository when needed
+    const incomingRepo = (body as any).repository ?? body.git_repository;
+    const needCurrentApp = switchingAuth || incomingRepo !== undefined;
+    const currentApp = needCurrentApp ? await client.getApplication(req.params.slug) : null;
+
+    // Extract current PAT from Coolify (if site currently uses PAT auth)
+    let currentPat: string | null = null;
+    if (currentApp) {
+      try {
+        const url = new URL(currentApp.git_repository);
+        if (url.username) currentPat = url.username;
+      } catch { /* not a URL */ }
+    }
+
+    if (incomingRepo !== undefined || switchingAuth) {
+      // Resolve clean base URL from incoming field, or from current Coolify app
+      const rawBase = incomingRepo ?? currentApp?.git_repository ?? '';
+      let cleanBase: string;
+      try {
+        const u = new URL(rawBase);
+        u.username = '';
+        u.password = '';
+        cleanBase = u.toString();
+      } catch {
+        cleanBase = rawBase;
+      }
+
+      const effectiveAuth = switchingAuth ? body.deploy_auth! : (currentPat ? 'pat' : 'ssh_key');
+      const effectiveToken = (switchingAuth && body.deploy_auth === 'pat')
+        ? body.deploy_token!.trim()
+        : currentPat;
+
+      payload.git_repository = (effectiveAuth === 'pat' && effectiveToken)
+        ? embedPatInRepoUrl(cleanBase, effectiveToken)
+        : cleanBase;
+    }
+
     const app = await client.updateApplication(req.params.slug, payload);
+
+    // Post-update auth side effects (link/unlink SSH deploy key)
+    if (switchingAuth) {
+      if (body.deploy_auth === 'pat') {
+        await unlinkGithubKey(req.params.slug);
+      } else {
+        await linkGithubKey(req.params.slug);
+      }
+    }
+
     if (payload.domains) {
       await provisionDns(payload.domains);
       const domain = payload.domains.replace(/^https?:\/\//, '').replace(/\/.*$/, '');

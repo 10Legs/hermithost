@@ -26,6 +26,14 @@
 		</div>
 
 		<div class="nav-section">
+			<div class="nav-label">Configuration</div>
+			<a href="/settings" class="nav-item" class:active={$page.url.pathname.startsWith('/settings')}>
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+				Settings
+			</a>
+		</div>
+
+		<div class="nav-section">
 			<div class="nav-label">System</div>
 			<span class="nav-item nav-disabled">
 				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>

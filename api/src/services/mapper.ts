@@ -137,6 +137,20 @@ export function mapDeploy(
   };
 }
 
+// ── Deploy auth detection ─────────────────────────────────────────────────────
+
+function detectDeployAuth(gitUrl: string): { deployAuth: 'ssh_key' | 'pat'; cleanUrl: string } {
+  try {
+    const url = new URL(gitUrl);
+    if (url.username) {
+      url.username = '';
+      url.password = '';
+      return { deployAuth: 'pat', cleanUrl: url.toString() };
+    }
+  } catch { /* not a URL or SSH format */ }
+  return { deployAuth: 'ssh_key', cleanUrl: gitUrl };
+}
+
 // ── Site mapper ───────────────────────────────────────────────────────────────
 
 export function mapSite(
@@ -154,13 +168,15 @@ export function mapSite(
   const http: HttpStatus = probe ? probe.http : stubHttpStatus(app.status);
   const ssl: SslStatus = probe ? probe.ssl : stubSslStatus();
   const dns: DnsStatus = probe ? probe.dns : stubDnsStatus();
+  const { deployAuth, cleanUrl } = detectDeployAuth(app.git_repository);
 
   return {
     slug: app.uuid,
     name: app.name,
     domain: primaryDomain(app.fqdn),
     description: app.description ?? '',
-    repository: app.git_repository,
+    repository: cleanUrl,
+    deploy_auth: deployAuth,
     server: serverName,
     overallStatus: mapAppStatus(app.status),
     http,

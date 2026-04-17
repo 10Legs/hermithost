@@ -4,6 +4,8 @@ import healthRouter from './routes/health';
 import sitesRouter from './routes/sites';
 import hostedRouter from './routes/hosted';
 import dnsRouter from './routes/dns';
+import backupRouter from './routes/backup';
+import configRouter from './routes/config';
 import { getDeployedSite } from './services/githubDeploy';
 
 const app = express();
@@ -18,6 +20,8 @@ app.use('/api/health', healthRouter);
 app.use('/api/sites', sitesRouter);
 app.use('/api/hosted', hostedRouter);
 app.use('/api/dns', dnsRouter);
+app.use('/api/backup', backupRouter);
+app.use('/api/config', configRouter);
 
 // Dynamic static file serving for deployed sites
 // GET /hosted/:slug/* → serves from the site's detected serveDir

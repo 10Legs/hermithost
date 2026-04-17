@@ -55,6 +55,7 @@ export interface Site {
   description: string;
   repository: string;
   server: string;
+  deploy_auth: 'ssh_key' | 'pat';
   http: HttpStatus;
   ssl: SslStatus;
   dns: DnsStatus;

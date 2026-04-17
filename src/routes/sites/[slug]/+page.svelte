@@ -39,6 +39,11 @@
 	let settingsRepo = data.site.repository;
 	let settingsServer = data.site.server;
 	let settingsDesc = data.site.description;
+	let settingsDeployAuth: 'ssh_key' | 'pat' = data.site.deploy_auth;
+	let settingsDeployToken = '';
+	type AuthSaveState = 'idle' | 'saving' | 'saved' | 'error';
+	let authSaveState: AuthSaveState = 'idle';
+	let authSaveMessage = '';
 
 	$: {
 		// Keep settings fields in sync when site changes (e.g. after refresh)
@@ -46,6 +51,7 @@
 		settingsRepo = site.repository;
 		settingsServer = site.server;
 		settingsDesc = site.description;
+		settingsDeployAuth = site.deploy_auth;
 	}
 
 	type SaveState = 'idle' | 'saving' | 'saved' | 'error';
@@ -82,6 +88,43 @@
 			saveState = 'error';
 			saveMessage = 'Network error — could not save';
 			setTimeout(() => { saveState = 'idle'; saveMessage = ''; }, 6000);
+		}
+	}
+
+	async function saveDeployAuth(): Promise<void> {
+		if (settingsDeployAuth === 'pat' && !settingsDeployToken.trim()) {
+			authSaveState = 'error';
+			authSaveMessage = 'Access token required for PAT auth';
+			setTimeout(() => { authSaveState = 'idle'; authSaveMessage = ''; }, 6000);
+			return;
+		}
+		authSaveState = 'saving';
+		authSaveMessage = '';
+		const payload: Record<string, string> = { deploy_auth: settingsDeployAuth };
+		if (settingsDeployToken.trim()) payload.deploy_token = settingsDeployToken.trim();
+		try {
+			const res = await fetch(`/api/sites/${site.slug}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+			if (!res.ok) {
+				const b: { error?: string } = await res.json().catch(() => ({}));
+				authSaveState = 'error';
+				authSaveMessage = b.error ?? `Save failed (${res.status})`;
+				setTimeout(() => { authSaveState = 'idle'; authSaveMessage = ''; }, 6000);
+				return;
+			}
+			const updated: Site = await res.json();
+			data = { ...data, site: updated };
+			settingsDeployToken = '';
+			authSaveState = 'saved';
+			authSaveMessage = 'Auth method updated';
+			setTimeout(() => { authSaveState = 'idle'; authSaveMessage = ''; }, 3000);
+		} catch {
+			authSaveState = 'error';
+			authSaveMessage = 'Network error — could not save';
+			setTimeout(() => { authSaveState = 'idle'; authSaveMessage = ''; }, 6000);
 		}
 	}
 
@@ -673,6 +716,54 @@
 									class:save-feedback-success={saveState === 'saved'}
 									class:save-feedback-error={saveState === 'error'}
 								>{saveMessage}</span>
+							{/if}
+						</div>
+					</div>
+				</div>
+
+				<div class="settings-section">
+					<h2 class="section-title">Deploy Authentication</h2>
+					<div class="settings-form">
+						<div class="form-field">
+							<label for="cfg-deploy-auth">Method</label>
+							<select id="cfg-deploy-auth" bind:value={settingsDeployAuth} class="input">
+								<option value="ssh_key">SSH Key</option>
+								<option value="pat">Personal Access Token (PAT)</option>
+							</select>
+						</div>
+						{#if settingsDeployAuth === 'pat'}
+							<div class="form-field">
+								<label for="cfg-deploy-token">
+									Access Token
+									{#if site.deploy_auth === 'pat'}<span class="text-secondary"> (leave blank to keep current)</span>{/if}
+								</label>
+								<input
+									id="cfg-deploy-token"
+									type="password"
+									bind:value={settingsDeployToken}
+									class="input mono"
+									placeholder="ghp_..."
+								/>
+							</div>
+						{/if}
+						<div class="form-actions">
+							<button
+								class="btn btn-primary btn-sm"
+								disabled={
+									authSaveState === 'saving'
+									|| (settingsDeployAuth === site.deploy_auth && settingsDeployAuth === 'ssh_key')
+									|| (settingsDeployAuth === 'pat' && !settingsDeployToken.trim() && site.deploy_auth === 'pat')
+								}
+								on:click={saveDeployAuth}
+							>
+								{authSaveState === 'saving' ? 'Updating…' : 'Update Auth'}
+							</button>
+							{#if authSaveMessage}
+								<span
+									class="save-feedback"
+									class:save-feedback-success={authSaveState === 'saved'}
+									class:save-feedback-error={authSaveState === 'error'}
+								>{authSaveMessage}</span>
 							{/if}
 						</div>
 					</div>
