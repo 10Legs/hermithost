@@ -123,10 +123,17 @@ async function provisionTraefikRoute(slug: string, domain: string, port: number 
     const containerName = containers[0].Names[0].replace(/^\//, '');
     const yml = `http:
   routers:
-    site-${slug}:
+    site-${slug}-http:
       rule: "Host(\`${domain}\`)"
       entryPoints:
         - http
+      middlewares:
+        - redirect-to-https
+      service: site-${slug}
+
+    site-${slug}:
+      rule: "Host(\`${domain}\`)"
+      entryPoints:
         - https
       service: site-${slug}
 
@@ -193,8 +200,25 @@ router.get('/:slug', async (req: Request, res: Response) => {
   }
 });
 
+// ── Embed PAT into a GitHub HTTPS clone URL ───────────────────────────────────
+// Converts https://github.com/org/repo to https://TOKEN@github.com/org/repo.
+// Handles URLs that already have auth embedded (idempotent).
+function embedPatInRepoUrl(repoUrl: string, token: string): string {
+  try {
+    const url = new URL(repoUrl);
+    url.username = token;
+    url.password = '';
+    return url.toString();
+  } catch {
+    // Fallback: string replacement for bare github.com/org/repo
+    return repoUrl.replace(/^https?:\/\//, `https://${token}@`);
+  }
+}
+
 // ── POST /api/sites — create a new site ──────────────────────────────────────
 // Accepts: name, git_repository, git_branch, build_pack (default: nixpacks), port (default: 3000)
+// deploy_auth: 'ssh_key' (default) | 'pat'
+// deploy_token: required when deploy_auth === 'pat'
 router.post('/', async (req: Request, res: Response) => {
   const body = req.body as {
     name?: string;
@@ -204,12 +228,19 @@ router.post('/', async (req: Request, res: Response) => {
     port?: number | string;
     description?: string;
     fqdn?: string;
-    domain?: string;  // alias for fqdn accepted from frontend
+    domain?: string;       // alias for fqdn
+    deploy_auth?: 'ssh_key' | 'pat';
+    deploy_token?: string; // PAT value — only used when deploy_auth === 'pat'
   };
   if (!body.name || !body.git_repository || !body.git_branch) {
     res.status(400).json({
       error: 'Missing required fields: name, git_repository, git_branch',
     });
+    return;
+  }
+  const deployAuth = body.deploy_auth ?? 'ssh_key';
+  if (deployAuth === 'pat' && !body.deploy_token?.trim()) {
+    res.status(400).json({ error: 'deploy_token is required when deploy_auth is pat' });
     return;
   }
   try {
@@ -246,10 +277,15 @@ router.post('/', async (req: Request, res: Response) => {
       project_uuid = created.uuid;
     }
 
+    // Resolve clone URL — embed PAT for pat auth, use raw URL for ssh_key
+    const resolvedRepoUrl = deployAuth === 'pat'
+      ? embedPatInRepoUrl(body.git_repository, body.deploy_token!.trim())
+      : body.git_repository;
+
     const payload: CoolifyCreateApplicationPayload = {
-      type: 'public',
+      type: deployAuth === 'pat' ? 'public' : 'private',
       name: body.name,
-      git_repository: body.git_repository,
+      git_repository: resolvedRepoUrl,
       git_branch: body.git_branch,
       build_pack: body.build_pack ?? 'nixpacks',
       ports_exposes: String(body.port ?? 3000),
@@ -261,7 +297,12 @@ router.post('/', async (req: Request, res: Response) => {
       ...(body.description !== undefined ? { description: body.description } : {}),
     };
     let app = await client.createApplication(payload);
-    await linkGithubKey(app.uuid);
+
+    // SSH key auth: link the deploy key via DB
+    // PAT auth: token is embedded in the clone URL — no key needed
+    if (deployAuth !== 'pat') {
+      await linkGithubKey(app.uuid);
+    }
 
     // fqdn is not accepted at creation time — patch it immediately after using 'domains' field
     const resolvedFqdn = body.fqdn ?? body.domain;

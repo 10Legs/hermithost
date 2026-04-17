@@ -1,8 +1,24 @@
 http:
   routers:
-    # ── HermitHost Admin UI ───────────────────────────────────────
-    # Fallback: serves admin when no site-specific Host rule matches.
-    # Site routers (higher priority via longer rule) take precedence.
+    # ── HermitHost Admin UI — named domain (cert-eligible) ────────────────────
+    # Host-based routers win over PathPrefix fallbacks via higher auto-priority.
+    api-admin:
+      rule: "Host(`hermithost.shallowfordroad.com`) && PathPrefix(`/api`)"
+      entryPoints:
+        - http
+        - https
+      service: api
+
+    frontend-admin:
+      rule: "Host(`hermithost.shallowfordroad.com`)"
+      entryPoints:
+        - http
+        - https
+      service: frontend
+
+    # ── Fallback: no-host catch-all ────────────────────────────────────────────
+    # Serves admin when no site-specific Host rule matches (e.g., direct IP access).
+    # No TLS cert — no hostname for ACME to target.
     api:
       rule: "PathPrefix(`/api`)"
       priority: 10

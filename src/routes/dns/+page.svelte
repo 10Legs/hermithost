@@ -129,6 +129,7 @@
 				zoneRecords = [];
 			}
 			showDeleteZoneConfirm = null;
+			deletingZone = null;
 		} catch {
 			deleteZoneError = 'Network error — delete failed';
 			deletingZone = null;

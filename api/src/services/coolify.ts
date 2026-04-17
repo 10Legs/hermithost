@@ -47,7 +47,7 @@ export interface CoolifyTriggerDeployResponse {
 }
 
 export interface CoolifyCreateApplicationPayload {
-  type: 'public';
+  type: 'public' | 'private';
   name: string;
   description?: string;
   fqdn?: string;

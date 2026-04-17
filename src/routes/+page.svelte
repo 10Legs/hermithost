@@ -14,21 +14,27 @@
 	let addDomain = '';
 	let addGitRepo = '';
 	let addGitBranch = 'main';
+	let addDeployAuth: 'ssh_key' | 'pat' = 'ssh_key';
+	let addDeployToken = '';
 	type AddState = 'idle' | 'loading' | 'error';
 	let addState: AddState = 'idle';
 	let addError = '';
 	let addNameError = '';
 	let addDomainError = '';
+	let addDeployTokenError = '';
 
 	function openAddSite() {
 		addName = '';
 		addDomain = '';
 		addGitRepo = '';
 		addGitBranch = 'main';
+		addDeployAuth = 'ssh_key';
+		addDeployToken = '';
 		addState = 'idle';
 		addError = '';
 		addNameError = '';
 		addDomainError = '';
+		addDeployTokenError = '';
 		showAddSite = true;
 	}
 
@@ -44,23 +50,33 @@
 	async function submitAddSite() {
 		addNameError = '';
 		addDomainError = '';
+		addDeployTokenError = '';
 		addError = '';
 		let valid = true;
 		if (!addName.trim()) { addNameError = 'Name is required'; valid = false; }
 		if (!addDomain.trim()) { addDomainError = 'Domain is required'; valid = false; }
+		if (addDeployAuth === 'pat' && !addDeployToken.trim()) {
+			addDeployTokenError = 'Personal access token is required';
+			valid = false;
+		}
 		if (!valid) return;
 
 		addState = 'loading';
 		try {
+			const payload: Record<string, unknown> = {
+				name: addName.trim(),
+				domain: addDomain.trim(),
+				git_repository: addGitRepo.trim(),
+				git_branch: addGitBranch.trim() || 'main',
+				deploy_auth: addDeployAuth,
+			};
+			if (addDeployAuth === 'pat') {
+				payload.deploy_token = addDeployToken.trim();
+			}
 			const res = await fetch('/api/sites', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					name: addName.trim(),
-					domain: addDomain.trim(),
-					git_repository: addGitRepo.trim(),
-					git_branch: addGitBranch.trim() || 'main'
-				})
+				body: JSON.stringify(payload)
 			});
 			if (!res.ok) {
 				const body: { error?: string } = await res.json().catch(() => ({}));
@@ -328,6 +344,44 @@
 						disabled={addState === 'loading'}
 					/>
 				</div>
+				<div class="form-field">
+					<label>Deploy Auth</label>
+					<div class="auth-toggle">
+						<button
+							type="button"
+							class="auth-opt"
+							class:auth-opt-active={addDeployAuth === 'ssh_key'}
+							disabled={addState === 'loading'}
+							on:click={() => { addDeployAuth = 'ssh_key'; addDeployTokenError = ''; }}
+						>SSH Key</button>
+						<button
+							type="button"
+							class="auth-opt"
+							class:auth-opt-active={addDeployAuth === 'pat'}
+							disabled={addState === 'loading'}
+							on:click={() => { addDeployAuth = 'pat'; }}
+						>Personal Token</button>
+					</div>
+					{#if addDeployAuth === 'ssh_key'}
+						<span class="field-hint">Uses the server's deploy key — add it to your repo's deploy keys on GitHub.</span>
+					{/if}
+				</div>
+				{#if addDeployAuth === 'pat'}
+					<div class="form-field">
+						<label for="add-deploy-token">GitHub Personal Access Token <span class="required">*</span></label>
+						<input
+							id="add-deploy-token"
+							type="password"
+							bind:value={addDeployToken}
+							class="input mono"
+							class:input-error={addDeployTokenError}
+							placeholder="ghp_..."
+							disabled={addState === 'loading'}
+						/>
+						{#if addDeployTokenError}<span class="field-error">{addDeployTokenError}</span>{/if}
+						<span class="field-hint">Needs <code>repo</code> read scope. Embedded in clone URL — never logged.</span>
+					</div>
+				{/if}
 			</div>
 			<div class="modal-footer">
 				<button class="btn btn-ghost" on:click={closeAddSite} disabled={addState === 'loading'}>Cancel</button>
@@ -679,5 +733,62 @@
 	.btn-loading {
 		opacity: 0.7;
 		cursor: not-allowed;
+	}
+
+	.auth-toggle {
+		display: flex;
+		gap: 0;
+		border: 1px solid var(--border-bright);
+		border-radius: 5px;
+		overflow: hidden;
+	}
+
+	.auth-opt {
+		flex: 1;
+		background: transparent;
+		border: none;
+		color: var(--text-secondary);
+		font-size: 12px;
+		font-weight: 500;
+		padding: 6px 12px;
+		cursor: pointer;
+		transition: background 0.1s, color 0.1s;
+	}
+
+	.auth-opt:not(:last-child) {
+		border-right: 1px solid var(--border-bright);
+	}
+
+	.auth-opt:hover:not(:disabled) {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.auth-opt-active {
+		background: var(--accent-teal);
+		color: #fff;
+	}
+
+	.auth-opt-active:hover:not(:disabled) {
+		background: var(--accent-teal-dim);
+		color: #fff;
+	}
+
+	.auth-opt:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+
+	.field-hint {
+		font-size: 11px;
+		color: var(--text-secondary);
+		line-height: 1.4;
+	}
+
+	.field-hint code {
+		font-family: var(--font-mono);
+		background: var(--bg-elevated);
+		padding: 1px 4px;
+		border-radius: 3px;
 	}
 </style>

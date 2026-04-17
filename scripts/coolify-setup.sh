@@ -68,15 +68,29 @@ if [ -n "$DEST_UUID" ]; then
   echo "[setup] Destination UUID written: $DEST_UUID"
 fi
 
-# Technitium session token (always refresh — session-based)
-echo "[setup] Logging into Technitium..."
+# Technitium permanent API token (idempotent — recreate on every boot)
+echo "[setup] Setting up Technitium permanent API token..."
 TECH_URL="${TECHNITIUM_URL:-http://technitium:5380}"
+
+# Step 1: get a session token to bootstrap
 TECH_RESP=$(curl -sf -X POST "$TECH_URL/api/user/login" \
   -d "user=admin&pass=admin&includeInfo=false" 2>/dev/null || echo "")
-TECH_TOKEN=$(echo "$TECH_RESP" | jq -r '.token // empty' 2>/dev/null)
-if [ -n "$TECH_TOKEN" ]; then
-  printf '%s' "$TECH_TOKEN" > /coolify-api-token/technitium_token
-  echo "[setup] Technitium token written."
+TECH_SESSION=$(echo "$TECH_RESP" | jq -r '.token // empty' 2>/dev/null)
+
+if [ -n "$TECH_SESSION" ]; then
+  # Step 2: delete old permanent token (ignore errors if it doesn't exist)
+  curl -sf -X POST "$TECH_URL/api/user/deleteToken?token=$TECH_SESSION&tokenName=hermithost-api" > /dev/null 2>&1 || true
+  # Step 3: create new permanent token
+  PERM_RESP=$(curl -sf -X POST "$TECH_URL/api/user/createToken?token=$TECH_SESSION&tokenName=hermithost-api" 2>/dev/null || echo "")
+  PERM_TOKEN=$(echo "$PERM_RESP" | jq -r '.token // empty' 2>/dev/null)
+  if [ -n "$PERM_TOKEN" ]; then
+    printf '%s' "$PERM_TOKEN" > /coolify-api-token/technitium_token
+    echo "[setup] Technitium permanent token written."
+  else
+    # Fallback: write session token — withTokenRetry in API handles expiry
+    printf '%s' "$TECH_SESSION" > /coolify-api-token/technitium_token
+    echo "[setup] WARNING: Could not create permanent Technitium token — wrote session token as fallback."
+  fi
 else
   echo "[setup] WARNING: Could not obtain Technitium token — DNS integration will be limited."
 fi
