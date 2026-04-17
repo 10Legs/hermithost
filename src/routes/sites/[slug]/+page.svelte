@@ -51,7 +51,8 @@
 		settingsRepo = site.repository;
 		settingsServer = site.server;
 		settingsDesc = site.description;
-		settingsDeployAuth = site.deploy_auth;
+		// Note: settingsDeployAuth is NOT synced here — bind:value conflicts with $: assignment.
+		// It is updated explicitly in saveDeployAuth() after a successful response.
 	}
 
 	type SaveState = 'idle' | 'saving' | 'saved' | 'error';
@@ -118,6 +119,7 @@
 			const updated: Site = await res.json();
 			data = { ...data, site: updated };
 			settingsDeployToken = '';
+			settingsDeployAuth = updated.deploy_auth;
 			authSaveState = 'saved';
 			authSaveMessage = 'Auth method updated';
 			setTimeout(() => { authSaveState = 'idle'; authSaveMessage = ''; }, 3000);
