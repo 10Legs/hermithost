@@ -87,4 +87,19 @@ router.put('/', async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/config/deploy-key
+router.get('/deploy-key', (_req: Request, res: Response) => {
+  const candidates = [
+    '/coolify-api-token/github_deploy.pub',
+    '/coolify-keys/github_deploy.pub',
+  ];
+  for (const path of candidates) {
+    try {
+      const key = readFileSync(path, 'utf8').trim();
+      if (key) { res.json({ public_key: key }); return; }
+    } catch { /* try next */ }
+  }
+  res.status(404).json({ error: 'Deploy key not found' });
+});
+
 export default router;

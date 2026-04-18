@@ -105,6 +105,8 @@ fi
 
 GITHUB_PRIV_JSON=$(jq -Rs . < "$GITHUB_KEY_FILE")
 GITHUB_PUB_KEY=$(cat "${GITHUB_KEY_FILE}.pub")
+cp "${GITHUB_KEY_FILE}.pub" /coolify-api-token/github_deploy.pub
+echo "[setup] GitHub public key written to shared volume."
 
 psql -c "DELETE FROM private_keys WHERE name='github-deploy';" > /dev/null 2>&1
 GITHUB_KEY_RESP=$(curl -sf -X POST "$COOLIFY_URL/security/keys" \
