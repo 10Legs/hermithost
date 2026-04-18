@@ -205,7 +205,6 @@ services:
       PORT: "3001"
       CORS_ORIGIN: "*"
       SITES_DIR: "/app/sites"
-      GITHUB_TOKEN: "${GITHUB_TOKEN}"
       COOLIFY_API_URL: "http://coolify:8080/api/v1"
       COOLIFY_API_TOKEN: "${COOLIFY_API_TOKEN}"
       TECHNITIUM_URL: "${TECHNITIUM_URL:-http://technitium:5380}"
