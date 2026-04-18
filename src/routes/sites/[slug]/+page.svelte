@@ -349,16 +349,14 @@
 	}
 
 	onMount(async () => {
-		if (data.site.deploy_auth === 'ssh_key') {
-			try {
-				const res = await fetch('/api/config/deploy-key');
-				if (res.ok) {
-					const body: { public_key: string } = await res.json();
-					deployPublicKey = body.public_key;
-				}
-			} catch {
-				// silently fail — key will be empty
+		try {
+			const res = await fetch('/api/config/deploy-key');
+			if (res.ok) {
+				const body: { public_key: string } = await res.json();
+				deployPublicKey = body.public_key;
 			}
+		} catch {
+			// silently fail — key will be empty
 		}
 	});
 </script>
@@ -795,6 +793,29 @@
 								/>
 							</div>
 						{/if}
+						{#if settingsDeployAuth === 'ssh_key'}
+							<div class="form-field">
+								<label>Deploy Key</label>
+								<p class="deploy-key-hint text-secondary">Add this public key to your GitHub repository as a deploy key so HermitHost can pull your code.</p>
+								{#if deployPublicKey}
+									<div class="deploy-key-block">
+										<code class="deploy-key-text mono">{deployPublicKey}</code>
+									</div>
+									<div class="form-actions" style="margin-top:8px">
+										<button class="btn btn-ghost btn-sm" on:click={copyDeployKey}>
+											{deployKeyCopied ? 'Copied!' : 'Copy Key'}
+										</button>
+										{#if parseGithubOwnerRepo(site.repository)}
+											<button class="btn btn-primary btn-sm" on:click={openGithubDeployKeys}>
+												Add to GitHub →
+											</button>
+										{/if}
+									</div>
+								{:else}
+									<p class="text-secondary" style="font-size:12px">Loading deploy key…</p>
+								{/if}
+							</div>
+						{/if}
 						<div class="form-actions">
 							<button
 								class="btn btn-primary btn-sm"
@@ -817,32 +838,6 @@
 						</div>
 					</div>
 				</div>
-
-				{#if site.deploy_auth === 'ssh_key'}
-				<div class="settings-section">
-					<h2 class="section-title">Deploy Key</h2>
-					<div class="settings-form">
-						<p class="deploy-key-hint text-secondary">Add this public key to your GitHub repository as a deploy key so HermitHost can pull your code.</p>
-						{#if deployPublicKey}
-							<div class="deploy-key-block">
-								<code class="deploy-key-text mono">{deployPublicKey}</code>
-							</div>
-							<div class="form-actions">
-								<button class="btn btn-ghost btn-sm" on:click={copyDeployKey}>
-									{deployKeyCopied ? 'Copied!' : 'Copy'}
-								</button>
-								{#if parseGithubOwnerRepo(site.repository)}
-									<button class="btn btn-primary btn-sm" on:click={openGithubDeployKeys}>
-										Add to GitHub →
-									</button>
-								{/if}
-							</div>
-						{:else}
-							<p class="text-secondary" style="font-size:12px">Loading deploy key…</p>
-						{/if}
-					</div>
-				</div>
-				{/if}
 
 				<div class="settings-section danger-zone">
 					<h2 class="section-title text-danger">Danger Zone</h2>
