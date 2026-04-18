@@ -253,7 +253,7 @@ networks:
   hermithost-net:
     driver: bridge
   coolify:
-    external: true
+    driver: bridge
 
 volumes:
   hermithost-sites:
