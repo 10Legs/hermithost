@@ -1,0 +1,1137 @@
+<script lang="ts">
+	import { onMount } from 'svelte';
+
+	// ── Types ──────────────────────────────────────────────────────────────────
+	type SiteSummary = { name: string; domain: string };
+	type ZoneSummary = { name: string };
+
+	type ValidationResult = {
+		valid: boolean;
+		errors: string[];
+		warnings: string[];
+		summary: { sites: number; dns_zones: number; dns_records: number };
+	};
+
+	type ImportResult = {
+		sites: { created: string[]; skipped: string[]; failed: string[] };
+		dns: { created: string[]; skipped: string[]; failed: string[] };
+	};
+
+	// ── Config section ─────────────────────────────────────────────────────────
+	let nsHostname = '';
+	let acmeEmail = '';
+	let coolifyStatus: 'connected' | 'error' | 'not_configured' = 'not_configured';
+	let technitiumStatus: 'connected' | 'error' | 'not_configured' = 'not_configured';
+	let coolifyUrl = '';
+	let technitiumUrl = '';
+	let savingConfig = false;
+	let configSaveError = '';
+	let configSaveSuccess = false;
+
+	// ── Selector ───────────────────────────────────────────────────────────────
+	let availableSites: SiteSummary[] = [];
+	let availableZones: ZoneSummary[] = [];
+	let selectedSites = new Set<string>();
+	let selectedZones = new Set<string>();
+
+	// ── Derived ────────────────────────────────────────────────────────────────
+	$: allSitesChecked = selectedSites.size === availableSites.length && availableSites.length > 0;
+	$: someSitesChecked = selectedSites.size > 0 && selectedSites.size < availableSites.length;
+	$: allZonesChecked = selectedZones.size === availableZones.length && availableZones.length > 0;
+	$: someZonesChecked = selectedZones.size > 0 && selectedZones.size < availableZones.length;
+	$: nothingSelected = selectedSites.size === 0 && selectedZones.size === 0;
+	$: exportScope = computeExportScope(selectedSites, selectedZones, availableSites, availableZones);
+
+	function computeExportScope(
+		sites: Set<string>,
+		zones: Set<string>,
+		allSites: SiteSummary[],
+		allZones: ZoneSummary[]
+	): 'full' | 'sites' | 'dns' | 'partial' | 'empty' {
+		const hasAllSites = sites.size === allSites.length && allSites.length > 0;
+		const hasAllZones = zones.size === allZones.length && allZones.length > 0;
+		const hasSomeSites = sites.size > 0;
+		const hasSomeZones = zones.size > 0;
+
+		if (hasAllSites && hasAllZones) return 'full';
+		if (hasAllSites && !hasSomeZones) return 'sites';
+		if (!hasSomeSites && hasAllZones) return 'dns';
+		if (!hasSomeSites && !hasSomeZones) return 'empty';
+		return 'partial';
+	}
+
+	function buildExportParams(): string {
+		const hasSites = selectedSites.size > 0;
+		const hasZones = selectedZones.size > 0;
+		const hasAllSites = selectedSites.size === availableSites.length;
+		const hasAllZones = selectedZones.size === availableZones.length;
+
+		if (hasAllSites && hasAllZones) return '';
+
+		const params = new URLSearchParams();
+
+		if (hasAllSites && !hasZones) {
+			params.set('sites', 'all');
+		} else if (!hasSites && hasAllZones) {
+			params.set('zones', 'all');
+		} else {
+			if (hasSites && !hasAllSites) params.set('sites', [...selectedSites].join(','));
+			if (hasAllSites && hasSites) params.set('sites', 'all');
+			if (hasZones && !hasAllZones) params.set('zones', [...selectedZones].join(','));
+			if (hasAllZones && hasZones) params.set('zones', 'all');
+		}
+
+		return params.toString();
+	}
+
+	function getExportFilename(scope: typeof exportScope): string {
+		const date = new Date().toISOString().slice(0, 10);
+		if (scope === 'full') return `hermithost-backup-${date}.json`;
+		return `hermithost-${scope}-${date}.json`;
+	}
+
+	// ── Mount ──────────────────────────────────────────────────────────────────
+	onMount(async () => {
+		try {
+			const [sitesRes, zonesRes, configRes] = await Promise.all([
+				fetch('/api/sites'),
+				fetch('/api/dns/zones'),
+				fetch('/api/config'),
+			]);
+
+			if (sitesRes.ok) {
+				const data = await sitesRes.json() as SiteSummary[];
+				availableSites = data;
+				selectedSites = new Set(data.map((s) => s.name));
+			}
+
+			if (zonesRes.ok) {
+				const data = await zonesRes.json() as ZoneSummary[];
+				availableZones = data;
+				selectedZones = new Set(data.map((z) => z.name));
+			}
+
+			if (configRes.ok) {
+				const cfg = await configRes.json() as {
+					ns_hostname?: string;
+					acme_email?: string;
+					coolify_url?: string;
+					coolify_status?: 'connected' | 'error' | 'not_configured';
+					technitium_url?: string;
+					technitium_status?: 'connected' | 'error' | 'not_configured';
+				};
+				nsHostname = cfg.ns_hostname ?? '';
+				acmeEmail = cfg.acme_email ?? '';
+				coolifyUrl = cfg.coolify_url ?? '';
+				coolifyStatus = cfg.coolify_status ?? 'not_configured';
+				technitiumUrl = cfg.technitium_url ?? '';
+				technitiumStatus = cfg.technitium_status ?? 'not_configured';
+			}
+		} catch {
+			// non-fatal; page still renders
+		}
+	});
+
+	// ── Config save ────────────────────────────────────────────────────────────
+	async function saveConfig() {
+		savingConfig = true;
+		configSaveError = '';
+		configSaveSuccess = false;
+		try {
+			const res = await fetch('/api/config', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ ns_hostname: nsHostname }),
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({})) as { error?: string };
+				throw new Error(body.error ?? `HTTP ${res.status}`);
+			}
+			configSaveSuccess = true;
+			setTimeout(() => { configSaveSuccess = false; }, 3000);
+		} catch (err) {
+			configSaveError = (err as Error).message;
+		} finally {
+			savingConfig = false;
+		}
+	}
+
+	// ── Selector helpers ───────────────────────────────────────────────────────
+	function toggleSite(name: string) {
+		if (selectedSites.has(name)) selectedSites.delete(name);
+		else selectedSites.add(name);
+		selectedSites = new Set(selectedSites);
+	}
+
+	function toggleAllSites() {
+		if (allSitesChecked) selectedSites = new Set();
+		else selectedSites = new Set(availableSites.map((s) => s.name));
+	}
+
+	function toggleZone(name: string) {
+		if (selectedZones.has(name)) selectedZones.delete(name);
+		else selectedZones.add(name);
+		selectedZones = new Set(selectedZones);
+	}
+
+	function toggleAllZones() {
+		if (allZonesChecked) selectedZones = new Set();
+		else selectedZones = new Set(availableZones.map((z) => z.name));
+	}
+
+	// ── Backup export ──────────────────────────────────────────────────────────
+	let exporting = false;
+	let exportError = '';
+
+	async function downloadBackup() {
+		exporting = true;
+		exportError = '';
+		try {
+			const params = buildExportParams();
+			const url = params ? `/api/backup?${params}` : '/api/backup';
+			const res = await fetch(url);
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+			// Try to read filename from Content-Disposition header
+			let filename = getExportFilename(exportScope);
+			const disposition = res.headers.get('Content-Disposition');
+			if (disposition) {
+				const match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+				if (match?.[1]) filename = match[1].replace(/['"]/g, '');
+			}
+
+			const blob = await res.blob();
+			const objectUrl = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = objectUrl;
+			a.download = filename;
+			a.click();
+			URL.revokeObjectURL(objectUrl);
+		} catch (err) {
+			exportError = (err as Error).message;
+		} finally {
+			exporting = false;
+		}
+	}
+
+	// ── Backup import ──────────────────────────────────────────────────────────
+	let fileInput: HTMLInputElement;
+	let parsedBackup: unknown = null;
+	let validateState: 'idle' | 'validating' | 'done' = 'idle';
+	let validationResult: ValidationResult | null = null;
+	let validateError = '';
+
+	let importState: 'idle' | 'importing' | 'done' = 'idle';
+	let importResult: ImportResult | null = null;
+	let importError = '';
+
+	function resetImport() {
+		parsedBackup = null;
+		validateState = 'idle';
+		validationResult = null;
+		validateError = '';
+		importState = 'idle';
+		importResult = null;
+		importError = '';
+		if (fileInput) fileInput.value = '';
+	}
+
+	async function onFileChange(e: Event) {
+		resetImport();
+		const file = (e.target as HTMLInputElement).files?.[0];
+		if (!file) return;
+		try {
+			const text = await file.text();
+			parsedBackup = JSON.parse(text);
+		} catch {
+			validateError = 'Could not parse file as JSON';
+			return;
+		}
+		await validateFile();
+	}
+
+	async function validateFile() {
+		if (!parsedBackup) return;
+		validateState = 'validating';
+		validateError = '';
+		validationResult = null;
+		try {
+			const res = await fetch('/api/backup/validate', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(parsedBackup),
+			});
+			validationResult = await res.json() as ValidationResult;
+			validateState = 'done';
+		} catch (err) {
+			validateError = (err as Error).message;
+			validateState = 'idle';
+		}
+	}
+
+	async function importFile() {
+		if (!parsedBackup || !validationResult?.valid) return;
+		importState = 'importing';
+		importError = '';
+		importResult = null;
+		try {
+			const res = await fetch('/api/backup', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(parsedBackup),
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({})) as { error?: string };
+				throw new Error(body.error ?? `HTTP ${res.status}`);
+			}
+			importResult = await res.json() as ImportResult;
+			importState = 'done';
+		} catch (err) {
+			importError = (err as Error).message;
+			importState = 'idle';
+		}
+	}
+</script>
+
+<div class="page">
+	<div class="page-header">
+		<h1 class="page-title">Settings</h1>
+	</div>
+
+	<!-- ── Server ───────────────────────────────────────────────────────────── -->
+	<section class="card" style="margin-bottom: 16px;">
+		<div class="card-header">
+			<div class="card-title-row">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+					<line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>
+				</svg>
+				<h2 class="card-title">Server</h2>
+			</div>
+			<p class="card-desc">Core server configuration for this HermitHost instance.</p>
+		</div>
+
+		<div class="section">
+			<div class="field-row">
+				<div class="field-group">
+					<label class="field-label" for="ns-hostname">Nameserver Hostname</label>
+					<p class="field-hint">Used as the authoritative NS record for all hosted zones.</p>
+					<div class="input-row">
+						<input
+							id="ns-hostname"
+							class="text-input"
+							type="text"
+							placeholder="ns1.example.com"
+							bind:value={nsHostname}
+						/>
+						<button class="btn btn-primary" on:click={saveConfig} disabled={savingConfig}>
+							{#if savingConfig}
+								<span class="spinner"></span> Saving…
+							{:else}
+								Save
+							{/if}
+						</button>
+					</div>
+					{#if configSaveSuccess}
+						<p class="inline-success">Saved successfully.</p>
+					{/if}
+					{#if configSaveError}
+						<p class="error-msg">{configSaveError}</p>
+					{/if}
+				</div>
+			</div>
+
+			{#if acmeEmail}
+				<div class="field-group" style="margin-top: 16px;">
+					<label class="field-label">ACME Email</label>
+					<p class="field-hint">Email registered with Let's Encrypt for certificate notifications.</p>
+					<p class="readonly-value">{acmeEmail}</p>
+				</div>
+			{/if}
+		</div>
+	</section>
+
+	<!-- ── Integrations ─────────────────────────────────────────────────────── -->
+	<section class="card" style="margin-bottom: 16px;">
+		<div class="card-header">
+			<div class="card-title-row">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+					<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+				</svg>
+				<h2 class="card-title">Integrations</h2>
+			</div>
+			<p class="card-desc">Status of connected backend services.</p>
+		</div>
+
+		<div class="section">
+			<div class="integration-row">
+				<div class="integration-info">
+					<span class="status-dot" class:dot-connected={coolifyStatus === 'connected'} class:dot-error={coolifyStatus === 'error'} class:dot-unconfigured={coolifyStatus === 'not_configured'}></span>
+					<span class="integration-name">Coolify</span>
+					{#if coolifyUrl}
+						<span class="integration-url">{coolifyUrl}</span>
+					{/if}
+				</div>
+				<span class="status-label" class:label-connected={coolifyStatus === 'connected'} class:label-error={coolifyStatus === 'error'} class:label-unconfigured={coolifyStatus === 'not_configured'}>
+					{#if coolifyStatus === 'connected'}Connected{:else if coolifyStatus === 'error'}Error{:else}Not configured{/if}
+				</span>
+			</div>
+
+			<div class="integration-row" style="margin-top: 10px;">
+				<div class="integration-info">
+					<span class="status-dot" class:dot-connected={technitiumStatus === 'connected'} class:dot-error={technitiumStatus === 'error'} class:dot-unconfigured={technitiumStatus === 'not_configured'}></span>
+					<span class="integration-name">Technitium DNS</span>
+					{#if technitiumUrl}
+						<span class="integration-url">{technitiumUrl}</span>
+					{/if}
+				</div>
+				<span class="status-label" class:label-connected={technitiumStatus === 'connected'} class:label-error={technitiumStatus === 'error'} class:label-unconfigured={technitiumStatus === 'not_configured'}>
+					{#if technitiumStatus === 'connected'}Connected{:else if technitiumStatus === 'error'}Error{:else}Not configured{/if}
+				</span>
+			</div>
+		</div>
+	</section>
+
+	<!-- ── Backup & Restore ──────────────────────────────────────────────────── -->
+	<section class="card">
+		<div class="card-header">
+			<div class="card-title-row">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<polyline points="20 6 9 17 4 12"/>
+				</svg>
+				<h2 class="card-title">Backup &amp; Restore</h2>
+			</div>
+			<p class="card-desc">Export site configuration and DNS zones to a portable JSON file. Restore on a fresh stack.</p>
+		</div>
+
+		<!-- Export -->
+		<div class="section">
+			<h3 class="section-title">Export</h3>
+			<p class="section-desc">Select which sites and DNS zones to include. PAT tokens are included — treat the file as sensitive.</p>
+
+			<!-- Sites selector -->
+			<div class="selector-block">
+				<div class="selector-header">
+					<span class="selector-group-label">Sites</span>
+					<label class="check-label">
+						<input
+							type="checkbox"
+							checked={allSitesChecked}
+							indeterminate={someSitesChecked}
+							on:change={toggleAllSites}
+						/>
+						All
+					</label>
+				</div>
+
+				{#if availableSites.length === 0}
+					<p class="empty-hint">No sites found.</p>
+				{:else}
+					<ul class="selector-list">
+						{#each availableSites as site}
+							<li class="selector-item">
+								<label class="check-label">
+									<input
+										type="checkbox"
+										checked={selectedSites.has(site.name)}
+										on:change={() => toggleSite(site.name)}
+									/>
+									<span class="item-name">{site.name}</span>
+								</label>
+								<span class="item-meta">{site.domain}</span>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+
+			<!-- DNS Zones selector -->
+			<div class="selector-block" style="margin-top: 14px;">
+				<div class="selector-header">
+					<span class="selector-group-label">DNS Zones</span>
+					<label class="check-label">
+						<input
+							type="checkbox"
+							checked={allZonesChecked}
+							indeterminate={someZonesChecked}
+							on:change={toggleAllZones}
+						/>
+						All
+					</label>
+				</div>
+
+				{#if availableZones.length === 0}
+					<p class="empty-hint">No DNS zones found.</p>
+				{:else}
+					<ul class="selector-list">
+						{#each availableZones as zone}
+							<li class="selector-item">
+								<label class="check-label">
+									<input
+										type="checkbox"
+										checked={selectedZones.has(zone.name)}
+										on:change={() => toggleZone(zone.name)}
+									/>
+									<span class="item-name">{zone.name}</span>
+								</label>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+
+			<!-- Status line + download -->
+			<div class="export-footer">
+				{#if !nothingSelected}
+					<p class="export-preview">
+						{selectedSites.size} site{selectedSites.size !== 1 ? 's' : ''},
+						{selectedZones.size} zone{selectedZones.size !== 1 ? 's' : ''}
+						&nbsp;&rarr;&nbsp;
+						<span class="export-filename">{getExportFilename(exportScope)}</span>
+					</p>
+				{/if}
+				<button
+					class="btn btn-primary"
+					on:click={downloadBackup}
+					disabled={exporting || nothingSelected}
+				>
+					{#if exporting}
+						<span class="spinner"></span> Exporting…
+					{:else}
+						<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+							<polyline points="7 10 12 15 17 10"/>
+							<line x1="12" y1="15" x2="12" y2="3"/>
+						</svg>
+						Download Backup
+					{/if}
+				</button>
+				{#if exportError}
+					<p class="error-msg">{exportError}</p>
+				{/if}
+			</div>
+		</div>
+
+		<div class="divider"></div>
+
+		<!-- Import -->
+		<div class="section">
+			<h3 class="section-title">Restore</h3>
+			<p class="section-desc">Select a backup file. It will be validated before import is enabled. Existing sites and DNS zones are skipped, not overwritten.</p>
+
+			<label class="file-label">
+				<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+				Choose backup file
+				<input
+					type="file"
+					accept=".json,application/json"
+					bind:this={fileInput}
+					on:change={onFileChange}
+					class="file-input-hidden"
+				/>
+			</label>
+
+			{#if validateError}
+				<p class="error-msg">{validateError}</p>
+			{/if}
+
+			{#if validateState === 'validating'}
+				<div class="status-row">
+					<span class="spinner"></span>
+					<span class="status-text">Validating…</span>
+				</div>
+			{/if}
+
+			{#if validationResult}
+				<div class="validation-card" class:valid={validationResult.valid} class:invalid={!validationResult.valid}>
+					<div class="validation-header">
+						{#if validationResult.valid}
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+							<span class="valid-label">Valid backup</span>
+						{:else}
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+							<span class="invalid-label">Invalid backup</span>
+						{/if}
+					</div>
+
+					<div class="summary-row">
+						<span class="summary-chip">{validationResult.summary.sites} site{validationResult.summary.sites !== 1 ? 's' : ''}</span>
+						<span class="summary-chip">{validationResult.summary.dns_zones} zone{validationResult.summary.dns_zones !== 1 ? 's' : ''}</span>
+						<span class="summary-chip">{validationResult.summary.dns_records} record{validationResult.summary.dns_records !== 1 ? 's' : ''}</span>
+					</div>
+
+					{#if validationResult.errors.length}
+						<ul class="msg-list error-list">
+							{#each validationResult.errors as err}
+								<li>{err}</li>
+							{/each}
+						</ul>
+					{/if}
+
+					{#if validationResult.warnings.length}
+						<ul class="msg-list warn-list">
+							{#each validationResult.warnings as w}
+								<li>{w}</li>
+							{/each}
+						</ul>
+					{/if}
+				</div>
+
+				{#if validationResult.valid && importState !== 'done'}
+					<button
+						class="btn btn-danger"
+						on:click={importFile}
+						disabled={importState === 'importing' || validateState !== 'done'}
+					>
+						{#if importState === 'importing'}
+							<span class="spinner"></span> Importing…
+						{:else}
+							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+							Import Backup
+						{/if}
+					</button>
+				{/if}
+
+				{#if importError}
+					<p class="error-msg">{importError}</p>
+				{/if}
+			{/if}
+
+			{#if importResult}
+				<div class="import-result">
+					<div class="result-section">
+						<span class="result-label">Sites</span>
+						{#if importResult.sites.created.length}
+							<ul class="result-list created">
+								{#each importResult.sites.created as s}<li>✓ {s}</li>{/each}
+							</ul>
+						{/if}
+						{#if importResult.sites.skipped.length}
+							<ul class="result-list skipped">
+								{#each importResult.sites.skipped as s}<li>— {s} (skipped)</li>{/each}
+							</ul>
+						{/if}
+						{#if importResult.sites.failed.length}
+							<ul class="result-list failed">
+								{#each importResult.sites.failed as s}<li>✗ {s}</li>{/each}
+							</ul>
+						{/if}
+					</div>
+					<div class="result-section">
+						<span class="result-label">DNS</span>
+						{#if importResult.dns.created.length}
+							<ul class="result-list created">
+								{#each importResult.dns.created as d}<li>✓ {d}</li>{/each}
+							</ul>
+						{/if}
+						{#if importResult.dns.skipped.length}
+							<ul class="result-list skipped">
+								{#each importResult.dns.skipped as d}<li>— {d} (skipped)</li>{/each}
+							</ul>
+						{/if}
+						{#if importResult.dns.failed.length}
+							<ul class="result-list failed">
+								{#each importResult.dns.failed as d}<li>✗ {d}</li>{/each}
+							</ul>
+						{/if}
+					</div>
+					<button class="btn btn-ghost" on:click={resetImport}>Reset</button>
+				</div>
+			{/if}
+		</div>
+	</section>
+</div>
+
+<style>
+	.page {
+		padding: 32px;
+		max-width: 680px;
+	}
+
+	.page-header {
+		margin-bottom: 28px;
+	}
+
+	.page-title {
+		font-size: 20px;
+		font-weight: 600;
+		color: var(--text-primary);
+		margin: 0;
+	}
+
+	.card {
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		overflow: hidden;
+	}
+
+	.card-header {
+		padding: 20px 24px 16px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.card-title-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-bottom: 6px;
+		color: var(--accent-teal);
+	}
+
+	.card-title {
+		font-size: 14px;
+		font-weight: 600;
+		color: var(--text-primary);
+		margin: 0;
+	}
+
+	.card-desc {
+		font-size: 12px;
+		color: var(--text-muted);
+		margin: 0;
+		line-height: 1.5;
+	}
+
+	.section {
+		padding: 20px 24px;
+	}
+
+	.section-title {
+		font-size: 12px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-muted);
+		margin: 0 0 6px;
+	}
+
+	.section-desc {
+		font-size: 12px;
+		color: var(--text-secondary);
+		margin: 0 0 14px;
+		line-height: 1.5;
+	}
+
+	.divider {
+		height: 1px;
+		background: var(--border);
+	}
+
+	/* ── Form fields ── */
+	.field-group {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.field-row {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.field-label {
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--text-secondary);
+	}
+
+	.field-hint {
+		font-size: 11px;
+		color: var(--text-muted);
+		line-height: 1.4;
+	}
+
+	.input-row {
+		display: flex;
+		gap: 8px;
+		align-items: center;
+		margin-top: 4px;
+	}
+
+	.text-input {
+		flex: 1;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: 5px;
+		padding: 7px 10px;
+		font-size: 12px;
+		font-family: var(--font-mono);
+		color: var(--text-primary);
+		outline: none;
+		transition: border-color 0.15s;
+	}
+
+	.text-input:focus {
+		border-color: var(--accent-teal);
+	}
+
+	.text-input::placeholder {
+		color: var(--text-muted);
+	}
+
+	.readonly-value {
+		font-size: 12px;
+		font-family: var(--font-mono);
+		color: var(--text-secondary);
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: 5px;
+		padding: 7px 10px;
+		margin-top: 4px;
+	}
+
+	.inline-success {
+		font-size: 12px;
+		color: var(--success, #4caf82);
+		margin-top: 6px;
+	}
+
+	/* ── Integrations ── */
+	.integration-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 10px 12px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+	}
+
+	.integration-info {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.status-dot {
+		display: inline-block;
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		flex-shrink: 0;
+	}
+
+	.dot-connected { background: var(--success, #4caf82); }
+	.dot-error { background: var(--danger, #cf5c5c); }
+	.dot-unconfigured { background: var(--text-muted, #4a5568); }
+
+	.integration-name {
+		font-size: 12px;
+		font-weight: 500;
+		color: var(--text-primary);
+	}
+
+	.integration-url {
+		font-size: 11px;
+		font-family: var(--font-mono);
+		color: var(--text-muted);
+	}
+
+	.status-label {
+		font-size: 11px;
+		font-weight: 500;
+	}
+
+	.label-connected { color: var(--success, #4caf82); }
+	.label-error { color: var(--danger, #cf5c5c); }
+	.label-unconfigured { color: var(--text-muted, #4a5568); }
+
+	/* ── Selector ── */
+	.selector-block {
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		overflow: hidden;
+	}
+
+	.selector-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 8px 12px;
+		background: var(--bg-elevated);
+		border-bottom: 1px solid var(--border);
+	}
+
+	.selector-group-label {
+		font-size: 11px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-muted);
+	}
+
+	.selector-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+
+	.selector-item {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 7px 12px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.selector-item:last-child {
+		border-bottom: none;
+	}
+
+	.check-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 7px;
+		font-size: 12px;
+		color: var(--text-secondary);
+		cursor: pointer;
+		user-select: none;
+	}
+
+	.check-label input[type='checkbox'] {
+		accent-color: var(--accent-teal);
+		width: 13px;
+		height: 13px;
+		cursor: pointer;
+	}
+
+	.item-name {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		color: var(--text-primary);
+	}
+
+	.item-meta {
+		font-size: 11px;
+		font-family: var(--font-mono);
+		color: var(--text-muted);
+	}
+
+	.empty-hint {
+		font-size: 12px;
+		color: var(--text-muted);
+		padding: 10px 12px;
+	}
+
+	/* ── Export footer ── */
+	.export-footer {
+		margin-top: 14px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		align-items: flex-start;
+	}
+
+	.export-preview {
+		font-size: 12px;
+		color: var(--text-secondary);
+	}
+
+	.export-filename {
+		font-family: var(--font-mono);
+		color: var(--accent-teal);
+	}
+
+	/* ── Buttons ── */
+	.btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 7px 14px;
+		border-radius: 5px;
+		font-size: 12px;
+		font-weight: 500;
+		cursor: pointer;
+		border: none;
+		transition: background 0.1s, opacity 0.1s;
+	}
+
+	.btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.btn-primary {
+		background: var(--accent-teal);
+		color: #000;
+	}
+
+	.btn-primary:hover:not(:disabled) {
+		filter: brightness(1.1);
+	}
+
+	.btn-danger {
+		background: var(--danger, #cf5c5c);
+		color: #fff;
+	}
+
+	.btn-danger:hover:not(:disabled) {
+		filter: brightness(1.1);
+	}
+
+	.btn-ghost {
+		background: var(--bg-elevated);
+		color: var(--text-secondary);
+		border: 1px solid var(--border);
+	}
+
+	.btn-ghost:hover:not(:disabled) {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	/* ── File picker ── */
+	.file-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 7px 14px;
+		border-radius: 5px;
+		font-size: 12px;
+		font-weight: 500;
+		cursor: pointer;
+		background: var(--bg-elevated);
+		color: var(--text-secondary);
+		border: 1px solid var(--border);
+		transition: background 0.1s, color 0.1s;
+		margin-bottom: 12px;
+	}
+
+	.file-label:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.file-input-hidden {
+		display: none;
+	}
+
+	/* ── Spinner ── */
+	.spinner {
+		display: inline-block;
+		width: 12px;
+		height: 12px;
+		border: 2px solid currentColor;
+		border-top-color: transparent;
+		border-radius: 50%;
+		animation: spin 0.6s linear infinite;
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
+	}
+
+	/* ── Status / feedback ── */
+	.status-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 12px;
+		color: var(--text-muted);
+		margin-bottom: 12px;
+	}
+
+	.status-text {
+		color: var(--text-muted);
+	}
+
+	.error-msg {
+		font-size: 12px;
+		color: var(--danger, #cf5c5c);
+		margin: 8px 0 0;
+	}
+
+	/* ── Validation card ── */
+	.validation-card {
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 14px 16px;
+		margin: 12px 0;
+	}
+
+	.validation-card.valid {
+		border-color: var(--success, #4caf82);
+		background: color-mix(in srgb, var(--success, #4caf82) 8%, transparent);
+	}
+
+	.validation-card.invalid {
+		border-color: var(--danger, #cf5c5c);
+		background: color-mix(in srgb, var(--danger, #cf5c5c) 8%, transparent);
+	}
+
+	.validation-header {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		margin-bottom: 10px;
+		font-size: 13px;
+		font-weight: 600;
+	}
+
+	.valid-label { color: var(--success, #4caf82); }
+	.invalid-label { color: var(--danger, #cf5c5c); }
+
+	.summary-row {
+		display: flex;
+		gap: 6px;
+		flex-wrap: wrap;
+		margin-bottom: 10px;
+	}
+
+	.summary-chip {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		padding: 2px 8px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: 3px;
+		color: var(--text-secondary);
+	}
+
+	.msg-list {
+		margin: 6px 0;
+		padding-left: 16px;
+		font-size: 12px;
+		line-height: 1.6;
+	}
+
+	.error-list { color: var(--danger, #cf5c5c); }
+	.warn-list { color: var(--warning, #d4a843); }
+
+	/* ── Import result ── */
+	.import-result {
+		margin-top: 14px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 14px 16px;
+	}
+
+	.result-section {
+		margin-bottom: 12px;
+	}
+
+	.result-label {
+		font-size: 11px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-muted);
+		display: block;
+		margin-bottom: 4px;
+	}
+
+	.result-list {
+		margin: 0;
+		padding-left: 16px;
+		font-size: 12px;
+		font-family: var(--font-mono);
+		line-height: 1.7;
+	}
+
+	.result-list.created { color: var(--success, #4caf82); }
+	.result-list.skipped { color: var(--text-muted); }
+	.result-list.failed { color: var(--danger, #cf5c5c); }
+</style>
