@@ -1,414 +1,342 @@
 # HermitHost
 
-A self-hosted web platform dashboard for managing deployed sites, DNS records, and deployments. HermitHost integrates with Coolify for deployment management, Technitium for DNS, and provides real-time health monitoring via live probes.
+A self-hosted web platform dashboard for managing deployed sites, DNS records, and deployments. HermitHost wraps Coolify (deployments), Technitium (DNS), and Traefik (reverse proxy + SSL) into a single unified dashboard with zero-config setup.
 
-**Status Dashboard** • **DNS Management** • **Deploy History** • **Health Monitoring**
+**Status Dashboard** • **DNS Management** • **Deploy History** • **Health Monitoring** • **Backup & Restore** • **Auto SSL**
 
 ---
 
 ## What is HermitHost?
 
-HermitHost is a lightweight platform dashboard that gives you visibility and control over all your deployed web applications in one place. It replaces the need to log into multiple dashboards to check site status, manage DNS, and review deployments.
+HermitHost is a lightweight platform dashboard that gives you visibility and control over all your deployed web applications in one place. Instead of logging into Coolify, Technitium, and Traefik separately, HermitHost surfaces everything in a single UI.
 
-- **Monitor everything:** HTTP status, SSL certificate health, DNS resolution
-- **Manage DNS records:** View, create, update, and delete DNS records via Technitium integration
-- **Track deployments:** See deployment history and logs for every site
-- **Works standalone or integrated:** Runs in Docker with optional Coolify and Technitium backends, or in mock mode for UI development
-
----
-
-## Features
-
-- **Site Directory:** List all deployed sites with live health status indicators
-- **Health Probes:** Real-time HTTP, SSL, and DNS monitoring with 60-second cache
-- **Deployment Management:** Trigger deploys, view history, and stream deployment logs
-- **DNS Management:** Create, update, and delete DNS records for your sites
-- **Mock Mode:** Full functionality with mock data when no external services are configured
-- **Traefik Reverse Proxy:** Single ingress point with path-prefix routing (development) or host-based routing (production)
-- **Docker Compose Stack:** Frontend, API, and reverse proxy in one `docker compose up`
+- **Monitor everything:** HTTP status, SSL certificate health, DNS resolution — live probes, 60s cache
+- **Manage DNS:** View, create, update, and delete DNS records via Technitium
+- **Track deployments:** See deployment history and stream logs per site
+- **Backup & restore:** Export/import your full hermithost configuration
+- **Auto SSL:** Traefik + Let's Encrypt — HTTPS with no manual certificate management
+- **One-command setup:** `bash scripts/setup.sh` prompts for two values and handles the rest
 
 ---
 
 ## Architecture
 
-HermitHost is a three-tier system with clear separation of concerns:
-
 ```
 Browser
   ↓
-Traefik (reverse proxy) :8080 — path-prefix routing
+Traefik (reverse proxy) :8080 / :8443
   ├─ /api/* → Express API :3001
-  └─ /*    → SvelteKit Frontend :3000
+  └─ /*     → SvelteKit Frontend :3000
+       ↓
+  ┌────────────────────────────────┐
+  │  Express API                   │
+  │  ├─ Coolify (deployments)      │
+  │  ├─ Technitium (DNS)           │
+  │  ├─ Health probes (HTTP/SSL/DNS)│
+  │  ├─ Config API                 │
+  │  └─ Backup / restore           │
+  └────────────────────────────────┘
+       ↓                    ↓
+  Coolify :8000        Technitium :5380
+  (PostgreSQL + Redis)
 ```
 
-### Components
+### Services
 
 | Service | Tech | Purpose |
 |---------|------|---------|
-| **Frontend** | SvelteKit + TypeScript | Dashboard UI with Svelte reactive components |
-| **API** | Express.js + TypeScript | Thin proxy/aggregation layer to Coolify and Technitium |
-| **Traefik** | Traefik v3 | Reverse proxy with optional Let's Encrypt SSL |
-| **Coolify** | *(optional)* | Deployment and application lifecycle management |
-| **Technitium** | *(optional)* | DNS server with record management API |
-
-### Data Flow
-
-1. **Get Sites List:** Browser → Traefik → Express API → (Coolify OR Mock) → JSON
-2. **Health Probes:** Express API spawns parallel HTTP/SSL/DNS checks, caches 60s per domain
-3. **DNS Management:** Frontend → Express API → Technitium API (or mock fallback)
-4. **Deployments:** Express API triggers Coolify webhooks, streams logs via Coolify's API
+| **Frontend** | SvelteKit + TypeScript | Dashboard UI |
+| **API** | Express.js + TypeScript | Aggregation layer — Coolify, Technitium, probes |
+| **Traefik** | Traefik v3 | Reverse proxy, Let's Encrypt SSL |
+| **Coolify** | Coolify (Docker) | Deployment and app lifecycle management |
+| **Technitium** | Technitium DNS | DNS server with REST management API |
+| **PostgreSQL** | Postgres 15 | Coolify database |
+| **Redis** | Redis | Coolify queue and cache |
 
 ---
 
 ## Prerequisites
 
-### Required
 - **Docker** (v20.10+) and **Docker Compose** (v2.0+)
-- **Node.js** (v18+) — if running native development
-
-### Optional
-- **Coolify instance** — for real deployment management (leave empty for mock mode)
-- **Technitium DNS server** — for real DNS management (leave empty for mock mode)
+- **Node.js** (v18+) — only for native development, not required for Docker
 
 ---
 
-## Quick Start — Docker (Local Development)
+## Quick Start
 
-Get the dashboard running in < 2 minutes:
+### 1. Clone and setup
 
 ```bash
-cd /Users/rdemeritt/projects/ai/hermithost
+git clone https://github.com/rdemeritt/hermithost.git
+cd hermithost
 
-# Copy environment template and optionally edit
-cp .env.template .env
-# Leave COOLIFY and TECHNITIUM vars empty for mock mode
-# Edit if you have real instances
-
-# Start all services with Docker Compose
-docker compose up --build
-
-# Dashboard: http://localhost:8080
-# Traefik UI: http://localhost:8081
+bash scripts/setup.sh
 ```
 
-That's it. The entire stack is running:
-- Frontend on port 3000
-- API on port 3001
-- Traefik on port 8080 (HTTP), 8081 (dashboard), 8443 (HTTPS)
+`setup.sh` will:
+- Generate all Coolify internal secrets automatically
+- Default Coolify admin to `admin@hermithost.local` / `admin`
+- Prompt for your **ACME email** (Let's Encrypt SSL notifications)
+- Prompt for your **NS_HOSTNAME** (public IP or hostname of this server)
 
-Stop with `Ctrl+C`, restart with `docker compose up`.
+### 2. Start the stack
+
+```bash
+bash scripts/start.sh
+```
+
+### 3. Open the dashboard
+
+```
+http://localhost:8080
+```
+
+Coolify UI (escape hatch only): `http://localhost:8000`
+Technitium DNS UI: `http://localhost:5380`
 
 ---
 
-## Quick Start — Native (Local Development)
+## Setup Script Details
 
-Run frontend and API separately without Docker:
-
-### Terminal 1 — API Server
 ```bash
-cd /Users/rdemeritt/projects/ai/hermithost/api
-
-npm install
-npm run dev
-# API listening at http://localhost:3001
+bash scripts/setup.sh
 ```
 
-### Terminal 2 — Frontend
-```bash
-cd /Users/rdemeritt/projects/ai/hermithost
+| Variable | How it's set |
+|----------|-------------|
+| `COOLIFY_ADMIN_EMAIL` | Defaults to `admin@hermithost.local` |
+| `COOLIFY_ADMIN_PASSWORD` | Defaults to `admin` |
+| `COOLIFY_APP_ID/KEY` | Auto-generated (`openssl rand`) |
+| `COOLIFY_DB_PASSWORD` | Auto-generated |
+| `COOLIFY_REDIS_PASSWORD` | Auto-generated |
+| `COOLIFY_PUSHER_*` | Auto-generated |
+| `ACME_EMAIL` | **Prompted** — required for SSL cert issuance |
+| `NS_HOSTNAME` | **Prompted** — your server's public IP or hostname |
 
-npm install
-npm run dev
-# Dashboard at http://localhost:5113
-# API proxied to localhost:3001 automatically
-```
-
-The Vite dev server auto-proxies `/api/*` requests to the Express API.
+Safe to re-run — only fills empty values, never overwrites existing ones.
 
 ---
 
 ## Environment Variables
 
-Create `.env` from `.env.template` and configure:
+Full reference for `.env`:
 
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `GITHUB_TOKEN` | GitHub personal access token for git operations | *(empty)* | No |
-| `COOLIFY_API_URL` | Coolify API base URL (e.g., `http://localhost:8000/api/v1`) | *(empty)* | No* |
-| `COOLIFY_API_TOKEN` | Coolify API token for authentication | *(empty)* | No* |
-| `TECHNITIUM_URL` | Technitium DNS server base URL (e.g., `http://localhost:5380`) | *(empty)* | No* |
-| `TECHNITIUM_TOKEN` | Technitium DNS API token | *(empty)* | No* |
-| `TRAEFIK_HTTP_PORT` | HTTP port for Traefik reverse proxy | `8080` | No |
-| `TRAEFIK_HTTPS_PORT` | HTTPS port for Traefik reverse proxy | `8443` | No |
-| `ACME_EMAIL` | Email for Let's Encrypt ACME account (production only) | *(empty)* | No |
-
-**\* Either both or neither must be set.** If `COOLIFY_API_URL` is empty, the API runs in mock mode with built-in test data.
-
-### Mock Mode
-When all integration variables are empty, HermitHost runs entirely in mock mode:
-- No external dependencies required
-- All endpoints return mock data
-- Perfect for UI development and demos
-- Health probes still work for real domains (e.g., `probeSite('github.com')`)
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `COOLIFY_ADMIN_EMAIL` | Coolify admin login email | `admin@hermithost.local` |
+| `COOLIFY_ADMIN_PASSWORD` | Coolify admin login password | `admin` |
+| `COOLIFY_PORT` | Coolify UI port | `8000` |
+| `ACME_EMAIL` | Let's Encrypt contact email | *(prompted)* |
+| `NS_HOSTNAME` | Server public IP or hostname | *(prompted)* |
+| `TRAEFIK_HTTP_PORT` | Traefik HTTP port | `8080` |
+| `TRAEFIK_HTTPS_PORT` | Traefik HTTPS port | `8443` |
+| `TECHNITIUM_URL` | Technitium API base URL | `http://technitium:5380` |
+| `COOLIFY_API_TOKEN` | Auto-provisioned at startup | *(auto)* |
+| `TECHNITIUM_TOKEN` | Auto-provisioned at startup | *(auto)* |
 
 ---
 
-## Production Deployment
+## Features
 
-### Standalone (Self-Hosted)
+### Site Directory
+List all deployed sites with live status indicators — HTTP reachability, SSL validity, DNS resolution.
 
-Deploy on a standalone server with Traefik handling SSL:
+### Health Probes
+Real-time per-site probes run in parallel, cached 60 seconds:
+- **HTTP** — response code + latency
+- **SSL** — cert valid, expiry date, issuer
+- **DNS** — A-record resolves
 
-```bash
-# Set your ACME email for Let's Encrypt
-echo "ACME_EMAIL=admin@yourdomain.com" >> .env
+### Deployment Management
+Trigger deploys, view deployment history, stream live deployment logs — all via the Coolify integration.
 
-# Start with production compose file
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+### DNS Management
+Create, update, and delete DNS records for your sites via the Technitium integration. Records update immediately.
 
-# Dashboard at https://yourdomain.com
-# Traefik dashboard at https://yourdomain.com:8081
+### Backup & Restore
+Export a full snapshot of your hermithost configuration (sites, DNS records, settings) to a JSON file. Import to restore or migrate to a new server.
+
+```
+Settings → Backup → Export
+Settings → Backup → Import
 ```
 
-The production compose file adds:
-- ACME automatic certificate provisioning
-- Persistent traefik certificate storage
+### Settings
+Manage hermithost configuration (NS hostname, Traefik ports, admin credentials) from the UI without editing `.env` directly.
 
-### Behind Coolify (Managed Hosting)
+### Auto SSL
+Traefik + Let's Encrypt automatically issues and renews SSL certificates for all sites. Requires a valid `ACME_EMAIL` and publicly reachable `NS_HOSTNAME`.
 
-If deploying HermitHost *inside* Coolify:
+---
 
-1. **Remove Traefik from stack** — Coolify's Traefik handles ingress
-2. **Update Docker labels** — Change routing rule from `PathPrefix()` to `Host()`
-3. **Set CORS_ORIGIN** — Update to your actual domain
+## Scripts
 
-```yaml
-# In docker-compose.yml, update frontend labels:
-labels:
-  - "traefik.http.routers.frontend.rule=Host(`hermithost.yourdomain.com`)"
-  - "traefik.http.routers.frontend.priority=1"
-```
-
-Then update environment:
-```bash
-CORS_ORIGIN=https://hermithost.yourdomain.com
-```
+| Script | Purpose |
+|--------|---------|
+| `bash scripts/setup.sh` | First-time config — generates secrets, prompts for email + hostname |
+| `bash scripts/start.sh` | Start the full stack |
+| `bash scripts/stop.sh` | Stop all containers |
+| `bash scripts/restart.sh` | Restart the stack |
+| `bash scripts/status.sh` | Show container status |
+| `bash scripts/logs` | Tail logs (usage: `bash scripts/logs api`) |
 
 ---
 
 ## API Reference
 
-All endpoints are namespaced under `/api`.
+All endpoints are under `/api`.
 
 ### Sites
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/sites` | List all sites |
-| `GET` | `/api/sites/:slug` | Get site details with health probes |
-| `POST` | `/api/sites` | Create new site |
-| `PATCH` | `/api/sites/:slug` | Update site settings (name, description, etc.) |
+| `GET` | `/api/sites/:slug` | Site detail with live health probes |
+| `POST` | `/api/sites` | Create site |
+| `PATCH` | `/api/sites/:slug` | Update site settings |
 | `DELETE` | `/api/sites/:slug` | Delete site |
 
-### Site Health & Deployments
+### Deployments
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/sites/:slug/deploy` | Trigger a deployment |
-| `GET` | `/api/sites/:slug/deployments` | Get deployment history |
-| `GET` | `/api/sites/:slug/deployments/:id/log` | Get deployment logs |
+| `POST` | `/api/sites/:slug/deploy` | Trigger deployment |
+| `GET` | `/api/sites/:slug/deployments` | Deployment history |
+| `GET` | `/api/sites/:slug/deployments/:id/log` | Deployment logs |
 
-### DNS Records
+### DNS
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/sites/:slug/dns` | List DNS records for site |
+| `GET` | `/api/sites/:slug/dns` | List DNS records |
 | `POST` | `/api/sites/:slug/dns` | Create DNS record |
 | `PUT` | `/api/sites/:slug/dns/:id` | Update DNS record |
 | `DELETE` | `/api/sites/:slug/dns/:id` | Delete DNS record |
 
+### Config & Backup
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/config` | Get current hermithost config |
+| `PATCH` | `/api/config` | Update config values |
+| `GET` | `/api/backup/export` | Export full config backup |
+| `POST` | `/api/backup/import` | Import backup file |
+| `POST` | `/api/backup/validate` | Validate backup before importing |
+
 ### System
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/health` | Health check endpoint |
+| `GET` | `/api/health` | Health check |
 
 ---
 
-## Health Probes
+## Project Structure
 
-The API runs real-time health checks on configured sites:
-
-### HTTP Probe
-Performs HTTPS request to domain, records:
-- Response status code
-- Response time (ms)
-- Reachability (true/false)
-
-### SSL Probe
-Opens TLS connection, extracts certificate:
-- Certificate valid (true/false)
-- Expiration date and days until expiry
-- Issuer (e.g., "Let's Encrypt")
-
-### DNS Probe
-Performs DNS A-record lookup:
-- Domain resolves (true/false)
-- Propagation status
-
-All probes run in parallel and cache results for 60 seconds per domain.
-
----
-
-## Development
-
-### Project Structure
 ```
 hermithost/
-├── api/                          # Express API server
+├── api/                          # Express API
 │   ├── src/
-│   │   ├── index.ts              # Express app setup
+│   │   ├── index.ts              # App setup + route registration
 │   │   ├── routes/
-│   │   │   ├── sites.ts          # Site CRUD and probes
-│   │   │   ├── health.ts         # Health check endpoint
-│   │   │   └── hosted.ts         # Static file serving for deployed sites
+│   │   │   ├── sites.ts          # Site CRUD, health probes, deployments
+│   │   │   ├── backup.ts         # Export / import / validate
+│   │   │   ├── config.ts         # Config read/write
+│   │   │   └── health.ts         # Health check
 │   │   ├── services/
 │   │   │   ├── coolify.ts        # Coolify API client
 │   │   │   ├── technitium.ts     # Technitium DNS client
-│   │   │   └── healthProbe.ts    # HTTP/SSL/DNS probes
-│   │   └── data/
-│   │       └── mock.ts           # Mock site and DNS data
+│   │   │   ├── healthProbe.ts    # HTTP/SSL/DNS probes
+│   │   │   ├── backup.ts         # Backup/restore logic
+│   │   │   └── mapper.ts         # Coolify → hermithost type mapper
+│   │   └── types.ts              # Shared API types
 │   ├── package.json
 │   └── Dockerfile
 ├── src/                          # SvelteKit frontend
 │   ├── routes/
-│   │   ├── +page.svelte          # Dashboard / sites list
-│   │   └── sites/[slug]/+page.svelte  # Site detail view
-│   ├── lib/
-│   │   └── types.ts              # Shared TypeScript types
-│   └── app.html
-├── docker-compose.yml            # Development compose
-├── docker-compose.prod.yml       # Production overrides (ACME, volumes)
-├── Dockerfile                    # SvelteKit build (multi-stage)
-├── vite.config.ts               # Dev server proxy config
-├── package.json
-├── .env.template
+│   │   ├── +page.svelte          # Sites dashboard
+│   │   ├── sites/[slug]/
+│   │   │   └── +page.svelte      # Site detail
+│   │   └── settings/
+│   │       └── +page.svelte      # Settings + backup UI
+│   └── lib/
+│       └── types.ts              # Frontend types
+├── traefik/                      # Traefik config
+│   └── conf.d/routes.yml         # Route rules
+├── docker/                       # Container entrypoint scripts
+├── scripts/                      # Setup and management scripts
+├── docker-compose.yml            # Full stack
+├── docker-compose.prod.yml       # Production overrides (ACME volumes)
+├── Dockerfile                    # SvelteKit multi-stage build
+├── vite.config.ts                # Dev proxy config
+├── .env.template                 # Environment template
 └── README.md
+```
+
+---
+
+## Development (Native)
+
+Run frontend and API outside Docker:
+
+**Terminal 1 — API**
+```bash
+cd api && npm install && npm run dev
+# http://localhost:3001
+```
+
+**Terminal 2 — Frontend**
+```bash
+npm install && npm run dev
+# http://localhost:5113 — proxies /api to :3001 automatically
 ```
 
 ### Useful Commands
 
-#### Frontend
-```bash
-npm run dev        # Start dev server (http://localhost:5113)
-npm run build      # Build for production
-npm run check      # TypeScript and Svelte type checking
-npm run check:watch  # Watch for type errors
-```
-
-#### API
-```bash
-cd api
-npm run dev        # Start Express dev server
-npm run build      # Compile TypeScript → dist/
-npm start          # Run compiled server
-```
-
-#### Docker
-```bash
-docker compose up --build     # Build and start all services
-docker compose logs -f        # Stream all service logs
-docker compose down           # Stop and remove containers
-```
-
-### Type Checking
-
-Both frontend and API are fully typed with TypeScript. Check types before committing:
-
 ```bash
 # Frontend
-npm run check
+npm run dev          # Dev server
+npm run build        # Production build
+npm run check        # TypeScript + Svelte type check
 
 # API
-cd api && npx tsc --noEmit
+cd api
+npm run dev          # Express dev server
+npm run build        # Compile TypeScript → dist/
+
+# Docker
+docker compose up --build    # Build and start
+docker compose logs -f       # Stream logs
+docker compose down          # Stop and remove
 ```
-
-### CI/CD
-
-GitHub Actions pipeline runs on all PRs and pushes to main:
-1. **Typecheck API** — TypeScript compilation check
-2. **Typecheck Frontend** — SvelteKit sync + TypeScript check
-3. **Build Frontend** — Vite production build
-4. **Build API** — TypeScript compilation
-5. **Docker Build** — Build both Docker images (no push in CI)
-
-All steps must pass before merging.
 
 ---
 
 ## Troubleshooting
 
-### "API not reachable" in development (native)
+### Stack won't start — missing .env values
 
-**Problem:** Frontend can't reach API at localhost:3001
+Run `bash scripts/setup.sh` — it will prompt for anything missing and generate all secrets.
 
-**Solution:** Ensure both dev servers are running:
-- Terminal 1: `cd api && npm run dev` (port 3001)
-- Terminal 2: `npm run dev` (port 5113 with proxy)
+### Coolify login fails
 
-Vite dev server proxies `/api` automatically via `vite.config.ts`.
+Default credentials: `admin@hermithost.local` / `admin`
+Override in `.env`: set `COOLIFY_ADMIN_EMAIL` and `COOLIFY_ADMIN_PASSWORD` before first boot.
 
-### "CORS error" in production
+### SSL certs not issuing
 
-**Problem:** Browser blocks API requests with CORS error
+- Confirm `ACME_EMAIL` is a real email address
+- Confirm `NS_HOSTNAME` resolves publicly and ports 80/443 are open
+- Check Traefik logs: `docker compose logs traefik`
 
-**Solution:** Update `CORS_ORIGIN` environment variable to match frontend domain:
+### Probes show "not reachable"
+
+- Verify the site domain is publicly resolvable
+- Confirm outbound HTTPS from the container isn't blocked
+- Test: `curl -I https://yourdomain.com`
+
+### Port conflict
+
+Change ports in `.env`:
 ```bash
-CORS_ORIGIN=https://yourdomain.com
-docker compose up -d
+TRAEFIK_HTTP_PORT=8082
+TRAEFIK_HTTPS_PORT=8444
 ```
-
-### Probes always show "not reachable"
-
-**Problem:** Health probes fail for all sites
-
-**Solution:** Check that:
-1. Site domains are valid and publicly resolvable
-2. Sites have valid HTTPS certificates
-3. No firewall blocking outbound HTTPS traffic from container
-4. Mock mode works (test with `curl localhost:8080/api/sites`)
-
-### Traefik dashboard shows no routes
-
-**Problem:** Services appear offline in Traefik UI
-
-**Solution:** Check that services are healthy:
-```bash
-docker compose logs traefik
-docker compose logs frontend
-docker compose logs api
-```
-
-Ensure labels are correct in docker-compose.yml (no typos in `traefik.http.routers.*`).
-
-### Docker Compose fails with "port already in use"
-
-**Problem:** Port 8080 or 3000 already in use
-
-**Solution:** Either:
-1. Stop the conflicting service: `lsof -i :8080`
-2. Change ports in `.env`: `TRAEFIK_HTTP_PORT=8082`
-
----
-
-## Contributing
-
-All work must pass type checking and build tests:
-
-```bash
-# Before committing:
-npm run check              # Frontend
-cd api && npm run build    # API
-docker compose up --build  # Full stack smoke test
-```
-
-Create a feature branch and open a PR. GitHub Actions will run the full pipeline automatically.
 
 ---
 
