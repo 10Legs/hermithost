@@ -216,6 +216,7 @@
 
 	// ── Backup import ──────────────────────────────────────────────────────────
 	let fileInput: HTMLInputElement;
+	let selectedFiles: FileList | null = null;
 	let parsedBackup: unknown = null;
 	let validateState: 'idle' | 'validating' | 'done' = 'idle';
 	let validationResult: ValidationResult | null = null;
@@ -224,6 +225,11 @@
 	let importState: 'idle' | 'importing' | 'done' = 'idle';
 	let importResult: ImportResult | null = null;
 	let importError = '';
+
+	// bind:files is the reliable Svelte way to react to file input changes
+	$: if (selectedFiles && selectedFiles.length > 0) {
+		handleSelectedFile(selectedFiles[0]);
+	}
 
 	function resetImport() {
 		parsedBackup = null;
@@ -234,12 +240,17 @@
 		importResult = null;
 		importError = '';
 		if (fileInput) fileInput.value = '';
+		selectedFiles = null;
 	}
 
-	async function onFileChange(e: Event) {
-		resetImport();
-		const file = (e.target as HTMLInputElement).files?.[0];
-		if (!file) return;
+	async function handleSelectedFile(file: File) {
+		parsedBackup = null;
+		validateState = 'idle';
+		validationResult = null;
+		validateError = '';
+		importState = 'idle';
+		importResult = null;
+		importError = '';
 		try {
 			const text = await file.text();
 			parsedBackup = JSON.parse(text);
@@ -527,7 +538,7 @@
 					type="file"
 					accept=".json,application/json"
 					bind:this={fileInput}
-					on:change={onFileChange}
+					bind:files={selectedFiles}
 					class="file-input-hidden"
 				/>
 			</label>
