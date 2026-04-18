@@ -45,11 +45,6 @@ prompt_if_empty() {
   fi
 }
 
-# ── Coolify admin defaults ────────────────────────────────────────────────────
-echo "[setup] Checking Coolify admin credentials..."
-set_if_empty "COOLIFY_ADMIN_EMAIL"    "admin@hermithost.local"
-set_if_empty "COOLIFY_ADMIN_PASSWORD" "admin"
-
 # ── Generate Coolify internal secrets ────────────────────────────────────────
 echo "[setup] Checking Coolify secrets..."
 set_if_empty "COOLIFY_APP_ID"            "$(openssl rand -hex 16)"
@@ -65,6 +60,25 @@ echo ""
 echo "[setup] Checking required configuration..."
 prompt_if_empty "ACME_EMAIL"   "Email for Let's Encrypt SSL certificates (e.g. you@example.com)"
 prompt_if_empty "NS_HOSTNAME"  "Public IP or hostname of this server (e.g. 192.168.2.56 or ns1.example.com)"
+
+# ── Coolify admin defaults ────────────────────────────────────────────────────
+# Email defaults to ACME_EMAIL (a real, validated address — required for Coolify's RFC+DNS email check).
+# Password is auto-generated to meet Coolify's policy: min 8 chars, mixed case, numbers, symbols.
+echo ""
+echo "[setup] Checking Coolify admin credentials..."
+ACME_EMAIL_VALUE="$(grep -E '^ACME_EMAIL=' "$ENV_FILE" | cut -d'=' -f2-)"
+set_if_empty "COOLIFY_ADMIN_EMAIL" "${ACME_EMAIL_VALUE}"
+if grep -qE "^COOLIFY_ADMIN_PASSWORD=\s*$" "$ENV_FILE" 2>/dev/null; then
+  GENERATED_PASSWORD="A$(openssl rand -hex 10)1!"
+  sed -i '' "s|^COOLIFY_ADMIN_PASSWORD=.*|COOLIFY_ADMIN_PASSWORD=${GENERATED_PASSWORD}|" "$ENV_FILE"
+  echo "[setup] Set COOLIFY_ADMIN_PASSWORD."
+  echo ""
+  echo "[setup] *** SAVE THIS PASSWORD — it will not be shown again ***"
+  echo "[setup] Coolify admin password: ${GENERATED_PASSWORD}"
+  echo ""
+else
+  echo "[setup] COOLIFY_ADMIN_PASSWORD already set — skipping."
+fi
 
 echo ""
 echo "[setup] Configuration complete. Ready to start:"

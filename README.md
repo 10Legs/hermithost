@@ -75,9 +75,9 @@ bash scripts/setup.sh
 
 `setup.sh` will:
 - Generate all Coolify internal secrets automatically
-- Default Coolify admin to `admin@hermithost.local` / `admin`
-- Prompt for your **ACME email** (Let's Encrypt SSL notifications)
+- Prompt for your **ACME email** (Let's Encrypt SSL notifications) — also used as the Coolify admin email
 - Prompt for your **NS_HOSTNAME** (public IP or hostname of this server)
+- Auto-generate a strong Coolify admin password and print it once — save it
 
 ### 2. Start the stack
 
@@ -104,8 +104,8 @@ bash scripts/setup.sh
 
 | Variable | How it's set |
 |----------|-------------|
-| `COOLIFY_ADMIN_EMAIL` | Defaults to `admin@hermithost.local` |
-| `COOLIFY_ADMIN_PASSWORD` | Defaults to `admin` |
+| `COOLIFY_ADMIN_EMAIL` | Defaults to `ACME_EMAIL` value (real email required by Coolify) |
+| `COOLIFY_ADMIN_PASSWORD` | Auto-generated strong password — printed to stdout during setup |
 | `COOLIFY_APP_ID/KEY` | Auto-generated (`openssl rand`) |
 | `COOLIFY_DB_PASSWORD` | Auto-generated |
 | `COOLIFY_REDIS_PASSWORD` | Auto-generated |
@@ -123,8 +123,8 @@ Full reference for `.env`:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `COOLIFY_ADMIN_EMAIL` | Coolify admin login email | `admin@hermithost.local` |
-| `COOLIFY_ADMIN_PASSWORD` | Coolify admin login password | `admin` |
+| `COOLIFY_ADMIN_EMAIL` | Coolify admin login email | Defaults to `ACME_EMAIL` value |
+| `COOLIFY_ADMIN_PASSWORD` | Coolify admin login password | Auto-generated strong password, printed at setup |
 | `COOLIFY_PORT` | Coolify UI port | `8000` |
 | `ACME_EMAIL` | Let's Encrypt contact email | *(prompted)* |
 | `NS_HOSTNAME` | Server public IP or hostname | *(prompted)* |
@@ -316,8 +316,9 @@ Run `bash scripts/setup.sh` — it will prompt for anything missing and generate
 
 ### Coolify login fails
 
-Default credentials: `admin@hermithost.local` / `admin`
-Override in `.env`: set `COOLIFY_ADMIN_EMAIL` and `COOLIFY_ADMIN_PASSWORD` before first boot.
+- **Email:** the value of `ACME_EMAIL` you entered during `setup.sh`
+- **Password:** the strong password printed to stdout during `setup.sh` (look for `[setup] Coolify admin password: ...`)
+- To reset: clear `COOLIFY_ADMIN_EMAIL` and `COOLIFY_ADMIN_PASSWORD` in `.env` and re-run `bash scripts/setup.sh`
 
 ### SSL certs not issuing
 
