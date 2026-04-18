@@ -219,6 +219,7 @@ services:
     volumes:
       - hermithost-sites:/app/sites
       - coolify-api-token:/coolify-api-token:ro
+      - coolify-keys:/coolify-keys:ro
       - ./traefik/conf.d:/app/traefik-conf.d
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
