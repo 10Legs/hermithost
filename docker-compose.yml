@@ -236,9 +236,9 @@ services:
     image: technitium/dns-server:latest
     restart: unless-stopped
     ports:
-      - "5380:5380"         # Technitium web UI / API
-      - "53:53/udp"         # DNS queries (required)
-      - "53:53/tcp"         # DNS over TCP (required)
+      - "5380:5380"                           # Technitium web UI / API
+      - "${DNS_PORT:-5353}:53/udp"           # DNS queries (set DNS_PORT=53 in production)
+      - "${DNS_PORT:-5353}:53/tcp"           # DNS over TCP
     volumes:
       - technitium-config:/etc/dns
     networks:

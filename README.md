@@ -131,6 +131,7 @@ Full reference for `.env`:
 | `TRAEFIK_HTTP_PORT` | Traefik HTTP port | `8080` |
 | `TRAEFIK_HTTPS_PORT` | Traefik HTTPS port | `8443` |
 | `TECHNITIUM_URL` | Technitium API base URL | `http://technitium:5380` |
+| `DNS_PORT` | Host port for DNS queries. Use `53` on dedicated servers; default avoids macOS/Linux conflict | `5353` |
 | `COOLIFY_API_TOKEN` | Auto-provisioned at startup | *(auto)* |
 | `TECHNITIUM_TOKEN` | Auto-provisioned at startup | *(auto)* |
 
