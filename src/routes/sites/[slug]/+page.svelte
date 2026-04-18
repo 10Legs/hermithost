@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import type { PageData } from './$types';
 	import { formatRelativeTime, formatDuration } from '$lib/data';
 	import type { DnsRecord, Deploy, Site } from '$lib/types';
@@ -314,6 +315,52 @@
 			editingRecord = null;
 		}
 	}
+
+	// Deploy key
+	let deployPublicKey = '';
+	let deployKeyCopied = false;
+
+	function parseGithubOwnerRepo(url: string): string | null {
+		if (!url) return null;
+		// SSH: git@github.com:owner/repo.git
+		const sshMatch = url.match(/^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/);
+		if (sshMatch) return sshMatch[1];
+		// HTTPS: https://github.com/owner/repo[.git]
+		const httpsMatch = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?(?:\/.*)?$/);
+		if (httpsMatch) return httpsMatch[1];
+		return null;
+	}
+
+	async function copyDeployKey(): Promise<void> {
+		if (!deployPublicKey) return;
+		try {
+			await navigator.clipboard.writeText(deployPublicKey);
+			deployKeyCopied = true;
+			setTimeout(() => { deployKeyCopied = false; }, 2000);
+		} catch {
+			// clipboard write failed silently
+		}
+	}
+
+	function openGithubDeployKeys(): void {
+		const ownerRepo = parseGithubOwnerRepo(site.repository);
+		if (!ownerRepo) return;
+		window.open(`https://github.com/${ownerRepo}/settings/keys/new`, '_blank');
+	}
+
+	onMount(async () => {
+		if (data.site.deploy_auth === 'ssh_key') {
+			try {
+				const res = await fetch('/api/config/deploy-key');
+				if (res.ok) {
+					const body: { public_key: string } = await res.json();
+					deployPublicKey = body.public_key;
+				}
+			} catch {
+				// silently fail — key will be empty
+			}
+		}
+	});
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
@@ -770,6 +817,32 @@
 						</div>
 					</div>
 				</div>
+
+				{#if site.deploy_auth === 'ssh_key'}
+				<div class="settings-section">
+					<h2 class="section-title">Deploy Key</h2>
+					<div class="settings-form">
+						<p class="deploy-key-hint text-secondary">Add this public key to your GitHub repository as a deploy key so HermitHost can pull your code.</p>
+						{#if deployPublicKey}
+							<div class="deploy-key-block">
+								<code class="deploy-key-text mono">{deployPublicKey}</code>
+							</div>
+							<div class="form-actions">
+								<button class="btn btn-ghost btn-sm" on:click={copyDeployKey}>
+									{deployKeyCopied ? 'Copied!' : 'Copy'}
+								</button>
+								{#if parseGithubOwnerRepo(site.repository)}
+									<button class="btn btn-primary btn-sm" on:click={openGithubDeployKeys}>
+										Add to GitHub →
+									</button>
+								{/if}
+							</div>
+						{:else}
+							<p class="text-secondary" style="font-size:12px">Loading deploy key…</p>
+						{/if}
+					</div>
+				</div>
+				{/if}
 
 				<div class="settings-section danger-zone">
 					<h2 class="section-title text-danger">Danger Zone</h2>
@@ -1621,5 +1694,27 @@
 		font-size: 0.75rem;
 		margin-top: 0.25rem;
 		margin-bottom: 0;
+	}
+
+	/* Deploy key */
+	.deploy-key-hint {
+		font-size: 12px;
+		margin: 0;
+	}
+
+	.deploy-key-block {
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-bright);
+		border-radius: 5px;
+		padding: 10px 12px;
+		overflow-x: auto;
+	}
+
+	.deploy-key-text {
+		font-size: 11px;
+		color: var(--text-secondary);
+		word-break: break-all;
+		white-space: pre-wrap;
+		display: block;
 	}
 </style>
