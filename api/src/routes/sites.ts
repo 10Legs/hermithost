@@ -262,6 +262,8 @@ export async function provisionTraefikRoute(slug: string, domain: string, port: 
       rule: "Host(\`${domain}\`)"
       entryPoints:
         - https
+      tls:
+        certResolver: letsencrypt
       service: site-${slug}
 
   services:
