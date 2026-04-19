@@ -322,12 +322,15 @@
 
 	function parseGithubOwnerRepo(url: string): string | null {
 		if (!url) return null;
-		// SSH: git@github.com:owner/repo.git
+		// SSH: git@github.com:owner/repo[.git]
 		const sshMatch = url.match(/^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/);
 		if (sshMatch) return sshMatch[1];
 		// HTTPS: https://github.com/owner/repo[.git]
 		const httpsMatch = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?(?:\/.*)?$/);
 		if (httpsMatch) return httpsMatch[1];
+		// Short-form: owner/repo[.git]
+		const shortMatch = url.match(/^([^/\s:]+\/[^/\s]+?)(?:\.git)?$/);
+		if (shortMatch) return shortMatch[1];
 		return null;
 	}
 
@@ -343,7 +346,8 @@
 	}
 
 	function openGithubDeployKeys(): void {
-		const ownerRepo = parseGithubOwnerRepo(site.repository);
+		// Use the live form value so the button works without requiring a save first
+		const ownerRepo = parseGithubOwnerRepo(settingsRepo);
 		if (!ownerRepo) return;
 		window.open(`https://github.com/${ownerRepo}/settings/keys/new`, '_blank');
 	}
@@ -805,7 +809,7 @@
 										<button class="btn btn-ghost btn-sm" on:click={copyDeployKey}>
 											{deployKeyCopied ? 'Copied!' : 'Copy Key'}
 										</button>
-										{#if parseGithubOwnerRepo(site.repository)}
+										{#if parseGithubOwnerRepo(settingsRepo)}
 											<button class="btn btn-primary btn-sm" on:click={openGithubDeployKeys}>
 												Add to GitHub →
 											</button>
