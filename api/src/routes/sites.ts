@@ -12,7 +12,8 @@ import { mapSite, mapDeploy } from '../services/mapper';
 import { probeSite } from '../services/healthProbe';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
 import { createTechnitiumClient } from '../services/technitium';
-import { readNsHostname } from './config';
+import { readNsHostname, readNsServerIp } from './config';
+import { TechnitiumClient } from '../services/technitium';
 
 const router = Router();
 
@@ -54,12 +55,12 @@ function mapSiteWithStoredAuth(
 }
 
 // ── DNS auto-provisioning ─────────────────────────────────────────────────────
-// Creates a zone + A record for the given domain pointing at NS_HOSTNAME.
+// Creates a zone + A record for the given domain pointing at NS_SERVER_IP.
 // Non-fatal: logs warnings but never throws — site ops should not fail due to DNS.
 export async function provisionDns(fqdn: string): Promise<void> {
-  const serverIp = readNsHostname();
+  const serverIp = readNsServerIp();
   if (!serverIp) {
-    console.warn('[dns-provision] NS_HOSTNAME not set — skipping DNS provisioning');
+    console.warn('[dns-provision] NS_SERVER_IP not set — skipping DNS provisioning');
     return;
   }
   // Strip protocol and trailing slashes to get bare domain
@@ -92,6 +93,64 @@ export async function provisionDns(fqdn: string): Promise<void> {
     console.log(`[dns-provision] A record created: ${domain} @ → ${serverIp}`);
   } catch (err) {
     console.warn(`[dns-provision] A record create warning for ${domain}:`, (err as Error).message);
+  }
+}
+
+// ── DNS glue record provisioning ─────────────────────────────────────────────
+// Creates A record: nsHostname → serverIp in the parent zone.
+// e.g. ns1.example.com → 1.2.3.4 in the example.com zone.
+export async function ensureNsGlueRecords(
+  client: TechnitiumClient,
+  nsHostname: string,
+  serverIp: string
+): Promise<void> {
+  try {
+    const parts = nsHostname.split('.');
+    if (parts.length < 2) return;
+    const zone = parts.slice(1).join('.');
+    try {
+      await client.createZone(zone, 'Primary');
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      if (!msg.toLowerCase().includes('already exists')) {
+        console.warn(`[dns-init] Zone create warning for ${zone}:`, msg);
+      }
+    }
+    const params = new URLSearchParams();
+    params.set('type', 'A');
+    params.set('ipAddress', serverIp);
+    params.set('ttl', '3600');
+    await client.addRecord(nsHostname, params);
+    console.log(`[dns-init] Glue A record: ${nsHostname} → ${serverIp}`);
+  } catch (err) {
+    console.warn('[dns-init] ensureNsGlueRecords failed:', (err as Error).message);
+  }
+}
+
+// ── Bad NS record cleanup ─────────────────────────────────────────────────────
+// Removes NS records whose value is a bare label (no dots) — Docker container IDs
+// leaked into zones when Technitium dnsServerDomain was not configured.
+export async function cleanBadNsRecords(client: TechnitiumClient): Promise<void> {
+  try {
+    const zones = await client.listZones();
+    for (const zone of zones) {
+      if (zone.internal || zone.type !== 'Primary') continue;
+      const { records } = await client.getRecords(zone.name);
+      for (const rec of records) {
+        if (rec.type !== 'NS') continue;
+        const ns: string = (rec.rData as { nameServer?: string }).nameServer ?? '';
+        const bare = ns.replace(/\.$/, '');
+        if (!bare.includes('.')) {
+          const params = new URLSearchParams();
+          params.set('type', 'NS');
+          params.set('nameServer', ns);
+          await client.deleteRecord(zone.name, params);
+          console.log(`[dns-init] Removed bad NS record: ${zone.name} NS ${ns}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[dns-init] cleanBadNsRecords failed:', (err as Error).message);
   }
 }
 

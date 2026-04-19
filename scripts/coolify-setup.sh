@@ -95,6 +95,17 @@ else
   echo "[setup] WARNING: Could not obtain Technitium token — DNS integration will be limited."
 fi
 
+# ── NS_SERVER_IP — public IP for DNS glue records ────────────────────────────
+echo "[setup] Detecting public IP for DNS glue records..."
+PUBLIC_IP=$(curl -sf --max-time 5 https://ifconfig.me 2>/dev/null || \
+            curl -sf --max-time 5 https://api.ipify.org 2>/dev/null || echo "")
+if [ -n "$PUBLIC_IP" ]; then
+  printf '%s' "$PUBLIC_IP" > /coolify-api-token/ns_server_ip
+  echo "[setup] NS_SERVER_IP written: $PUBLIC_IP"
+else
+  echo "[setup] WARNING: Could not auto-detect public IP — DNS glue records will be skipped at API startup"
+fi
+
 # ── 3. Provision GitHub deploy key (always — DB is reset on each boot) ───────
 GITHUB_KEY_FILE="/coolify-keys/github_deploy"
 if [ ! -f "$GITHUB_KEY_FILE" ]; then

@@ -19,6 +19,20 @@ export function readNsHostname(): string | null {
   return process.env.NS_HOSTNAME ?? null;
 }
 
+const NS_SERVER_IP_FILE = '/coolify-api-token/ns_server_ip';
+
+// NS_SERVER_IP read precedence:
+// 1. File /coolify-api-token/ns_server_ip (written by coolify-server-setup)
+// 2. process.env.NS_SERVER_IP
+// 3. null
+export function readNsServerIp(): string | null {
+  try {
+    const val = readFileSync(NS_SERVER_IP_FILE, 'utf8').trim();
+    if (val) return val;
+  } catch { /* file not present */ }
+  return process.env.NS_SERVER_IP ?? null;
+}
+
 type IntegrationStatus = 'connected' | 'error' | 'not_configured';
 
 async function getCoolifyStatus(): Promise<IntegrationStatus> {
@@ -80,6 +94,13 @@ router.put('/', async (req: Request, res: Response) => {
     // Ensure directory exists (best-effort — directory is normally created by init container)
     try { mkdirSync('/coolify-api-token', { recursive: true }); } catch { /* ok */ }
     writeFileSync(NS_HOSTNAME_FILE, value, 'utf8');
+    // Sync new hostname to Technitium immediately — non-fatal
+    const client = createTechnitiumClient();
+    if (client) {
+      client.setDnsServerDomain(value).catch((e: Error) =>
+        console.warn('[config] setDnsServerDomain after PUT failed:', e.message)
+      );
+    }
     res.status(200).json({ ns_hostname: value });
   } catch (err) {
     console.error('[config] PUT write ns_hostname failed:', (err as Error).message);
