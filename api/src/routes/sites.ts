@@ -537,9 +537,14 @@ router.patch('/:slug', async (req: Request, res: Response) => {
 
     if (payload.domains) {
       await provisionDns(payload.domains);
-      const domain = payload.domains.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    }
+    // Always attempt Traefik route provision on every PATCH — self-heals sites
+    // whose route file was never written (e.g. all prior deploys failed).
+    // Non-fatal: provisionTraefikRoute logs a warning if no container is running.
+    const currentDomain = app.fqdn ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '') : '';
+    if (currentDomain) {
       const port = (app as any).ports_exposes ?? 3000;
-      await provisionTraefikRoute(req.params.slug, domain, port);
+      await provisionTraefikRoute(req.params.slug, currentDomain, port);
     }
     if (switchingAuth) writeStoredDeployAuth(req.params.slug, body.deploy_auth!);
     const result = mapSiteWithStoredAuth(app, []);
