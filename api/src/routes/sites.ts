@@ -179,11 +179,11 @@ export async function provisionTraefikRoute(slug: string, domain: string, port: 
   const confDir = TRAEFIK_CONF_DIR;
   const filePath = path.join(confDir, `site-${slug}.yml`);
   try {
-    // Find running container with coolify.name=slug label
+    // Find container with coolify.name=slug label (any state — stopped containers still have valid names)
     const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
-    const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[] }>;
+    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<{ Names: string[] }>;
     if (!containers.length) {
-      console.warn(`[traefik-route] No running container for slug ${slug} — route not written`);
+      console.warn(`[traefik-route] No container found for slug ${slug} — route not written`);
       return;
     }
     const containerName = containers[0].Names[0].replace(/^\//, '');
