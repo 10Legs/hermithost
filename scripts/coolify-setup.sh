@@ -156,7 +156,7 @@ fi
 echo "[setup] Updating server IP to ssh-bridge..."
 curl -sf -X PATCH "$COOLIFY_URL/servers/$SERVER_UUID" \
   -H "$(auth_header)" -H "Content-Type: application/json" \
-  -d '{"ip":"ssh-bridge","port":22,"user":"deploy"}' > /dev/null
+  -d '{"ip":"ssh-bridge","port":22,"user":"deploy"}' > /dev/null || true
 echo "[setup] Server IP updated."
 
 # ── 4. Register private key with Coolify ─────────────────────────────────────
@@ -166,7 +166,7 @@ PRIV_JSON=$(jq -Rs . < "$KEY_FILE")
 KEY_RESP=$(curl -sf -X POST "$COOLIFY_URL/security/keys" \
   -H "$(auth_header)" \
   -H "Content-Type: application/json" \
-  -d "{\"name\":\"hermithost-deploy\",\"private_key\":$PRIV_JSON}")
+  -d "{\"name\":\"hermithost-deploy\",\"private_key\":$PRIV_JSON}" || echo "")
 
 KEY_UUID=$(echo "$KEY_RESP" | jq -r '.uuid // empty')
 
