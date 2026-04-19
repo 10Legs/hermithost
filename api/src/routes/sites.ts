@@ -232,6 +232,21 @@ function sshUrlToHttps(url: string): string {
   return url;
 }
 
+// ── HTTPS / short-form → SSH URL conversion ───────────────────────────────────
+// Converts any repo reference to git@github.com:owner/repo.git format.
+// Required when using SSH key auth — Coolify needs the SSH transport URL.
+function httpsToSshUrl(url: string): string {
+  if (/^git@/.test(url)) return url.endsWith('.git') ? url : `${url}.git`;
+  try {
+    const u = new URL(url.startsWith('http') ? url : `https://github.com/${url}`);
+    const path = u.pathname.replace(/^\//, '').replace(/\.git$/, '');
+    return `git@${u.host}:${path}.git`;
+  } catch {
+    // short-form: owner/repo or owner/repo.git
+    return `git@github.com:${url.replace(/\.git$/, '')}.git`;
+  }
+}
+
 // ── Embed PAT into a GitHub HTTPS clone URL ───────────────────────────────────
 // Converts https://github.com/org/repo to https://TOKEN@github.com/org/repo.
 // Handles SSH-format URLs (git@github.com:...) by converting to HTTPS first.
@@ -312,10 +327,10 @@ router.post('/', async (req: Request, res: Response) => {
       project_uuid = created.uuid;
     }
 
-    // Resolve clone URL — embed PAT for pat auth, use raw URL for ssh_key
+    // Resolve clone URL — embed PAT for pat auth, SSH format for ssh_key
     const resolvedRepoUrl = deployAuth === 'pat'
       ? embedPatInRepoUrl(body.git_repository, body.deploy_token!.trim())
-      : body.git_repository;
+      : httpsToSshUrl(body.git_repository);
 
     const payload: CoolifyCreateApplicationPayload = {
       type: deployAuth === 'pat' ? 'public' : 'private',
@@ -449,7 +464,7 @@ router.patch('/:slug', async (req: Request, res: Response) => {
 
       payload.git_repository = (effectiveAuth === 'pat' && effectiveToken)
         ? embedPatInRepoUrl(cleanBase, effectiveToken)
-        : cleanBase;
+        : httpsToSshUrl(cleanBase);
     }
 
     let app = await client.updateApplication(req.params.slug, payload);
