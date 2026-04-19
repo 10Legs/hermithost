@@ -1,6 +1,7 @@
 <script lang="ts">
 	import '../app.css';
 	import { page } from '$app/stores';
+	declare const __GIT_COMMIT__: string;
 </script>
 
 <div class="app-shell">
@@ -10,7 +11,7 @@
 				<span class="logo-icon">⬡</span>
 				<span class="logo-text">HermitHost</span>
 			</div>
-			<div class="logo-sub">v0.1.0</div>
+			<div class="logo-sub">v0.1.0 <span class="logo-commit">· {__GIT_COMMIT__}</span></div>
 		</div>
 
 		<div class="nav-section">
@@ -113,6 +114,11 @@
 		font-size: 10px;
 		color: var(--text-muted);
 		margin-left: 26px;
+	}
+	.logo-commit {
+		opacity: 0.5;
+		font-size: 0.85em;
+		letter-spacing: 0.03em;
 	}
 
 	.nav-section {
