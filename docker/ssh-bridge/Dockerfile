@@ -1,5 +1,5 @@
 FROM alpine:3.20
-RUN apk add --no-cache openssh docker-cli bash curl sudo
+RUN apk add --no-cache openssh docker-cli docker-cli-compose bash curl sudo git jq
 RUN adduser -D -s /bin/bash deploy && \
     passwd -d deploy && \
     mkdir -p /home/deploy/.ssh && chmod 700 /home/deploy/.ssh && \
