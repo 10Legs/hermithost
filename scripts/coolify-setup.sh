@@ -183,6 +183,16 @@ fi
 psql -c "UPDATE servers SET private_key_id=$KEY_ID WHERE uuid='$SERVER_UUID';" > /dev/null
 echo "[setup] Key linked (private_key_id=$KEY_ID)."
 
+# Coolify's localhost server (id=0) internally calls PrivateKey::findOrFail(0) during
+# ValidateServer — not findOrFail(private_key_id). Without a row at id=0 the job throws
+# immediately, marking the server unreachable and blocking all deploys.
+# Copy the hermithost-deploy key to id=0 so that lookup succeeds.
+psql -c "INSERT INTO private_keys (id, uuid, name, description, private_key, is_git_related, team_id, created_at, updated_at, fingerprint)
+  SELECT 0, '00000000-0000-0000-0000-000000000000', name, description, private_key, is_git_related, team_id, created_at, updated_at, fingerprint
+  FROM private_keys WHERE id=$KEY_ID
+  ON CONFLICT (id) DO UPDATE SET private_key = EXCLUDED.private_key, updated_at = NOW();" > /dev/null
+echo "[setup] PrivateKey id=0 ensured for Coolify localhost server validation."
+
 
 # ── 8. Validate server ────────────────────────────────────────────────────────
 echo "[setup] Validating server (may take a few seconds)..."
