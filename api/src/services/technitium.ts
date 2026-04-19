@@ -210,6 +210,14 @@ export class TechnitiumClient {
       await handleResponse<TechnitiumDeleteResponse>(res, 'POST /api/zones/records/delete');
     });
   }
+
+  async setDnsServerDomain(domain: string): Promise<void> {
+    return this.withTokenRetry(async () => {
+      const body = this.buildParams({ dnsServerDomain: domain });
+      const res = await fetch(`${this.baseUrl}/api/settings/set`, { method: 'POST', headers: this.postHeaders, body });
+      await handleResponse<TechnitiumDeleteResponse>(res, 'POST /api/settings/set');
+    });
+  }
 }
 
 export function createTechnitiumClient(

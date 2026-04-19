@@ -7,6 +7,9 @@ import dnsRouter from './routes/dns';
 import backupRouter from './routes/backup';
 import configRouter from './routes/config';
 import { getDeployedSite } from './services/githubDeploy';
+import { readNsHostname, readNsServerIp } from './routes/config';
+import { createTechnitiumClient } from './services/technitium';
+import { ensureNsGlueRecords, cleanBadNsRecords } from './routes/sites';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -59,6 +62,30 @@ app.listen(PORT, () => {
   } else {
     console.warn('[technitium] TECHNITIUM_URL not set — DNS routes will fail at startup');
   }
+
+  // Non-blocking DNS startup fixup — sets dnsServerDomain, creates glue records,
+  // and removes stale container-ID NS records left from unconfigured Technitium.
+  (async () => {
+    const nsHostname = readNsHostname();
+    const serverIp = readNsServerIp();
+    const client = createTechnitiumClient();
+    if (!client || !nsHostname) {
+      console.warn('[dns-init] Skipping: Technitium or NS_HOSTNAME not configured');
+      return;
+    }
+    try {
+      await client.setDnsServerDomain(nsHostname);
+      console.log(`[dns-init] dnsServerDomain → ${nsHostname}`);
+    } catch (err) {
+      console.warn('[dns-init] setDnsServerDomain failed:', (err as Error).message);
+    }
+    if (serverIp) {
+      await ensureNsGlueRecords(client, nsHostname, serverIp);
+    } else {
+      console.warn('[dns-init] NS_SERVER_IP not set — skipping glue record provisioning');
+    }
+    await cleanBadNsRecords(client);
+  })();
 });
 
 export default app;

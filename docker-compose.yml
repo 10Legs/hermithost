@@ -211,6 +211,7 @@ services:
       TECHNITIUM_TOKEN: "${TECHNITIUM_TOKEN:-}"
       DNS_MOCK: "${DNS_MOCK:-}"
       NS_HOSTNAME: "${NS_HOSTNAME:-}"
+      NS_SERVER_IP: "${NS_SERVER_IP:-}"
       PGHOST: "coolify-db"
       PGPORT: "5432"
       PGDATABASE: "coolify"

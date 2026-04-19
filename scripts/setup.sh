@@ -60,6 +60,16 @@ echo ""
 echo "[setup] Checking required configuration..."
 prompt_if_empty "ACME_EMAIL"   "Email for Let's Encrypt SSL certificates (e.g. you@example.com)"
 prompt_if_empty "NS_HOSTNAME"  "Public IP or hostname of this server (e.g. 192.168.2.56 or ns1.example.com)"
+# Auto-detect public IP for NS_SERVER_IP; fall back to prompt if unavailable
+if grep -qE "^NS_SERVER_IP=\s*$" "$ENV_FILE" 2>/dev/null; then
+  AUTO_IP=$(curl -sf --max-time 5 https://ifconfig.me 2>/dev/null || echo "")
+  if [ -n "$AUTO_IP" ]; then
+    sed -i '' "s|^NS_SERVER_IP=.*|NS_SERVER_IP=${AUTO_IP}|" "$ENV_FILE"
+    echo "[setup] Auto-detected NS_SERVER_IP: ${AUTO_IP}"
+  else
+    prompt_if_empty "NS_SERVER_IP" "Public IPv4 of this server for DNS glue records (e.g. 203.0.113.1)"
+  fi
+fi
 
 # ── Coolify admin defaults ────────────────────────────────────────────────────
 # Email defaults to ACME_EMAIL (a real, validated address — required for Coolify's RFC+DNS email check).
