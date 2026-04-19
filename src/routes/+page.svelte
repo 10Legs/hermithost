@@ -103,32 +103,31 @@
 		return { ...site, ...over };
 	}
 
-	onMount(async () => {
+	onMount(() => {
 		const slugs = data.sites.map((s: Site) => s.slug);
-		for (const slug of slugs) {
-			probePending = new Set([...probePending, slug]);
-			try {
-				const res = await fetch(`/api/sites/${slug}`);
-				if (res.ok) {
-					const fresh: Site = await res.json();
-					probeOverrides = {
-						...probeOverrides,
-						[slug]: {
-							http: fresh.http,
-							ssl: fresh.ssl,
-							dns: fresh.dns,
-							overallStatus: fresh.overallStatus
-						}
-					};
-				}
-			} catch {
-				// best-effort probe — leave existing status in place
-			} finally {
-				const next = new Set(probePending);
-				next.delete(slug);
-				probePending = next;
-			}
-		}
+		probePending = new Set(slugs);
+		Promise.allSettled(
+			slugs.map(slug =>
+				Promise.race([
+					fetch(`/api/sites/${slug}`).then(res => res.ok ? res.json() : null),
+					new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+				])
+				.then((fresh: Site | null) => {
+					if (fresh) {
+						probeOverrides = {
+							...probeOverrides,
+							[slug]: { http: fresh.http, ssl: fresh.ssl, dns: fresh.dns, overallStatus: fresh.overallStatus }
+						};
+					}
+				})
+				.catch(() => { /* best-effort — leave existing status */ })
+				.finally(() => {
+					const next = new Set(probePending);
+					next.delete(slug);
+					probePending = next;
+				})
+			)
+		);
 	});
 
 	function getStatusLabel(site: Site): string {
