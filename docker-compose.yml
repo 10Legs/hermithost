@@ -235,7 +235,9 @@ services:
 
   # ── Technitium DNS Server ──────────────────────────────────────
   technitium:
-    image: technitium/dns-server:latest
+    build:
+      context: ./docker/technitium
+      dockerfile: Dockerfile
     restart: unless-stopped
     ports:
       - "5380:5380"                           # Technitium web UI / API
