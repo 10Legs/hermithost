@@ -255,6 +255,7 @@ networks:
   hermithost-net:
     driver: bridge
   coolify:
+    name: coolify
     driver: bridge
 
 volumes:
