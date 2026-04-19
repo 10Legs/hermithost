@@ -137,7 +137,13 @@ export async function unlinkGithubKey(appUuid: string): Promise<void> {
       password: process.env.PGPASSWORD,
     });
     await pg.connect();
-    await pg.query(`UPDATE applications SET private_key_id = NULL WHERE uuid=$1`, [appUuid]);
+    // Clear private_key_id AND source_type — source_type = 'App\Models\GithubApp' causes
+    // Coolify to route clones through GitHub App flow which double-prefixes the URL.
+    // NULL source_type makes Coolify use git_repository directly (PAT embedded in URL).
+    await pg.query(
+      `UPDATE applications SET private_key_id = NULL, source_type = NULL WHERE uuid=$1`,
+      [appUuid]
+    );
     await pg.end();
     console.log(`[github-key] Unlinked github-deploy key from app ${appUuid}`);
   } catch (err) {
