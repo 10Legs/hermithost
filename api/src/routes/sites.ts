@@ -137,11 +137,13 @@ export async function unlinkGithubKey(appUuid: string): Promise<void> {
       password: process.env.PGPASSWORD,
     });
     await pg.connect();
-    // Clear private_key_id AND source_type — source_type = 'App\Models\GithubApp' causes
-    // Coolify to route clones through GitHub App flow which double-prefixes the URL.
-    // NULL source_type makes Coolify use git_repository directly (PAT embedded in URL).
+    // Clear private_key_id, source_type, AND source_id — source_type = 'App\Models\GithubApp'
+    // causes Coolify to route clones through GitHub App flow which double-prefixes the URL.
+    // NULL source_type + NULL source_id required: if source_id is non-null with source_type=NULL,
+    // Coolify's morphTo eager-loads via the parent query builder with a null ownerKey,
+    // generating "WHERE "" = source_id" which is a PostgreSQL syntax error (zero-length identifier).
     await pg.query(
-      `UPDATE applications SET private_key_id = NULL, source_type = NULL WHERE uuid=$1`,
+      `UPDATE applications SET private_key_id = NULL, source_type = NULL, source_id = NULL WHERE uuid=$1`,
       [appUuid]
     );
     await pg.end();
