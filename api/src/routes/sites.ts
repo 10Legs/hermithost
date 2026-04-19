@@ -289,15 +289,24 @@ function httpsToSshUrl(url: string): string {
 // Handles SSH-format URLs (git@github.com:...) by converting to HTTPS first.
 // Handles URLs that already have auth embedded (idempotent).
 export function embedPatInRepoUrl(repoUrl: string, token: string): string {
-  // SSH URLs can't carry a PAT — convert to HTTPS first
-  const httpsUrl = /^git@/.test(repoUrl) ? sshUrlToHttps(repoUrl) : repoUrl;
+  // Normalize to a full HTTPS URL first:
+  // 1. SSH → HTTPS
+  // 2. short-form owner/repo[.git] → https://github.com/owner/repo.git
+  // 3. already HTTPS → leave as-is
+  let httpsUrl: string;
+  if (/^git@/.test(repoUrl)) {
+    httpsUrl = sshUrlToHttps(repoUrl);
+  } else if (/^https?:\/\//.test(repoUrl)) {
+    httpsUrl = repoUrl;
+  } else {
+    httpsUrl = `https://github.com/${repoUrl.replace(/\.git$/, '')}.git`;
+  }
   try {
     const url = new URL(httpsUrl);
     url.username = token;
     url.password = '';
     return url.toString();
   } catch {
-    // Fallback: string replacement for bare github.com/org/repo
     return httpsUrl.replace(/^https?:\/\//, `https://${token}@`);
   }
 }
