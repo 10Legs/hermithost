@@ -123,7 +123,7 @@
 				deletingZone = null;
 				return;
 			}
-			zones = zones.filter((z) => z.name !== name);
+			zones = [...zones.filter((z) => z.name !== name)];
 			if (selectedZone?.name === name) {
 				selectedZone = null;
 				zoneRecords = [];
@@ -399,7 +399,7 @@
 							<div class="form-field">
 								<label class="form-label" for="dns-type">Type</label>
 								<select id="dns-type" class="select-sm" bind:value={newRecord.type} disabled={dnsFormSaving}>
-									{#each ['A','AAAA','CNAME','MX','TXT','NS','SRV','CAA'] as t}
+									{#each ['A','AAAA','CNAME','MX','TXT','NS','SRV','SOA','CAA','PTR'] as t}
 										<option value={t}>{t}</option>
 									{/each}
 								</select>
@@ -838,6 +838,10 @@
 	.record-type-mx   { color: #fb923c; border-color: #fb923c44; background: #fb923c12; }
 	.record-type-txt  { color: #facc15; border-color: #facc1544; background: #facc1512; }
 	.record-type-ns   { color: #94a3b8; border-color: #94a3b844; background: #94a3b812; }
+	.record-type-srv  { color: #f472b6; border-color: #f472b644; background: #f472b612; }
+	.record-type-soa  { color: #c084fc; border-color: #c084fc44; background: #c084fc12; }
+	.record-type-caa  { color: #fb923c; border-color: #fb923c44; background: #fb923c12; }
+	.record-type-ptr  { color: #2dd4bf; border-color: #2dd4bf44; background: #2dd4bf12; }
 
 	.record-actions {
 		text-align: right;

@@ -3,7 +3,7 @@
 
 export type SiteStatus = 'healthy' | 'warning' | 'error' | 'pending';
 export type DeployStatus = 'success' | 'failed' | 'running' | 'pending';
-export type DnsRecordType = 'A' | 'AAAA' | 'CNAME' | 'MX' | 'TXT' | 'NS' | 'SRV' | 'CAA';
+export type DnsRecordType = 'A' | 'AAAA' | 'CNAME' | 'MX' | 'TXT' | 'NS' | 'SRV' | 'CAA' | 'SOA' | 'PTR';
 
 export interface HttpStatus {
   reachable: boolean;
