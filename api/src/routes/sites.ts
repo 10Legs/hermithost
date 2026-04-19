@@ -473,7 +473,11 @@ router.patch('/:slug', async (req: Request, res: Response) => {
       const port = (app as any).ports_exposes ?? 3000;
       await provisionTraefikRoute(req.params.slug, domain, port);
     }
-    res.status(200).json(mapSite(app, []));
+    const result = mapSite(app, []);
+    // Override deploy_auth in the response when explicitly switching — the refetch happens before
+    // linkGithubKey/unlinkGithubKey so private_key_uuid hasn't updated in Coolify yet.
+    if (switchingAuth) result.deploy_auth = body.deploy_auth!;
+    res.status(200).json(result);
   } catch (err) {
     console.error(`[coolify] PATCH /applications/${req.params.slug} failed:`, (err as Error).message);
     res.status(502).json({ error: 'Failed to update application via Coolify' });

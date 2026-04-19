@@ -139,7 +139,15 @@ export function mapDeploy(
 
 // ── Deploy auth detection ─────────────────────────────────────────────────────
 
-function detectDeployAuth(gitUrl: string): { deployAuth: 'ssh_key' | 'pat'; cleanUrl: string } {
+function detectDeployAuth(
+  gitUrl: string,
+  privateKeyUuid?: string
+): { deployAuth: 'ssh_key' | 'pat'; cleanUrl: string } {
+  // private_key_uuid is the authoritative SSH signal — Coolify strips embedded credentials
+  // from git_repository URLs before returning them, making URL-based detection unreliable.
+  if (privateKeyUuid) {
+    return { deployAuth: 'ssh_key', cleanUrl: gitUrl };
+  }
   try {
     const url = new URL(gitUrl);
     if (url.username) {
@@ -168,7 +176,7 @@ export function mapSite(
   const http: HttpStatus = probe ? probe.http : stubHttpStatus(app.status);
   const ssl: SslStatus = probe ? probe.ssl : stubSslStatus();
   const dns: DnsStatus = probe ? probe.dns : stubDnsStatus();
-  const { deployAuth, cleanUrl } = detectDeployAuth(app.git_repository);
+  const { deployAuth, cleanUrl } = detectDeployAuth(app.git_repository, app.private_key_uuid);
 
   return {
     slug: app.uuid,

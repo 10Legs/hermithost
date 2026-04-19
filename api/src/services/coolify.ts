@@ -12,6 +12,7 @@ export interface CoolifyApplication {
   build_pack: string;
   created_at: string;
   updated_at: string;
+  private_key_uuid?: string;
 }
 
 export interface CoolifyLogEntry {
