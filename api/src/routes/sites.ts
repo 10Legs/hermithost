@@ -16,6 +16,43 @@ import { readNsHostname } from './config';
 
 const router = Router();
 
+// ── Deploy auth sidecar ───────────────────────────────────────────────────────
+// Coolify may strip embedded PAT credentials from stored git_repository URLs,
+// making URL-based auth detection unreliable after page refresh.
+// We persist deploy_auth to a small sidecar file so it survives across requests.
+const SITES_DIR = process.env.SITES_DIR ?? '/app/sites';
+
+function readStoredDeployAuth(uuid: string): 'ssh_key' | 'pat' | null {
+  try {
+    const { mkdirSync } = require('fs') as typeof import('fs');
+    mkdirSync(SITES_DIR, { recursive: true });
+    const val = readFileSync(path.join(SITES_DIR, `${uuid}.auth`), 'utf8').trim();
+    if (val === 'pat' || val === 'ssh_key') return val;
+  } catch { /* not stored yet */ }
+  return null;
+}
+
+function writeStoredDeployAuth(uuid: string, auth: 'ssh_key' | 'pat'): void {
+  try {
+    const { mkdirSync } = require('fs') as typeof import('fs');
+    mkdirSync(SITES_DIR, { recursive: true });
+    writeFileSync(path.join(SITES_DIR, `${uuid}.auth`), auth, 'utf8');
+  } catch (err) {
+    console.warn(`[deploy-auth] Could not write auth sidecar for ${uuid}:`, (err as Error).message);
+  }
+}
+
+function mapSiteWithStoredAuth(
+  app: Parameters<typeof mapSite>[0],
+  deployments: Parameters<typeof mapSite>[1],
+  probe?: Parameters<typeof mapSite>[2]
+): ReturnType<typeof mapSite> {
+  const site = mapSite(app, deployments, probe ?? null);
+  const stored = readStoredDeployAuth(app.uuid);
+  if (stored) site.deploy_auth = stored;
+  return site;
+}
+
 // ── DNS auto-provisioning ─────────────────────────────────────────────────────
 // Creates a zone + A record for the given domain pointing at NS_HOSTNAME.
 // Non-fatal: logs warnings but never throws — site ops should not fail due to DNS.
@@ -190,7 +227,7 @@ router.get('/', async (_req: Request, res: Response) => {
     const sites = await Promise.all(
       applications.map(async (app) => {
         const deployments = await client.listDeployments(app.uuid).catch(() => []);
-        return mapSite(app, deployments);
+        return mapSiteWithStoredAuth(app, deployments);
       })
     );
     res.status(200).json(sites);
@@ -216,7 +253,7 @@ router.get('/:slug', async (req: Request, res: Response) => {
         : Promise.resolve(null),
     ]);
 
-    res.status(200).json(mapSite(app, deployments, probe));
+    res.status(200).json(mapSiteWithStoredAuth(app, deployments, probe));
   } catch (err) {
     console.error(`[coolify] GET /applications/${req.params.slug} failed:`, (err as Error).message);
     res.status(502).json({ error: 'Failed to retrieve site from Coolify' });
@@ -232,20 +269,44 @@ function sshUrlToHttps(url: string): string {
   return url;
 }
 
+// ── HTTPS / short-form → SSH URL conversion ───────────────────────────────────
+// Converts any repo reference to git@github.com:owner/repo.git format.
+// Required when using SSH key auth — Coolify needs the SSH transport URL.
+function httpsToSshUrl(url: string): string {
+  if (/^git@/.test(url)) return url.endsWith('.git') ? url : `${url}.git`;
+  try {
+    const u = new URL(url.startsWith('http') ? url : `https://github.com/${url}`);
+    const path = u.pathname.replace(/^\//, '').replace(/\.git$/, '');
+    return `git@${u.host}:${path}.git`;
+  } catch {
+    // short-form: owner/repo or owner/repo.git
+    return `git@github.com:${url.replace(/\.git$/, '')}.git`;
+  }
+}
+
 // ── Embed PAT into a GitHub HTTPS clone URL ───────────────────────────────────
 // Converts https://github.com/org/repo to https://TOKEN@github.com/org/repo.
 // Handles SSH-format URLs (git@github.com:...) by converting to HTTPS first.
 // Handles URLs that already have auth embedded (idempotent).
 export function embedPatInRepoUrl(repoUrl: string, token: string): string {
-  // SSH URLs can't carry a PAT — convert to HTTPS first
-  const httpsUrl = /^git@/.test(repoUrl) ? sshUrlToHttps(repoUrl) : repoUrl;
+  // Normalize to a full HTTPS URL first:
+  // 1. SSH → HTTPS
+  // 2. short-form owner/repo[.git] → https://github.com/owner/repo.git
+  // 3. already HTTPS → leave as-is
+  let httpsUrl: string;
+  if (/^git@/.test(repoUrl)) {
+    httpsUrl = sshUrlToHttps(repoUrl);
+  } else if (/^https?:\/\//.test(repoUrl)) {
+    httpsUrl = repoUrl;
+  } else {
+    httpsUrl = `https://github.com/${repoUrl.replace(/\.git$/, '')}.git`;
+  }
   try {
     const url = new URL(httpsUrl);
     url.username = token;
     url.password = '';
     return url.toString();
   } catch {
-    // Fallback: string replacement for bare github.com/org/repo
     return httpsUrl.replace(/^https?:\/\//, `https://${token}@`);
   }
 }
@@ -312,10 +373,10 @@ router.post('/', async (req: Request, res: Response) => {
       project_uuid = created.uuid;
     }
 
-    // Resolve clone URL — embed PAT for pat auth, use raw URL for ssh_key
+    // Resolve clone URL — embed PAT for pat auth, SSH format for ssh_key
     const resolvedRepoUrl = deployAuth === 'pat'
       ? embedPatInRepoUrl(body.git_repository, body.deploy_token!.trim())
-      : body.git_repository;
+      : httpsToSshUrl(body.git_repository);
 
     const payload: CoolifyCreateApplicationPayload = {
       type: deployAuth === 'pat' ? 'public' : 'private',
@@ -353,7 +414,8 @@ router.post('/', async (req: Request, res: Response) => {
       await provisionDns(resolvedFqdn);
       // Route file written after first deploy (container doesn't exist yet at creation time)
     }
-    res.status(201).json(mapSite(app, []));
+    writeStoredDeployAuth(app.uuid, deployAuth);
+    res.status(201).json(mapSiteWithStoredAuth(app, []));
   } catch (err) {
     console.error('[coolify] POST /applications/public failed:', (err as Error).message);
     res.status(502).json({ error: 'Failed to create application via Coolify' });
@@ -449,7 +511,7 @@ router.patch('/:slug', async (req: Request, res: Response) => {
 
       payload.git_repository = (effectiveAuth === 'pat' && effectiveToken)
         ? embedPatInRepoUrl(cleanBase, effectiveToken)
-        : cleanBase;
+        : httpsToSshUrl(cleanBase);
     }
 
     let app = await client.updateApplication(req.params.slug, payload);
@@ -473,7 +535,9 @@ router.patch('/:slug', async (req: Request, res: Response) => {
       const port = (app as any).ports_exposes ?? 3000;
       await provisionTraefikRoute(req.params.slug, domain, port);
     }
-    res.status(200).json(mapSite(app, []));
+    if (switchingAuth) writeStoredDeployAuth(req.params.slug, body.deploy_auth!);
+    const result = mapSiteWithStoredAuth(app, []);
+    res.status(200).json(result);
   } catch (err) {
     console.error(`[coolify] PATCH /applications/${req.params.slug} failed:`, (err as Error).message);
     res.status(502).json({ error: 'Failed to update application via Coolify' });
