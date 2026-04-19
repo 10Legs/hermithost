@@ -16,6 +16,43 @@ import { readNsHostname } from './config';
 
 const router = Router();
 
+// ── Deploy auth sidecar ───────────────────────────────────────────────────────
+// Coolify may strip embedded PAT credentials from stored git_repository URLs,
+// making URL-based auth detection unreliable after page refresh.
+// We persist deploy_auth to a small sidecar file so it survives across requests.
+const SITES_DIR = process.env.SITES_DIR ?? '/app/sites';
+
+function readStoredDeployAuth(uuid: string): 'ssh_key' | 'pat' | null {
+  try {
+    const { mkdirSync } = require('fs') as typeof import('fs');
+    mkdirSync(SITES_DIR, { recursive: true });
+    const val = readFileSync(path.join(SITES_DIR, `${uuid}.auth`), 'utf8').trim();
+    if (val === 'pat' || val === 'ssh_key') return val;
+  } catch { /* not stored yet */ }
+  return null;
+}
+
+function writeStoredDeployAuth(uuid: string, auth: 'ssh_key' | 'pat'): void {
+  try {
+    const { mkdirSync } = require('fs') as typeof import('fs');
+    mkdirSync(SITES_DIR, { recursive: true });
+    writeFileSync(path.join(SITES_DIR, `${uuid}.auth`), auth, 'utf8');
+  } catch (err) {
+    console.warn(`[deploy-auth] Could not write auth sidecar for ${uuid}:`, (err as Error).message);
+  }
+}
+
+function mapSiteWithStoredAuth(
+  app: Parameters<typeof mapSite>[0],
+  deployments: Parameters<typeof mapSite>[1],
+  probe?: Parameters<typeof mapSite>[2]
+): ReturnType<typeof mapSite> {
+  const site = mapSite(app, deployments, probe ?? null);
+  const stored = readStoredDeployAuth(app.uuid);
+  if (stored) site.deploy_auth = stored;
+  return site;
+}
+
 // ── DNS auto-provisioning ─────────────────────────────────────────────────────
 // Creates a zone + A record for the given domain pointing at NS_HOSTNAME.
 // Non-fatal: logs warnings but never throws — site ops should not fail due to DNS.
@@ -190,7 +227,7 @@ router.get('/', async (_req: Request, res: Response) => {
     const sites = await Promise.all(
       applications.map(async (app) => {
         const deployments = await client.listDeployments(app.uuid).catch(() => []);
-        return mapSite(app, deployments);
+        return mapSiteWithStoredAuth(app, deployments);
       })
     );
     res.status(200).json(sites);
@@ -216,7 +253,7 @@ router.get('/:slug', async (req: Request, res: Response) => {
         : Promise.resolve(null),
     ]);
 
-    res.status(200).json(mapSite(app, deployments, probe));
+    res.status(200).json(mapSiteWithStoredAuth(app, deployments, probe));
   } catch (err) {
     console.error(`[coolify] GET /applications/${req.params.slug} failed:`, (err as Error).message);
     res.status(502).json({ error: 'Failed to retrieve site from Coolify' });
@@ -368,7 +405,8 @@ router.post('/', async (req: Request, res: Response) => {
       await provisionDns(resolvedFqdn);
       // Route file written after first deploy (container doesn't exist yet at creation time)
     }
-    res.status(201).json(mapSite(app, []));
+    writeStoredDeployAuth(app.uuid, deployAuth);
+    res.status(201).json(mapSiteWithStoredAuth(app, []));
   } catch (err) {
     console.error('[coolify] POST /applications/public failed:', (err as Error).message);
     res.status(502).json({ error: 'Failed to create application via Coolify' });
@@ -488,10 +526,8 @@ router.patch('/:slug', async (req: Request, res: Response) => {
       const port = (app as any).ports_exposes ?? 3000;
       await provisionTraefikRoute(req.params.slug, domain, port);
     }
-    const result = mapSite(app, []);
-    // Override deploy_auth in the response when explicitly switching — the refetch happens before
-    // linkGithubKey/unlinkGithubKey so private_key_uuid hasn't updated in Coolify yet.
-    if (switchingAuth) result.deploy_auth = body.deploy_auth!;
+    if (switchingAuth) writeStoredDeployAuth(req.params.slug, body.deploy_auth!);
+    const result = mapSiteWithStoredAuth(app, []);
     res.status(200).json(result);
   } catch (err) {
     console.error(`[coolify] PATCH /applications/${req.params.slug} failed:`, (err as Error).message);
