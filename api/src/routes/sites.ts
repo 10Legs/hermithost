@@ -401,9 +401,16 @@ router.post('/', async (req: Request, res: Response) => {
     let app = await client.createApplication(payload);
 
     // SSH key auth: link the deploy key via DB
-    // PAT auth: token is embedded in the clone URL — no key needed
+    // PAT auth: clear source_type (Coolify defaults to GithubApp) and re-apply PAT URL
     if (deployAuth !== 'pat') {
       await linkGithubKey(app.uuid);
+    } else {
+      // unlinkGithubKey sets source_type = NULL so Coolify uses git_repository directly
+      await unlinkGithubKey(app.uuid);
+      // Re-apply PAT URL after source_type cleared — Coolify may have stripped it
+      await client.updateApplication(app.uuid, { git_repository: resolvedRepoUrl }).catch((e: Error) => {
+        console.warn(`[coolify] PAT url re-patch failed for ${app.uuid}:`, e.message);
+      });
     }
 
     // fqdn is not accepted at creation time — patch it immediately after using 'domains' field
