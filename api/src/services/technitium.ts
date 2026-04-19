@@ -29,6 +29,20 @@ export interface TechnitiumRData {
   weight?: number;
   port?: number;
   target?: string;
+  // SOA
+  primaryNameServer?: string;
+  responsiblePerson?: string;
+  serial?: number;
+  refresh?: number;
+  retry?: number;
+  expire?: number;
+  minimum?: number;
+  // CAA
+  tag?: string;
+  flags?: number;
+  value?: string;
+  // PTR
+  ptrdname?: string;
 }
 
 export interface TechnitiumRecord {

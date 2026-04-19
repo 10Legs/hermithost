@@ -369,17 +369,23 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
             await technitium.updateRecord(zone.name, params);
             result.dns.created.push(`${zone.name} ${record.type} ${record.name}`);
           } else {
-            let skipped = false;
+            let alreadyExists = false;
             await technitium.addRecord(zone.name, params).catch((err: Error) => {
               const msg = err.message.toLowerCase();
               if (msg.includes('already exists') || msg.includes('duplicate')) {
-                skipped = true;
+                alreadyExists = true;
               } else {
                 throw err;
               }
             });
-            if (skipped) {
-              result.dns.skipped.push(`${zone.name} ${record.type} ${record.name}: already exists`);
+            if (alreadyExists) {
+              try {
+                await technitium.deleteRecord(zone.name, params);
+                await technitium.addRecord(zone.name, params);
+                result.dns.created.push(`${zone.name} ${record.type} ${record.name} [replaced]`);
+              } catch (replaceErr) {
+                result.dns.failed.push(`${zone.name} ${record.type} ${record.name}: replace failed — ${(replaceErr as Error).message}`);
+              }
             } else {
               result.dns.created.push(`${zone.name} ${record.type} ${record.name}`);
             }

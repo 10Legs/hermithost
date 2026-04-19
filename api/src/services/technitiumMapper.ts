@@ -57,6 +57,12 @@ function extractValue(raw: TechnitiumRecord): string {
       return r.nameServer ?? '';
     case 'SRV':
       return r.target ?? '';
+    case 'SOA':
+      return r.primaryNameServer ?? '';
+    case 'CAA':
+      return r.value ?? `${r.flags ?? 0} ${r.tag ?? ''} ""`;
+    case 'PTR':
+      return r.ptrdname ?? '';
     default:
       return '';
   }
@@ -65,7 +71,7 @@ function extractValue(raw: TechnitiumRecord): string {
 // ── Supported record type guard ───────────────────────────────────────────────
 
 const SUPPORTED_TYPES: ReadonlySet<string> = new Set([
-  'A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV',
+  'A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'SOA', 'CAA', 'PTR',
 ]);
 
 function isSupportedType(type: string): type is DnsRecordType {
@@ -73,13 +79,9 @@ function isSupportedType(type: string): type is DnsRecordType {
 }
 
 // ── Filter predicate ──────────────────────────────────────────────────────────
-// Filter out: disabled records, SOA records, internal NS records (apex NS = zone's own NS)
 
 export function shouldIncludeRecord(raw: TechnitiumRecord, zoneName: string): boolean {
   if (raw.disabled) return false;
-  if (raw.type === 'SOA') return false;
-  // Internal apex NS records (zone's own authority NS records)
-  if (raw.type === 'NS' && raw.name === zoneName) return false;
   if (!isSupportedType(raw.type)) return false;
   return true;
 }
@@ -146,6 +148,14 @@ export function buildAddParams(domain: string, record: DnsRecord): URLSearchPara
       params.set('priority', String(record.priority ?? 0));
       params.set('weight', '0');
       params.set('port', '0');
+      break;
+    case 'CAA':
+      params.set('flags', String(record.priority ?? 0));
+      params.set('tag', 'issue');  // default tag; value contains the actual issuer
+      params.set('value', record.value);
+      break;
+    case 'PTR':
+      params.set('ptrdname', record.value);
       break;
   }
 
@@ -227,6 +237,14 @@ export function buildDeleteParams(domain: string, record: DnsRecord): URLSearchP
     case 'SRV':
       params.set('target', record.value);
       params.set('priority', String(record.priority ?? 0));
+      break;
+    case 'CAA':
+      params.set('flags', String(record.priority ?? 0));
+      params.set('tag', 'issue');
+      params.set('value', record.value);
+      break;
+    case 'PTR':
+      params.set('ptrdname', record.value);
       break;
   }
 
