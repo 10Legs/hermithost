@@ -78,7 +78,7 @@ export class CloudflareProvider implements DnsProvider {
         return { zoneId, recordName };
       }
       const zones = await this.cfFetch<CfZone[]>(
-        `/zones?name=${encodeURIComponent(candidate)}&status=active`
+        `/zones?name=${encodeURIComponent(candidate)}`
       );
       if (zones.length > 0) {
         const zoneId = zones[0].id;
