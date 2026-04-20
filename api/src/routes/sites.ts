@@ -42,6 +42,30 @@ function writeStoredDeployAuth(uuid: string, auth: 'ssh_key' | 'pat'): void {
   }
 }
 
+// ── Visibility sidecar (Option C stub) ────────────────────────────────────────
+// Persists per-site visibility so Option C (dual-mode) can be added without
+// changing site creation logic. Default matches current network_mode.
+// Values now: 'internal' | 'external'. Option C adds: 'both'.
+function readStoredVisibility(uuid: string): 'internal' | 'external' {
+  try {
+    const { mkdirSync: _mkdir } = require('fs') as typeof import('fs');
+    _mkdir(SITES_DIR, { recursive: true });
+    const val = readFileSync(path.join(SITES_DIR, `${uuid}.visibility`), 'utf8').trim();
+    if (val === 'internal' || val === 'external') return val;
+  } catch { /* not stored yet — fall through to default */ }
+  return readNetworkMode() === 'internal' ? 'internal' : 'external';
+}
+
+function writeStoredVisibility(uuid: string, visibility: 'internal' | 'external'): void {
+  try {
+    const { mkdirSync: _mkdir } = require('fs') as typeof import('fs');
+    _mkdir(SITES_DIR, { recursive: true });
+    writeFileSync(path.join(SITES_DIR, `${uuid}.visibility`), visibility, 'utf8');
+  } catch (err) {
+    console.warn(`[visibility] Could not write visibility sidecar for ${uuid}:`, (err as Error).message);
+  }
+}
+
 function mapSiteWithStoredAuth(
   app: Parameters<typeof mapSite>[0],
   deployments: Parameters<typeof mapSite>[1],
@@ -55,6 +79,7 @@ function mapSiteWithStoredAuth(
 
 // ── DNS auto-provisioning ─────────────────────────────────────────────────────
 // Creates a zone + A record for the given domain pointing at NS_SERVER_IP.
+// In internal mode: uses Technitium directly; zone is under .hh TLD.
 // Non-fatal: logs warnings but never throws — site ops should not fail due to DNS.
 export async function provisionDns(fqdn: string): Promise<void> {
   const serverIp = readNsServerIp();
@@ -65,6 +90,49 @@ export async function provisionDns(fqdn: string): Promise<void> {
   // Strip protocol and trailing slashes to get bare domain
   const domain = fqdn.replace(/^https?:\/\//, '').replace(/\/.*$/, '').trim();
   if (!domain) return;
+
+  const isInternal = readNetworkMode() === 'internal';
+
+  if (isInternal) {
+    // Internal mode: always use Technitium; ensure .hh root zone exists first
+    const technitium = createTechnitiumClient();
+    if (!technitium) {
+      console.warn('[dns-provision] Technitium not configured — skipping internal DNS provisioning');
+      return;
+    }
+    // Ensure .hh root zone exists (idempotent)
+    try {
+      await technitium.createZone('hh', 'Primary');
+      console.log('[dns-provision] .hh root zone ensured');
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      if (!msg.toLowerCase().includes('already exists')) {
+        console.warn('[dns-provision] .hh root zone create warning:', msg);
+      }
+    }
+    // Create zone for this site (e.g. mysite.hh)
+    try {
+      await technitium.createZone(domain, 'Primary');
+      console.log(`[dns-provision] Internal zone created: ${domain}`);
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      if (!msg.toLowerCase().includes('already exists')) {
+        console.warn(`[dns-provision] Internal zone create warning for ${domain}:`, msg);
+      }
+    }
+    // Add A record
+    try {
+      const params = new URLSearchParams();
+      params.set('type', 'A');
+      params.set('ttl', '3600');
+      params.set('ipAddress', serverIp);
+      await technitium.addRecord(domain, params);
+      console.log(`[dns-provision] Internal A record created: ${domain} → ${serverIp}`);
+    } catch (err) {
+      console.warn(`[dns-provision] Internal A record warning for ${domain}:`, (err as Error).message);
+    }
+    return;
+  }
 
   const provider = createDnsProvider();
 
@@ -479,7 +547,10 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     // fqdn is not accepted at creation time — patch it immediately after using 'domains' field
-    const resolvedFqdn = body.fqdn ?? body.domain;
+    // In internal mode, override domain to ${slug}.hh regardless of user input
+    const nameSlug = body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const internalDomain = readNetworkMode() === 'internal' ? `${nameSlug}.hh` : null;
+    const resolvedFqdn = internalDomain ?? (body.fqdn ?? body.domain);
     if (resolvedFqdn) {
       // Coolify requires full URL format — add https:// if no protocol present
       const coolifyDomain = /^https?:\/\//i.test(resolvedFqdn) ? resolvedFqdn : `https://${resolvedFqdn}`;
@@ -493,6 +564,7 @@ router.post('/', async (req: Request, res: Response) => {
       // Route file written after first deploy (container doesn't exist yet at creation time)
     }
     writeStoredDeployAuth(app.uuid, deployAuth);
+    writeStoredVisibility(app.uuid, readNetworkMode() === 'internal' ? 'internal' : 'external');
     res.status(201).json(mapSiteWithStoredAuth(app, []));
   } catch (err) {
     console.error('[coolify] POST /applications/public failed:', (err as Error).message);
