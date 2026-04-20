@@ -63,13 +63,31 @@ export class CloudflareProvider implements DnsProvider {
     return data.result;
   }
 
-  private async getZoneId(name: string): Promise<string> {
-    if (this.zoneCache.has(name)) return this.zoneCache.get(name)!;
-    const zones = await this.cfFetch<CfZone[]>(`/zones?name=${encodeURIComponent(name)}&per_page=1`);
-    if (!zones.length) throw new Error(`Cloudflare zone not found: ${name}`);
-    const id = zones[0].id;
-    this.zoneCache.set(name, id);
-    return id;
+  private async getZoneId(domain: string): Promise<string> {
+    const { zoneId } = await this.getZoneAndName(domain);
+    return zoneId;
+  }
+
+  private async getZoneAndName(domain: string): Promise<{ zoneId: string; recordName: string }> {
+    const parts = domain.split('.');
+    for (let i = 0; i < parts.length - 1; i++) {
+      const candidate = parts.slice(i).join('.');
+      if (this.zoneCache.has(candidate)) {
+        const zoneId = this.zoneCache.get(candidate)!;
+        const recordName = i === 0 ? '@' : parts.slice(0, i).join('.');
+        return { zoneId, recordName };
+      }
+      const zones = await this.cfFetch<CfZone[]>(
+        `/zones?name=${encodeURIComponent(candidate)}&status=active`
+      );
+      if (zones.length > 0) {
+        const zoneId = zones[0].id;
+        this.zoneCache.set(candidate, zoneId);
+        const recordName = i === 0 ? '@' : parts.slice(0, i).join('.');
+        return { zoneId, recordName };
+      }
+    }
+    throw new DnsOperationError(`Cloudflare zone not found for domain: ${domain}`, null);
   }
 
   private static readonly VALID_RECORD_TYPES = new Set<string>([
