@@ -146,8 +146,12 @@ export class CloudflareProvider implements DnsProvider {
 
   async getRecords(domain: string): Promise<DnsRecord[]> {
     try {
-      const id = await this.getZoneId(domain);
-      const records = await this.cfFetch<CfRecord[]>(`/zones/${id}/dns_records?per_page=100`);
+      const { zoneId, recordName } = await this.getZoneAndName(domain);
+      // If domain is the zone apex, return all records. If it's a subdomain,
+      // filter to only records for that specific name — prevents sites on the
+      // same parent zone from seeing each other's records.
+      const nameFilter = recordName === '@' ? '' : `&name=${encodeURIComponent(domain)}`;
+      const records = await this.cfFetch<CfRecord[]>(`/zones/${zoneId}/dns_records?per_page=100${nameFilter}`);
       return records.map((r) => this.mapRecord(r)).filter((r): r is DnsRecord => r !== null);
     } catch (err) {
       throw new DnsOperationError('Failed to retrieve Cloudflare DNS records', err);

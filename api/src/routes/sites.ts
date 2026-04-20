@@ -11,9 +11,8 @@ import {
 import { mapSite, mapDeploy } from '../services/mapper';
 import { probeSite } from '../services/healthProbe';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
-import { createTechnitiumClient } from '../services/technitium';
+import { createTechnitiumClient, TechnitiumClient } from '../services/technitium';
 import { readNsHostname, readNsServerIp } from './config';
-import { TechnitiumClient } from '../services/technitium';
 
 const router = Router();
 
@@ -67,14 +66,10 @@ export async function provisionDns(fqdn: string): Promise<void> {
   const domain = fqdn.replace(/^https?:\/\//, '').replace(/\/.*$/, '').trim();
   if (!domain) return;
 
-  const client = createTechnitiumClient();
-  if (!client) {
-    console.warn('[dns-provision] Technitium not configured — skipping DNS provisioning');
-    return;
-  }
+  const provider = createDnsProvider();
 
   try {
-    await client.createZone(domain, 'Primary');
+    await provider.createZone(domain);
     console.log(`[dns-provision] Zone created: ${domain}`);
   } catch (err) {
     // Zone may already exist — that's fine
@@ -85,11 +80,7 @@ export async function provisionDns(fqdn: string): Promise<void> {
   }
 
   try {
-    const params = new URLSearchParams();
-    params.set('type', 'A');
-    params.set('ttl', '3600');
-    params.set('ipAddress', serverIp);
-    await client.addRecord(domain, params);
+    await provider.addRecord(domain, { type: 'A', name: domain, value: serverIp, ttl: 3600 });
     console.log(`[dns-provision] A record created: ${domain} @ → ${serverIp}`);
   } catch (err) {
     console.warn(`[dns-provision] A record create warning for ${domain}:`, (err as Error).message);
