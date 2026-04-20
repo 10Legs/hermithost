@@ -151,7 +151,9 @@ export class CloudflareProvider implements DnsProvider {
         method: 'POST',
         body: JSON.stringify(body),
       });
-      return this.mapRecord(created);
+      const result = this.mapRecord(created);
+      if (!result) throw new DnsOperationError('Cloudflare returned unsupported record type', null);
+      return result;
     } catch (err) {
       throw new DnsOperationError('Failed to add Cloudflare DNS record', err);
     }
@@ -174,7 +176,9 @@ export class CloudflareProvider implements DnsProvider {
         method: 'PATCH',
         body: JSON.stringify(patch),
       });
-      return this.mapRecord(updated);
+      const result = this.mapRecord(updated);
+      if (!result) throw new DnsOperationError('Cloudflare returned unsupported record type', null);
+      return result;
     } catch (err) {
       throw new DnsOperationError('Failed to update Cloudflare DNS record', err);
     }
