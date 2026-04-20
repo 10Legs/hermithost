@@ -209,7 +209,9 @@ services:
       - "--certificatesresolvers.internal-ca.acme.httpchallenge.entrypoint=http"
       - "--certificatesresolvers.internal-ca.acme.email=internal@hermithost.hh"
       - "--certificatesresolvers.internal-ca.acme.storage=/acme/internal-acme.json"
-      - "--certificatesresolvers.internal-ca.acme.cabundle=/home/step/certs/root_ca.crt"
+    environment:
+      # Trust step-ca root CA so Lego can negotiate with it
+      LEGO_CA_CERTIFICATES: "/home/step/certs/root_ca.crt"
     ports:
       - "${TRAEFIK_HTTP_PORT:-8080}:80"
       - "${TRAEFIK_HTTPS_PORT:-8443}:443"
