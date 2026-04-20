@@ -261,6 +261,8 @@ networks:
   hermithost-net:
     driver: bridge
   coolify:
+    external: true
+    name: coolify
 
 volumes:
   hermithost-sites:
