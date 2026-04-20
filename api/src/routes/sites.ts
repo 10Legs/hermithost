@@ -12,7 +12,7 @@ import { mapSite, mapDeploy } from '../services/mapper';
 import { probeSite } from '../services/healthProbe';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
 import { createTechnitiumClient, TechnitiumClient } from '../services/technitium';
-import { readNsHostname, readNsServerIp } from './config';
+import { readNsHostname, readNsServerIp, readNetworkMode } from './config';
 
 const router = Router();
 
@@ -227,7 +227,12 @@ function dockerGet(path: string): Promise<unknown> {
   });
 }
 
-export async function provisionTraefikRoute(slug: string, domain: string, port: number | string = 3000): Promise<void> {
+export async function provisionTraefikRoute(
+  slug: string,
+  domain: string,
+  port: number | string = 3000,
+  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt'
+): Promise<void> {
   const confDir = TRAEFIK_CONF_DIR;
   const filePath = path.join(confDir, `site-${slug}.yml`);
   try {
@@ -254,7 +259,7 @@ export async function provisionTraefikRoute(slug: string, domain: string, port: 
       entryPoints:
         - https
       tls:
-        certResolver: letsencrypt
+        certResolver: ${resolver}
       service: site-${slug}
 
   services:
@@ -611,7 +616,8 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     const currentDomain = app.fqdn ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '') : '';
     if (currentDomain) {
       const port = (app as any).ports_exposes ?? 3000;
-      await provisionTraefikRoute(req.params.slug, currentDomain, port);
+      const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
+      await provisionTraefikRoute(req.params.slug, currentDomain, port, resolver);
     }
     if (switchingAuth) writeStoredDeployAuth(req.params.slug, body.deploy_auth!);
     const result = mapSiteWithStoredAuth(app, []);
@@ -777,7 +783,8 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
             const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; State: string }>;
             const running = containers.find(c => c.State === 'running');
             if (running) {
-              await provisionTraefikRoute(slug, domain, port);
+              const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
+              await provisionTraefikRoute(slug, domain, port, resolver);
               break;
             }
           } catch {
