@@ -82,7 +82,7 @@ export class TechnitiumProvider implements DnsProvider {
   async listZones(): Promise<DnsZone[]> {
     try {
       const zones = await this.client.listZones();
-      return zones.map((z) => ({ name: z.name, disabled: z.disabled }));
+      return zones.map((z) => ({ name: z.name, disabled: z.disabled, internal: z.internal }));
     } catch (err) {
       throw new DnsOperationError('Failed to list DNS zones', err);
     }

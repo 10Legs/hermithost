@@ -68,14 +68,16 @@ export class CloudflareProvider implements DnsProvider {
     return zoneId;
   }
 
-  private async getZoneAndName(domain: string): Promise<{ zoneId: string; recordName: string }> {
+
+
+  private async getZoneAndName(domain: string): Promise<{ zoneId: string; recordName: string; zoneName: string }> {
     const parts = domain.split('.');
     for (let i = 0; i < parts.length - 1; i++) {
       const candidate = parts.slice(i).join('.');
       if (this.zoneCache.has(candidate)) {
         const zoneId = this.zoneCache.get(candidate)!;
         const recordName = i === 0 ? '@' : parts.slice(0, i).join('.');
-        return { zoneId, recordName };
+        return { zoneId, recordName, zoneName: candidate };
       }
       const zones = await this.cfFetch<CfZone[]>(
         `/zones?name=${encodeURIComponent(candidate)}`
@@ -84,7 +86,7 @@ export class CloudflareProvider implements DnsProvider {
         const zoneId = zones[0].id;
         this.zoneCache.set(candidate, zoneId);
         const recordName = i === 0 ? '@' : parts.slice(0, i).join('.');
-        return { zoneId, recordName };
+        return { zoneId, recordName, zoneName: candidate };
       }
     }
     throw new DnsOperationError(`Cloudflare zone not found for domain: ${domain}`, null);
@@ -94,15 +96,24 @@ export class CloudflareProvider implements DnsProvider {
     'A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'CAA', 'SOA', 'PTR',
   ]);
 
-  private mapRecord(r: CfRecord): DnsRecord | null {
+  private mapRecord(r: CfRecord, zoneName?: string): DnsRecord | null {
     if (!CloudflareProvider.VALID_RECORD_TYPES.has(r.type)) {
       console.warn(`Skipping unsupported Cloudflare record type: ${r.type}`);
       return null;
     }
+    // Normalize FQDN → relative name (e.g. "www.example.com" → "www", "example.com" → "@")
+    let name = r.name;
+    if (zoneName) {
+      if (name === zoneName) {
+        name = '@';
+      } else if (name.endsWith(`.${zoneName}`)) {
+        name = name.slice(0, -(zoneName.length + 1));
+      }
+    }
     return {
       id: r.id,
       type: r.type as DnsRecordType,
-      name: r.name,
+      name,
       value: r.content,
       ttl: r.ttl,
       ...(r.priority !== undefined ? { priority: r.priority } : {}),
@@ -146,13 +157,13 @@ export class CloudflareProvider implements DnsProvider {
 
   async getRecords(domain: string): Promise<DnsRecord[]> {
     try {
-      const { zoneId, recordName } = await this.getZoneAndName(domain);
+      const { zoneId, recordName, zoneName } = await this.getZoneAndName(domain);
       // If domain is the zone apex, return all records. If it's a subdomain,
       // filter to only records for that specific name — prevents sites on the
       // same parent zone from seeing each other's records.
       const nameFilter = recordName === '@' ? '' : `&name=${encodeURIComponent(domain)}`;
       const records = await this.cfFetch<CfRecord[]>(`/zones/${zoneId}/dns_records?per_page=100${nameFilter}`);
-      return records.map((r) => this.mapRecord(r)).filter((r): r is DnsRecord => r !== null);
+      return records.map((r) => this.mapRecord(r, zoneName)).filter((r): r is DnsRecord => r !== null);
     } catch (err) {
       throw new DnsOperationError('Failed to retrieve Cloudflare DNS records', err);
     }
