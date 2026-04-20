@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { DnsRecord } from '../types';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
-import { createTechnitiumClient } from '../services/technitium';
 
 const router = Router();
 
@@ -11,18 +10,11 @@ router.get('/config', (_req: Request, res: Response) => {
 });
 
 // ── GET /api/dns/zones — list all zones ───────────────────────────────────────
-// Query param: ?all=true to include internal zones
-router.get('/zones', async (req: Request, res: Response) => {
-  const client = createTechnitiumClient();
-  if (!client) {
-    res.status(503).json({ error: 'DNS service not configured' });
-    return;
-  }
+router.get('/zones', async (_req: Request, res: Response) => {
   try {
-    const zones = await client.listZones();
-    const includeInternal = req.query.all === 'true';
-    const filtered = includeInternal ? zones : zones.filter((z) => !z.internal);
-    res.status(200).json(filtered);
+    const provider = createDnsProvider();
+    const zones = await provider.listZones();
+    res.status(200).json(zones);
   } catch (err) {
     console.error('[dns] GET /zones failed:', (err as Error).message);
     res.status(502).json({ error: 'Failed to retrieve zones from DNS server' });
@@ -30,21 +22,17 @@ router.get('/zones', async (req: Request, res: Response) => {
 });
 
 // ── POST /api/dns/zones — create a zone ───────────────────────────────────────
-// Body: { name: string, type?: string }
+// Body: { name: string }
 router.post('/zones', async (req: Request, res: Response) => {
-  const client = createTechnitiumClient();
-  if (!client) {
-    res.status(503).json({ error: 'DNS service not configured' });
-    return;
-  }
-  const body = req.body as { name?: string; type?: string };
+  const body = req.body as { name?: string };
   if (!body.name) {
     res.status(400).json({ error: 'Missing required field: name' });
     return;
   }
   try {
-    await client.createZone(body.name, body.type ?? 'Primary');
-    res.status(201).json({ name: body.name, type: body.type ?? 'Primary' });
+    const provider = createDnsProvider();
+    await provider.createZone(body.name);
+    res.status(201).json({ name: body.name });
   } catch (err) {
     console.error('[dns] POST /zones failed:', (err as Error).message);
     res.status(502).json({ error: 'Failed to create zone on DNS server' });
@@ -53,13 +41,9 @@ router.post('/zones', async (req: Request, res: Response) => {
 
 // ── DELETE /api/dns/zones/:name — delete a zone ───────────────────────────────
 router.delete('/zones/:name', async (req: Request, res: Response) => {
-  const client = createTechnitiumClient();
-  if (!client) {
-    res.status(503).json({ error: 'DNS service not configured' });
-    return;
-  }
   try {
-    await client.deleteZone(req.params.name);
+    const provider = createDnsProvider();
+    await provider.deleteZone(req.params.name);
     res.status(204).send();
   } catch (err) {
     console.error(`[dns] DELETE /zones/${req.params.name} failed:`, (err as Error).message);

@@ -1,6 +1,13 @@
 import type { DnsRecord } from '../../types';
 
+export interface DnsZone {
+  name: string;
+  disabled?: boolean;
+}
+
 export interface DnsProvider {
+  // ── Records ────────────────────────────────────────────────────
+
   /** Fetch all records for a domain. */
   getRecords(domain: string): Promise<DnsRecord[]>;
 
@@ -12,4 +19,15 @@ export interface DnsProvider {
 
   /** Delete a record by id. */
   deleteRecord(domain: string, id: string): Promise<void>;
+
+  // ── Zones ──────────────────────────────────────────────────────
+
+  /** List all zones managed by this provider. */
+  listZones(): Promise<DnsZone[]>;
+
+  /** Create a new zone. */
+  createZone(name: string): Promise<void>;
+
+  /** Delete a zone by name. */
+  deleteZone(name: string): Promise<void>;
 }
