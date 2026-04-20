@@ -32,6 +32,12 @@
 	let dnsProvider: 'technitium' | 'cloudflare' = 'technitium';
 	let cloudflareStatus: 'connected' | 'disconnected' | 'unconfigured' = 'unconfigured';
 	let cloudflareTokenInput = '';
+	let networkMode: 'external' | 'internal' = 'external';
+	let savingNetworkMode = false;
+	let networkModeError = '';
+	let networkModeWarning = '';
+	let showTrustInstall = false;
+	let downloadingTrustCert = false;
 	let savingDnsProvider = false;
 	let dnsProviderError = '';
 	let savingCloudflareToken = false;
@@ -133,6 +139,7 @@
 					dns_provider?: 'technitium' | 'cloudflare';
 					cloudflare_status?: 'connected' | 'disconnected' | 'unconfigured';
 					cloudflare_token_set?: boolean;
+					network_mode?: 'external' | 'internal';
 				};
 				nsHostname = cfg.ns_hostname ?? '';
 				acmeEmail = cfg.acme_email ?? '';
@@ -142,6 +149,7 @@
 				technitiumStatus = cfg.technitium_status ?? 'not_configured';
 				dnsProvider = cfg.dns_provider ?? 'technitium';
 				cloudflareStatus = cfg.cloudflare_status ?? 'unconfigured';
+				networkMode = cfg.network_mode ?? 'external';
 			}
 		} catch {
 			// non-fatal; page still renders
@@ -224,6 +232,55 @@
 			cloudflareTokenError = (err as Error).message;
 		} finally {
 			savingCloudflareToken = false;
+		}
+	}
+
+	async function onNetworkModeChange(event: Event) {
+		const select = event.currentTarget as HTMLSelectElement;
+		const newMode = select.value as 'external' | 'internal';
+		if (newMode === networkMode) return;
+
+		networkModeWarning = newMode === 'internal'
+			? 'New sites will use .hh addresses and the local CA. Existing sites are not updated automatically.'
+			: "Switching to internet mode. New sites will use Let's Encrypt. Existing .hh sites are not updated.";
+
+		savingNetworkMode = true;
+		networkModeError = '';
+		try {
+			const res = await fetch('/api/config', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ network_mode: newMode }),
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({})) as { error?: string };
+				throw new Error(body.error ?? `HTTP ${res.status}`);
+			}
+			networkMode = newMode;
+		} catch (err) {
+			networkModeError = (err as Error).message;
+			select.value = networkMode;
+		} finally {
+			savingNetworkMode = false;
+		}
+	}
+
+	async function downloadTrustCert() {
+		downloadingTrustCert = true;
+		try {
+			const res = await fetch('/api/config/trust-certificate');
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const blob = await res.blob();
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = 'hermithost-trust.crt';
+			a.click();
+			URL.revokeObjectURL(url);
+		} catch (err) {
+			networkModeError = (err as Error).message;
+		} finally {
+			downloadingTrustCert = false;
 		}
 	}
 
@@ -563,6 +620,96 @@
 					</div>
 				</div>
 			{/if}
+		</div>
+	</section>
+
+	<!-- ── Network Mode ──────────────────────────────────────────────────────── -->
+	<section class="card" style="margin-bottom: 16px;">
+		<div class="card-header">
+			<div class="card-title-row">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<path d="M5 12.55a11 11 0 0 1 14.08 0"/>
+					<path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+					<path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+					<line x1="12" y1="20" x2="12.01" y2="20"/>
+				</svg>
+				<h2 class="card-title">Network Mode</h2>
+			</div>
+			<p class="card-desc">Run on a private network with local certificates, or connect to the internet with Let's Encrypt.</p>
+		</div>
+		<div class="section">
+
+			<div class="field-group">
+				<label class="field-label" for="network-mode">Mode</label>
+				<p class="field-hint">Affects new sites only. Existing sites are not updated automatically.</p>
+				<div class="input-row">
+					<select
+						id="network-mode"
+						class="text-input select-input"
+						on:change={onNetworkModeChange}
+						disabled={savingNetworkMode}
+						value={networkMode}
+					>
+						<option value="external">Internet (Let's Encrypt)</option>
+						<option value="internal">Private network (.hh)</option>
+					</select>
+					{#if savingNetworkMode}
+						<span class="spinner"></span>
+					{/if}
+				</div>
+				{#if networkModeWarning}
+					<p class="provider-warning">{networkModeWarning}</p>
+				{/if}
+				{#if networkModeError}
+					<p class="error-msg">{networkModeError}</p>
+				{/if}
+			</div>
+
+			{#if networkMode === 'internal'}
+				<div class="field-group" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
+					<label class="field-label">Trust Certificate</label>
+					<p class="field-hint">
+						Install on every device that needs access to your private sites.
+						Browsers won't trust <code>.hh</code> addresses without it.
+					</p>
+					<div class="input-row" style="margin-top: 8px;">
+						<button
+							class="btn btn-primary"
+							on:click={downloadTrustCert}
+							disabled={downloadingTrustCert}
+						>
+							{#if downloadingTrustCert}
+								<span class="spinner"></span> Downloading…
+							{:else}
+								Download trust certificate
+							{/if}
+						</button>
+						<button
+							class="btn btn-ghost"
+							on:click={() => { showTrustInstall = !showTrustInstall; }}
+						>
+							{showTrustInstall ? 'Hide' : 'How to install'}
+						</button>
+					</div>
+
+					{#if showTrustInstall}
+						<div class="trust-install-guide" style="margin-top: 12px;">
+							<ul class="install-list">
+								<li><strong>Mac:</strong> Double-click the .crt file → Keychain Access → right-click → Get Info → Trust → Always Trust</li>
+								<li><strong>Windows:</strong> Double-click → Install Certificate → Local Machine → Trusted Root Certification Authorities</li>
+								<li><strong>iPhone / iPad:</strong> AirDrop or email the file → tap to install profile → Settings → General → VPN &amp; Device Management → trust it</li>
+								<li><strong>Android:</strong> Settings → Security → Install from storage → select the .crt file</li>
+							</ul>
+						</div>
+					{/if}
+
+					<div class="hh-chip" style="margin-top: 12px;">
+						<span class="tld-badge">.hh</span>
+						<span class="chip-text">Sites on this stack get private addresses (e.g. <code>mysite.hh</code>). Only devices on your local network can reach them.</span>
+					</div>
+				</div>
+			{/if}
+
 		</div>
 	</section>
 
@@ -1356,5 +1503,46 @@
 
 	.cf-token-row {
 		padding: 12px;
+	}
+
+	/* ── Trust cert install guide ───────────────────────────────── */
+	.install-list {
+		margin: 0;
+		padding-left: 18px;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		font-size: 13px;
+		color: var(--text-muted);
+		line-height: 1.5;
+	}
+
+	/* ── .hh chip ───────────────────────────────────────────────── */
+	.hh-chip {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		padding: 10px 12px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		font-size: 13px;
+	}
+
+	.tld-badge {
+		font-family: monospace;
+		font-size: 12px;
+		font-weight: 600;
+		background: var(--accent-teal);
+		color: #fff;
+		padding: 2px 6px;
+		border-radius: 4px;
+		white-space: nowrap;
+		flex-shrink: 0;
+	}
+
+	.chip-text {
+		color: var(--text-muted);
+		line-height: 1.5;
 	}
 </style>

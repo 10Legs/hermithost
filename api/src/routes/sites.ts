@@ -576,8 +576,25 @@ router.post('/', async (req: Request, res: Response) => {
 router.delete('/:slug', async (req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
+    // Fetch domain before deleting so we can clean up DNS
+    const app = await client.getApplication(req.params.slug).catch(() => null);
+    const domain = app?.fqdn
+      ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+      : '';
+
     await client.deleteApplication(req.params.slug);
     removeTraefikRoute(req.params.slug);
+
+    // Non-fatal DNS teardown — delete zone created by provisionDns
+    if (domain) {
+      const provider = createDnsProvider();
+      if (provider) {
+        provider.deleteZone(domain).catch((err: unknown) => {
+          console.warn(`[dns-teardown] Failed to delete zone ${domain}:`, (err as Error).message);
+        });
+      }
+    }
+
     res.status(204).send();
   } catch (err) {
     console.error(`[coolify] DELETE /applications/${req.params.slug} failed:`, (err as Error).message);
