@@ -221,7 +221,7 @@ services:
       PGPASSWORD: "${COOLIFY_DB_PASSWORD}"
     volumes:
       - hermithost-sites:/app/sites
-      - coolify-api-token:/coolify-api-token:ro
+      - coolify-api-token:/coolify-api-token
       - coolify-keys:/coolify-keys:ro
       - ./traefik/conf.d:/app/traefik-conf.d
       - /var/run/docker.sock:/var/run/docker.sock:ro
