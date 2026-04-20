@@ -193,7 +193,7 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      ORIGIN: "http://traefik:80"
+      ORIGIN: "http://api:3001"
     networks:
       - hermithost-net
     restart: unless-stopped
