@@ -10,6 +10,17 @@ export DOCKER_HOST=unix:///Users/rdemeritt/.docker/run/docker.sock
 
 mkdir -p "$LOG_DIR"
 
+# Ensure the coolify network exists before compose up.
+# Coolify normally creates this network, but on a fresh machine it may not
+# exist yet. Traefik joins it to reach Coolify-deployed site containers.
+if ! docker network inspect coolify &>/dev/null; then
+  echo "   'coolify' network not found — creating it..."
+  docker network create coolify
+  echo "   'coolify' network created. Start Coolify to attach it to its containers."
+else
+  echo "   'coolify' network present."
+fi
+
 # Determine whether to force a rebuild
 BUILD_FLAG=""
 if [[ "${1:-}" == "--build" || "${1:-}" == "-b" ]]; then

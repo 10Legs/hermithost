@@ -28,6 +28,17 @@
 	let configSaveError = '';
 	let configSaveSuccess = false;
 
+	// ── DNS Provider ───────────────────────────────────────────────────────────
+	let dnsProvider: 'technitium' | 'cloudflare' = 'technitium';
+	let cloudflareStatus: 'connected' | 'disconnected' | 'unconfigured' = 'unconfigured';
+	let cloudflareTokenInput = '';
+	let savingDnsProvider = false;
+	let dnsProviderError = '';
+	let savingCloudflareToken = false;
+	let cloudflareTokenError = '';
+	let cloudflareTokenSuccess = false;
+	let dnsProviderWarning = '';
+
 	// ── Selector ───────────────────────────────────────────────────────────────
 	let availableSites: SiteSummary[] = [];
 	let availableZones: ZoneSummary[] = [];
@@ -119,6 +130,9 @@
 					coolify_status?: 'connected' | 'error' | 'not_configured';
 					technitium_url?: string;
 					technitium_status?: 'connected' | 'error' | 'not_configured';
+					dns_provider?: 'technitium' | 'cloudflare';
+					cloudflare_status?: 'connected' | 'disconnected' | 'unconfigured';
+					cloudflare_token_set?: boolean;
 				};
 				nsHostname = cfg.ns_hostname ?? '';
 				acmeEmail = cfg.acme_email ?? '';
@@ -126,6 +140,8 @@
 				coolifyStatus = cfg.coolify_status ?? 'not_configured';
 				technitiumUrl = cfg.technitium_url ?? '';
 				technitiumStatus = cfg.technitium_status ?? 'not_configured';
+				dnsProvider = cfg.dns_provider ?? 'technitium';
+				cloudflareStatus = cfg.cloudflare_status ?? 'unconfigured';
 			}
 		} catch {
 			// non-fatal; page still renders
@@ -153,6 +169,61 @@
 			configSaveError = (err as Error).message;
 		} finally {
 			savingConfig = false;
+		}
+	}
+
+	// ── DNS Provider handlers ──────────────────────────────────────────────────
+	async function onDnsProviderChange(event: Event) {
+		const select = event.currentTarget as HTMLSelectElement;
+		const newProvider = select.value as 'technitium' | 'cloudflare';
+		if (newProvider === dnsProvider) return;
+
+		dnsProviderWarning = `DNS provisioning will use ${newProvider === 'cloudflare' ? 'Cloudflare' : 'Technitium'} going forward. Existing zones are not migrated automatically.`;
+		savingDnsProvider = true;
+		dnsProviderError = '';
+		try {
+			const res = await fetch('/api/config', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ dns_provider: newProvider }),
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({})) as { error?: string };
+				throw new Error(body.error ?? `HTTP ${res.status}`);
+			}
+			dnsProvider = newProvider;
+		} catch (err) {
+			dnsProviderError = (err as Error).message;
+			select.value = dnsProvider; // revert select visually
+		} finally {
+			savingDnsProvider = false;
+		}
+	}
+
+	async function saveCloudflareToken() {
+		if (!cloudflareTokenInput.trim()) return;
+		savingCloudflareToken = true;
+		cloudflareTokenError = '';
+		cloudflareTokenSuccess = false;
+		try {
+			const res = await fetch('/api/config', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ cloudflare_token: cloudflareTokenInput.trim() }),
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({})) as { error?: string };
+				throw new Error(body.error ?? `HTTP ${res.status}`);
+			}
+			const updated = await res.json().catch(() => ({})) as { cloudflare_status?: 'connected' | 'disconnected' | 'unconfigured' };
+			if (updated.cloudflare_status) cloudflareStatus = updated.cloudflare_status;
+			cloudflareTokenInput = '';
+			cloudflareTokenSuccess = true;
+			setTimeout(() => { cloudflareTokenSuccess = false; }, 3000);
+		} catch (err) {
+			cloudflareTokenError = (err as Error).message;
+		} finally {
+			savingCloudflareToken = false;
 		}
 	}
 
@@ -397,10 +468,101 @@
 						<span class="integration-url">{technitiumUrl}</span>
 					{/if}
 				</div>
-				<span class="status-label" class:label-connected={technitiumStatus === 'connected'} class:label-error={technitiumStatus === 'error'} class:label-unconfigured={technitiumStatus === 'not_configured'}>
-					{#if technitiumStatus === 'connected'}Connected{:else if technitiumStatus === 'error'}Error{:else}Not configured{/if}
-				</span>
+				<div class="integration-right">
+					{#if dnsProvider === 'technitium'}
+						<span class="provider-badge badge-active">Active</span>
+					{/if}
+					<span class="status-label" class:label-connected={technitiumStatus === 'connected'} class:label-error={technitiumStatus === 'error'} class:label-unconfigured={technitiumStatus === 'not_configured'}>
+						{#if technitiumStatus === 'connected'}Connected{:else if technitiumStatus === 'error'}Error{:else}Not configured{/if}
+					</span>
+				</div>
 			</div>
+
+			<!-- DNS Provider selector -->
+			<div class="dns-provider-block" style="margin-top: 16px;">
+				<div class="field-group">
+					<label class="field-label" for="dns-provider">DNS Provider</label>
+					<p class="field-hint">Select which provider handles DNS zone provisioning.</p>
+					<div class="input-row">
+						<select
+							id="dns-provider"
+							class="text-input select-input"
+							on:change={onDnsProviderChange}
+							disabled={savingDnsProvider}
+							value={dnsProvider}
+						>
+							<option value="technitium">Technitium</option>
+							<option value="cloudflare">Cloudflare</option>
+						</select>
+						{#if savingDnsProvider}
+							<span class="spinner"></span>
+						{/if}
+					</div>
+					{#if dnsProviderWarning}
+						<p class="provider-warning">{dnsProviderWarning}</p>
+					{/if}
+					{#if dnsProviderError}
+						<p class="error-msg">{dnsProviderError}</p>
+					{/if}
+				</div>
+			</div>
+
+			<!-- Cloudflare token — only when cloudflare is active -->
+			{#if dnsProvider === 'cloudflare'}
+				<div class="integration-row cf-token-row" style="margin-top: 10px; flex-direction: column; align-items: flex-start; gap: 10px;">
+					<div class="integration-info" style="width: 100%; justify-content: space-between;">
+						<div class="integration-info">
+							<span
+								class="status-dot"
+								class:dot-connected={cloudflareStatus === 'connected'}
+								class:dot-error={cloudflareStatus === 'disconnected'}
+								class:dot-unconfigured={cloudflareStatus === 'unconfigured'}
+							></span>
+							<span class="integration-name">Cloudflare</span>
+							<span class="provider-badge badge-active">Active</span>
+						</div>
+						<span
+							class="status-label"
+							class:label-connected={cloudflareStatus === 'connected'}
+							class:label-error={cloudflareStatus === 'disconnected'}
+							class:label-unconfigured={cloudflareStatus === 'unconfigured'}
+						>
+							{#if cloudflareStatus === 'connected'}Connected{:else if cloudflareStatus === 'disconnected'}Disconnected{:else}Unconfigured{/if}
+						</span>
+					</div>
+					<div class="field-group" style="width: 100%;">
+						<label class="field-label" for="cf-token">Cloudflare API Token</label>
+						<p class="field-hint">Requires Zone:DNS:Edit permission on the target zones.</p>
+						<div class="input-row">
+							<input
+								id="cf-token"
+								class="text-input"
+								type="password"
+								placeholder="••••••••••••••••"
+								bind:value={cloudflareTokenInput}
+								autocomplete="off"
+							/>
+							<button
+								class="btn btn-primary"
+								on:click={saveCloudflareToken}
+								disabled={savingCloudflareToken || !cloudflareTokenInput.trim()}
+							>
+								{#if savingCloudflareToken}
+									<span class="spinner"></span> Saving…
+								{:else}
+									Save
+								{/if}
+							</button>
+						</div>
+						{#if cloudflareTokenSuccess}
+							<p class="inline-success">Token saved successfully.</p>
+						{/if}
+						{#if cloudflareTokenError}
+							<p class="error-msg">{cloudflareTokenError}</p>
+						{/if}
+					</div>
+				</div>
+			{/if}
 		</div>
 	</section>
 
@@ -1145,4 +1307,54 @@
 	.result-list.created { color: var(--success, #4caf82); }
 	.result-list.skipped { color: var(--text-muted); }
 	.result-list.failed { color: var(--danger, #cf5c5c); }
+
+	/* ── DNS Provider ── */
+	.select-input {
+		appearance: none;
+		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%234a5568' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+		background-repeat: no-repeat;
+		background-position: right 10px center;
+		padding-right: 28px;
+		cursor: pointer;
+	}
+
+	.dns-provider-block {
+		padding: 0;
+	}
+
+	.integration-right {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.provider-badge {
+		font-size: 10px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		padding: 2px 6px;
+		border-radius: 3px;
+	}
+
+	.badge-active {
+		background: color-mix(in srgb, var(--accent-teal) 15%, transparent);
+		color: var(--accent-teal);
+		border: 1px solid color-mix(in srgb, var(--accent-teal) 35%, transparent);
+	}
+
+	.provider-warning {
+		font-size: 11px;
+		color: var(--warning, #d4a843);
+		margin-top: 6px;
+		line-height: 1.4;
+		padding: 6px 10px;
+		background: color-mix(in srgb, var(--warning, #d4a843) 10%, transparent);
+		border: 1px solid color-mix(in srgb, var(--warning, #d4a843) 30%, transparent);
+		border-radius: 4px;
+	}
+
+	.cf-token-row {
+		padding: 12px;
+	}
 </style>

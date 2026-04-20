@@ -18,23 +18,17 @@ http:
       tls: {}
       service: frontend
 
-    # ── Fallback: no-host catch-all ────────────────────────────────────────────
-    # Serves admin when no site-specific Host rule matches (e.g., direct IP access).
-    # No TLS cert — no hostname for ACME to target.
-    api:
+    # ── LAN admin access — port 9080, no Host required, no TLS ────────────────
+    api-admin-lan:
       rule: "PathPrefix(`/api`)"
-      priority: 10
       entryPoints:
-        - http
-        - https
+        - admin
       service: api
 
-    frontend:
+    frontend-admin-lan:
       rule: "PathPrefix(`/`)"
-      priority: 1
       entryPoints:
-        - http
-        - https
+        - admin
       service: frontend
 
   services:

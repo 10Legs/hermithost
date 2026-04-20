@@ -6,6 +6,8 @@ import { createTechnitiumClient } from '../services/technitium';
 const router = Router();
 
 const NS_HOSTNAME_FILE = '/coolify-api-token/ns_hostname';
+const DNS_PROVIDER_FILE = '/coolify-api-token/dns_provider';
+const CLOUDFLARE_TOKEN_FILE = '/coolify-api-token/cloudflare_token';
 
 // NS_HOSTNAME read precedence:
 // 1. File /coolify-api-token/ns_hostname
@@ -33,7 +35,17 @@ export function readNsServerIp(): string | null {
   return process.env.NS_SERVER_IP ?? null;
 }
 
+function readSetting(key: string): string | null {
+  try {
+    const val = readFileSync(`/coolify-api-token/${key}`, 'utf8').trim();
+    return val || null;
+  } catch {
+    return null;
+  }
+}
+
 type IntegrationStatus = 'connected' | 'error' | 'not_configured';
+type CloudflareStatus = 'connected' | 'disconnected' | 'unconfigured';
 
 async function getCoolifyStatus(): Promise<IntegrationStatus> {
   const client = createCoolifyClient();
@@ -43,6 +55,19 @@ async function getCoolifyStatus(): Promise<IntegrationStatus> {
     return 'connected';
   } catch {
     return 'error';
+  }
+}
+
+async function getCloudflareStatus(token: string | null): Promise<CloudflareStatus> {
+  if (!token || !token.trim()) return 'unconfigured';
+  try {
+    const res = await fetch('https://api.cloudflare.com/client/v4/user/tokens/verify', {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    const data = await res.json() as { success: boolean };
+    return data.success ? 'connected' : 'disconnected';
+  } catch {
+    return 'disconnected';
   }
 }
 
@@ -60,10 +85,14 @@ async function getTechnitiumStatus(): Promise<IntegrationStatus> {
 // GET /api/config
 router.get('/', async (_req: Request, res: Response) => {
   try {
-    const [coolify_status, technitium_status] = await Promise.all([
+    const cfToken = readSetting('cloudflare_token') ?? process.env.CLOUDFLARE_TOKEN ?? null;
+    const [coolify_status, technitium_status, cloudflare_status] = await Promise.all([
       getCoolifyStatus(),
       getTechnitiumStatus(),
+      getCloudflareStatus(cfToken),
     ]);
+
+    const dns_provider = readSetting('dns_provider') ?? process.env.DNS_PROVIDER ?? 'technitium';
 
     res.status(200).json({
       ns_hostname: readNsHostname(),
@@ -72,6 +101,9 @@ router.get('/', async (_req: Request, res: Response) => {
       coolify_status,
       technitium_url: process.env.TECHNITIUM_URL ?? null,
       technitium_status,
+      dns_provider,
+      cloudflare_status,
+      cloudflare_token_set: !!cfToken,
     });
   } catch (err) {
     console.error('[config] GET failed:', (err as Error).message);
@@ -81,30 +113,65 @@ router.get('/', async (_req: Request, res: Response) => {
 
 // PUT /api/config
 router.put('/', async (req: Request, res: Response) => {
-  const body = req.body as { ns_hostname?: unknown };
+  const body = req.body as {
+    ns_hostname?: unknown;
+    dns_provider?: unknown;
+    cloudflare_token?: unknown;
+  };
 
-  if (typeof body.ns_hostname !== 'string' || !body.ns_hostname.trim()) {
-    res.status(400).json({ error: 'ns_hostname must be a non-empty string' });
+  // Validate at least one known key is present
+  const hasNsHostname = typeof body.ns_hostname === 'string' && body.ns_hostname.trim();
+  const hasDnsProvider = typeof body.dns_provider === 'string' && body.dns_provider.trim();
+  const hasCfToken = typeof body.cloudflare_token === 'string';
+
+  if (!hasNsHostname && !hasDnsProvider && !hasCfToken) {
+    res.status(400).json({ error: 'At least one field required: ns_hostname, dns_provider, cloudflare_token' });
     return;
   }
 
-  const value = body.ns_hostname.trim();
+  // Validate dns_provider enum if provided
+  if (hasDnsProvider && !['technitium', 'cloudflare'].includes((body.dns_provider as string).trim())) {
+    res.status(400).json({ error: 'dns_provider must be "technitium" or "cloudflare"' });
+    return;
+  }
 
   try {
     // Ensure directory exists (best-effort — directory is normally created by init container)
     try { mkdirSync('/coolify-api-token', { recursive: true }); } catch { /* ok */ }
-    writeFileSync(NS_HOSTNAME_FILE, value, 'utf8');
-    // Sync new hostname to Technitium immediately — non-fatal
-    const client = createTechnitiumClient();
-    if (client) {
-      client.setDnsServerDomain(value).catch((e: Error) =>
-        console.warn('[config] setDnsServerDomain after PUT failed:', e.message)
-      );
+
+    const result: Record<string, string> = {};
+
+    if (hasNsHostname) {
+      const value = (body.ns_hostname as string).trim();
+      writeFileSync(NS_HOSTNAME_FILE, value, 'utf8');
+      // Sync new hostname to Technitium immediately — non-fatal
+      const client = createTechnitiumClient();
+      if (client) {
+        client.setDnsServerDomain(value).catch((e: Error) =>
+          console.warn('[config] setDnsServerDomain after PUT failed:', e.message)
+        );
+      }
+      result.ns_hostname = value;
     }
-    res.status(200).json({ ns_hostname: value });
+
+    if (hasDnsProvider) {
+      const value = (body.dns_provider as string).trim();
+      writeFileSync(DNS_PROVIDER_FILE, value, 'utf8');
+      result.dns_provider = value;
+    }
+
+    if (hasCfToken) {
+      const value = (body.cloudflare_token as string).trim();
+      writeFileSync(CLOUDFLARE_TOKEN_FILE, value, 'utf8');
+      result.cloudflare_token_set = value ? 'true' : 'false';
+      const cloudflare_status = await getCloudflareStatus(value || null);
+      result.cloudflare_status = cloudflare_status;
+    }
+
+    res.status(200).json(result);
   } catch (err) {
-    console.error('[config] PUT write ns_hostname failed:', (err as Error).message);
-    res.status(500).json({ error: 'Failed to write ns_hostname' });
+    console.error('[config] PUT failed:', (err as Error).message);
+    res.status(500).json({ error: 'Failed to write config' });
   }
 });
 

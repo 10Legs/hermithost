@@ -1,4 +1,4 @@
-import type { DnsProvider } from './DnsProvider';
+import type { DnsProvider, DnsZone } from './DnsProvider';
 import type { DnsRecord } from '../../types';
 import { TechnitiumClient } from '../technitium';
 import {
@@ -76,6 +76,31 @@ export class TechnitiumProvider implements DnsProvider {
       await this.client.deleteRecord(identity.domain, params);
     } catch (err) {
       throw new DnsOperationError('Failed to delete DNS record', err);
+    }
+  }
+
+  async listZones(): Promise<DnsZone[]> {
+    try {
+      const zones = await this.client.listZones();
+      return zones.map((z) => ({ name: z.name, disabled: z.disabled }));
+    } catch (err) {
+      throw new DnsOperationError('Failed to list DNS zones', err);
+    }
+  }
+
+  async createZone(name: string): Promise<void> {
+    try {
+      await this.client.createZone(name);
+    } catch (err) {
+      throw new DnsOperationError('Failed to create DNS zone', err);
+    }
+  }
+
+  async deleteZone(name: string): Promise<void> {
+    try {
+      await this.client.deleteZone(name);
+    } catch (err) {
+      throw new DnsOperationError('Failed to delete DNS zone', err);
     }
   }
 }

@@ -169,6 +169,7 @@ services:
       - "--providers.file.watch=true"
       - "--entrypoints.http.address=:80"
       - "--entrypoints.https.address=:443"
+      - "--entrypoints.admin.address=:9080"
       - "--entrypoints.https.http.tls.certresolver=letsencrypt"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=http"
@@ -178,6 +179,7 @@ services:
       - "${TRAEFIK_HTTP_PORT:-8080}:80"
       - "${TRAEFIK_HTTPS_PORT:-8443}:443"
       - "8081:8080"
+      - "9080:9080"
     volumes:
       - ./traefik/conf.d:/etc/traefik/conf.d
       - traefik-acme:/acme
@@ -210,6 +212,8 @@ services:
       TECHNITIUM_URL: "${TECHNITIUM_URL:-http://technitium:5380}"
       TECHNITIUM_TOKEN: "${TECHNITIUM_TOKEN:-}"
       DNS_MOCK: "${DNS_MOCK:-}"
+      DNS_PROVIDER: "${DNS_PROVIDER:-technitium}"
+      CLOUDFLARE_TOKEN: "${CLOUDFLARE_TOKEN:-}"
       NS_HOSTNAME: "${NS_HOSTNAME:-}"
       NS_SERVER_IP: "${NS_SERVER_IP:-}"
       PGHOST: "coolify-db"
@@ -219,7 +223,7 @@ services:
       PGPASSWORD: "${COOLIFY_DB_PASSWORD}"
     volumes:
       - hermithost-sites:/app/sites
-      - coolify-api-token:/coolify-api-token:ro
+      - coolify-api-token:/coolify-api-token
       - coolify-keys:/coolify-keys:ro
       - ./traefik/conf.d:/app/traefik-conf.d
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -257,6 +261,8 @@ networks:
   hermithost-net:
     driver: bridge
   coolify:
+    external: true
+    name: coolify
 
 volumes:
   hermithost-sites:
