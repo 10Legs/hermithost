@@ -8,6 +8,19 @@ const router = Router();
 const NS_HOSTNAME_FILE = '/coolify-api-token/ns_hostname';
 const DNS_PROVIDER_FILE = '/coolify-api-token/dns_provider';
 const CLOUDFLARE_TOKEN_FILE = '/coolify-api-token/cloudflare_token';
+const NETWORK_MODE_FILE = '/coolify-api-token/network_mode';
+
+// network_mode read precedence:
+// 1. File /coolify-api-token/network_mode
+// 2. process.env.NETWORK_MODE
+// 3. 'external'
+export function readNetworkMode(): 'external' | 'internal' {
+  try {
+    const val = readFileSync(NETWORK_MODE_FILE, 'utf8').trim();
+    if (val === 'internal') return 'internal';
+  } catch { /* file not present */ }
+  return process.env.NETWORK_MODE === 'internal' ? 'internal' : 'external';
+}
 
 // NS_HOSTNAME read precedence:
 // 1. File /coolify-api-token/ns_hostname
@@ -104,6 +117,7 @@ router.get('/', async (_req: Request, res: Response) => {
       dns_provider,
       cloudflare_status,
       cloudflare_token_set: !!cfToken,
+      network_mode: readNetworkMode(),
     });
   } catch (err) {
     console.error('[config] GET failed:', (err as Error).message);
@@ -117,21 +131,29 @@ router.put('/', async (req: Request, res: Response) => {
     ns_hostname?: unknown;
     dns_provider?: unknown;
     cloudflare_token?: unknown;
+    network_mode?: unknown;
   };
 
   // Validate at least one known key is present
   const hasNsHostname = typeof body.ns_hostname === 'string' && body.ns_hostname.trim();
   const hasDnsProvider = typeof body.dns_provider === 'string' && body.dns_provider.trim();
   const hasCfToken = typeof body.cloudflare_token === 'string';
+  const hasNetworkMode = typeof body.network_mode === 'string' && body.network_mode.trim();
 
-  if (!hasNsHostname && !hasDnsProvider && !hasCfToken) {
-    res.status(400).json({ error: 'At least one field required: ns_hostname, dns_provider, cloudflare_token' });
+  if (!hasNsHostname && !hasDnsProvider && !hasCfToken && !hasNetworkMode) {
+    res.status(400).json({ error: 'At least one field required: ns_hostname, dns_provider, cloudflare_token, network_mode' });
     return;
   }
 
   // Validate dns_provider enum if provided
   if (hasDnsProvider && !['technitium', 'cloudflare'].includes((body.dns_provider as string).trim())) {
     res.status(400).json({ error: 'dns_provider must be "technitium" or "cloudflare"' });
+    return;
+  }
+
+  // Validate network_mode enum if provided
+  if (hasNetworkMode && !['external', 'internal', 'mixed'].includes((body.network_mode as string).trim())) {
+    res.status(400).json({ error: 'network_mode must be "external" or "internal"' });
     return;
   }
 
@@ -168,10 +190,29 @@ router.put('/', async (req: Request, res: Response) => {
       result.cloudflare_status = cloudflare_status;
     }
 
+    if (hasNetworkMode) {
+      const value = (body.network_mode as string).trim() as 'external' | 'internal' | 'mixed';
+      writeFileSync(NETWORK_MODE_FILE, value, 'utf8');
+      result.network_mode = value;
+    }
+
     res.status(200).json(result);
   } catch (err) {
     console.error('[config] PUT failed:', (err as Error).message);
     res.status(500).json({ error: 'Failed to write config' });
+  }
+});
+
+// GET /api/config/trust-certificate
+router.get('/trust-certificate', (_req: Request, res: Response) => {
+  const certPath = '/home/step/certs/root_ca.crt';
+  try {
+    const cert = readFileSync(certPath);
+    res.setHeader('Content-Type', 'application/x-x509-ca-cert');
+    res.setHeader('Content-Disposition', 'attachment; filename="hermithost-trust.crt"');
+    res.send(cert);
+  } catch {
+    res.status(404).json({ error: 'Trust certificate not available — internal mode not configured' });
   }
 });
 

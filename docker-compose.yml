@@ -266,6 +266,7 @@ services:
       - coolify-keys:/coolify-keys:ro
       - ./traefik/conf.d:/app/traefik-conf.d
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - step-ca-data:/home/step:ro
     networks:
       - hermithost-net
       - coolify
