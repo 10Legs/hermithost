@@ -19,6 +19,7 @@
 
 	// ── Config section ─────────────────────────────────────────────────────────
 	let nsHostname = '';
+	let nsServerIp = '';
 	let acmeEmail = '';
 	let coolifyStatus: 'connected' | 'error' | 'not_configured' = 'not_configured';
 	let technitiumStatus: 'connected' | 'error' | 'not_configured' = 'not_configured';
@@ -38,6 +39,11 @@
 	let networkModeWarning = '';
 	let showTrustInstall = false;
 	let downloadingTrustCert = false;
+	let dnsForwarder1 = '';
+	let dnsForwarder2 = '';
+	let savingForwarders = false;
+	let forwarderSaveSuccess = false;
+	let forwarderSaveError = '';
 	let savingDnsProvider = false;
 	let dnsProviderError = '';
 	let savingCloudflareToken = false;
@@ -131,6 +137,8 @@
 			if (configRes.ok) {
 				const cfg = await configRes.json() as {
 					ns_hostname?: string;
+					ns_server_ip?: string;
+					dns_forwarders?: [string, string];
 					acme_email?: string;
 					coolify_url?: string;
 					coolify_status?: 'connected' | 'error' | 'not_configured';
@@ -142,6 +150,9 @@
 					network_mode?: 'external' | 'internal';
 				};
 				nsHostname = cfg.ns_hostname ?? '';
+				nsServerIp = cfg.ns_server_ip ?? '';
+				dnsForwarder1 = cfg.dns_forwarders?.[0] ?? '';
+				dnsForwarder2 = cfg.dns_forwarders?.[1] ?? '';
 				acmeEmail = cfg.acme_email ?? '';
 				coolifyUrl = cfg.coolify_url ?? '';
 				coolifyStatus = cfg.coolify_status ?? 'not_configured';
@@ -165,7 +176,7 @@
 			const res = await fetch('/api/config', {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ ns_hostname: nsHostname }),
+				body: JSON.stringify({ ns_hostname: nsHostname, ns_server_ip: nsServerIp }),
 			});
 			if (!res.ok) {
 				const body = await res.json().catch(() => ({})) as { error?: string };
@@ -281,6 +292,29 @@
 			networkModeError = (err as Error).message;
 		} finally {
 			downloadingTrustCert = false;
+		}
+	}
+
+	async function saveForwarders() {
+		savingForwarders = true;
+		forwarderSaveError = '';
+		forwarderSaveSuccess = false;
+		try {
+			const res = await fetch('/api/config', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ dns_forwarders: [dnsForwarder1.trim(), dnsForwarder2.trim()] }),
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({})) as { error?: string };
+				throw new Error(body.error ?? `HTTP ${res.status}`);
+			}
+			forwarderSaveSuccess = true;
+			setTimeout(() => { forwarderSaveSuccess = false; }, 3000);
+		} catch (err) {
+			forwarderSaveError = (err as Error).message;
+		} finally {
+			savingForwarders = false;
 		}
 	}
 
@@ -463,6 +497,21 @@
 							placeholder="ns1.example.com"
 							bind:value={nsHostname}
 						/>
+					</div>
+				</div>
+				<div class="field-group">
+					<label class="field-label" for="ns-server-ip">Server IP</label>
+					<p class="field-hint">IP address used for DNS A records when provisioning new sites.</p>
+					<div class="input-row">
+						<input
+							id="ns-server-ip"
+							class="text-input"
+							type="text"
+							placeholder="203.0.113.10"
+							bind:value={nsServerIp}
+						/>
+					</div>
+					<div class="input-row" style="margin-top: 12px;">
 						<button class="btn btn-primary" on:click={saveConfig} disabled={savingConfig}>
 							{#if savingConfig}
 								<span class="spinner"></span> Saving…
@@ -707,6 +756,50 @@
 						<span class="tld-badge">.hh</span>
 						<span class="chip-text">Sites on this stack get private addresses (e.g. <code>mysite.hh</code>). Only devices on your local network can reach them.</span>
 					</div>
+				</div>
+
+				<div class="field-group" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
+					<label class="field-label">DNS Forwarders</label>
+					<p class="field-hint">Technitium uses these addresses to resolve external domains (e.g. google.com). Without forwarders, only your .hh sites will resolve.</p>
+					<div class="field-row" style="margin-top: 8px;">
+						<div class="field-group">
+							<label class="field-label" for="dns-forwarder-1">Primary</label>
+							<input
+								id="dns-forwarder-1"
+								class="text-input"
+								type="text"
+								inputmode="decimal"
+								placeholder="1.1.1.1"
+								bind:value={dnsForwarder1}
+							/>
+						</div>
+						<div class="field-group">
+							<label class="field-label" for="dns-forwarder-2">Secondary</label>
+							<input
+								id="dns-forwarder-2"
+								class="text-input"
+								type="text"
+								inputmode="decimal"
+								placeholder="1.0.0.1"
+								bind:value={dnsForwarder2}
+							/>
+						</div>
+					</div>
+					<div class="input-row" style="margin-top: 12px;">
+						<button class="btn btn-primary" on:click={saveForwarders} disabled={savingForwarders}>
+							{#if savingForwarders}
+								<span class="spinner"></span> Saving…
+							{:else}
+								Save
+							{/if}
+						</button>
+					</div>
+					{#if forwarderSaveSuccess}
+						<p class="inline-success">Saved.</p>
+					{/if}
+					{#if forwarderSaveError}
+						<p class="error-msg">{forwarderSaveError}</p>
+					{/if}
 				</div>
 			{/if}
 

@@ -9,6 +9,8 @@ const NS_HOSTNAME_FILE = '/coolify-api-token/ns_hostname';
 const DNS_PROVIDER_FILE = '/coolify-api-token/dns_provider';
 const CLOUDFLARE_TOKEN_FILE = '/coolify-api-token/cloudflare_token';
 const NETWORK_MODE_FILE = '/coolify-api-token/network_mode';
+const DNS_FORWARDER_1_FILE = '/coolify-api-token/dns_forwarder_1';
+const DNS_FORWARDER_2_FILE = '/coolify-api-token/dns_forwarder_2';
 
 // network_mode read precedence:
 // 1. File /coolify-api-token/network_mode
@@ -46,6 +48,17 @@ export function readNsServerIp(): string | null {
     if (val) return val;
   } catch { /* file not present */ }
   return process.env.NS_SERVER_IP ?? null;
+}
+
+export function readDnsForwarders(): [string, string] {
+  const read = (file: string, envKey: string): string => {
+    try {
+      const val = readFileSync(file, 'utf8').trim();
+      if (val) return val;
+    } catch { /* not set */ }
+    return process.env[envKey] ?? '';
+  };
+  return [read(DNS_FORWARDER_1_FILE, 'DNS_FORWARDER_1'), read(DNS_FORWARDER_2_FILE, 'DNS_FORWARDER_2')];
 }
 
 function readSetting(key: string): string | null {
@@ -109,6 +122,8 @@ router.get('/', async (_req: Request, res: Response) => {
 
     res.status(200).json({
       ns_hostname: readNsHostname(),
+      ns_server_ip: readNsServerIp(),
+      dns_forwarders: readDnsForwarders(),
       acme_email: process.env.ACME_EMAIL ?? null,
       coolify_url: process.env.COOLIFY_API_URL ?? null,
       coolify_status,
@@ -129,19 +144,23 @@ router.get('/', async (_req: Request, res: Response) => {
 router.put('/', async (req: Request, res: Response) => {
   const body = req.body as {
     ns_hostname?: unknown;
+    ns_server_ip?: unknown;
     dns_provider?: unknown;
     cloudflare_token?: unknown;
     network_mode?: unknown;
+    dns_forwarders?: unknown;
   };
 
   // Validate at least one known key is present
   const hasNsHostname = typeof body.ns_hostname === 'string' && body.ns_hostname.trim();
+  const hasNsServerIp = typeof body.ns_server_ip === 'string' && body.ns_server_ip.trim();
   const hasDnsProvider = typeof body.dns_provider === 'string' && body.dns_provider.trim();
   const hasCfToken = typeof body.cloudflare_token === 'string';
   const hasNetworkMode = typeof body.network_mode === 'string' && body.network_mode.trim();
+  const hasDnsForwarders = Array.isArray(body.dns_forwarders);
 
-  if (!hasNsHostname && !hasDnsProvider && !hasCfToken && !hasNetworkMode) {
-    res.status(400).json({ error: 'At least one field required: ns_hostname, dns_provider, cloudflare_token, network_mode' });
+  if (!hasNsHostname && !hasNsServerIp && !hasDnsProvider && !hasCfToken && !hasNetworkMode && !hasDnsForwarders) {
+    res.status(400).json({ error: 'At least one field required: ns_hostname, ns_server_ip, dns_provider, cloudflare_token, network_mode, dns_forwarders' });
     return;
   }
 
@@ -174,6 +193,25 @@ router.put('/', async (req: Request, res: Response) => {
         );
       }
       result.ns_hostname = value;
+    }
+
+    if (hasNsServerIp) {
+      const value = (body.ns_server_ip as string).trim();
+      writeFileSync(NS_SERVER_IP_FILE, value, 'utf8');
+      result.ns_server_ip = value;
+    }
+
+    if (hasDnsForwarders) {
+      const [f1, f2] = (body.dns_forwarders as unknown[]).map(f => String(f ?? '').trim());
+      writeFileSync(DNS_FORWARDER_1_FILE, f1 ?? '', 'utf8');
+      writeFileSync(DNS_FORWARDER_2_FILE, f2 ?? '', 'utf8');
+      const technitium = createTechnitiumClient();
+      if (technitium) {
+        technitium.setForwarders([f1 ?? '', f2 ?? '']).catch((e: Error) =>
+          console.warn('[config] setForwarders after PUT failed:', e.message)
+        );
+      }
+      result.dns_forwarders = JSON.stringify([f1 ?? '', f2 ?? '']);
     }
 
     if (hasDnsProvider) {
