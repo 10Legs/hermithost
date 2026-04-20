@@ -286,8 +286,14 @@ router.get('/', async (_req: Request, res: Response) => {
     const applications = await client.listApplications();
     const sites = await Promise.all(
       applications.map(async (app) => {
-        const deployments = await client.listDeployments(app.uuid).catch(() => []);
-        return mapSiteWithStoredAuth(app, deployments);
+        const domain = app.fqdn
+          ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '')
+          : '';
+        const [deployments, probe] = await Promise.all([
+          client.listDeployments(app.uuid).catch(() => []),
+          domain ? probeSite(domain).catch(() => null) : Promise.resolve(null),
+        ]);
+        return mapSiteWithStoredAuth(app, deployments, probe);
       })
     );
     res.status(200).json(sites);
