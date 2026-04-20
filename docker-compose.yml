@@ -169,6 +169,7 @@ services:
       - "--providers.file.watch=true"
       - "--entrypoints.http.address=:80"
       - "--entrypoints.https.address=:443"
+      - "--entrypoints.admin.address=:9080"
       - "--entrypoints.https.http.tls.certresolver=letsencrypt"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=http"
@@ -178,6 +179,7 @@ services:
       - "${TRAEFIK_HTTP_PORT:-8080}:80"
       - "${TRAEFIK_HTTPS_PORT:-8443}:443"
       - "8081:8080"
+      - "9080:9080"
     volumes:
       - ./traefik/conf.d:/etc/traefik/conf.d
       - traefik-acme:/acme

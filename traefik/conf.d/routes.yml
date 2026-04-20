@@ -18,6 +18,19 @@ http:
       tls: {}
       service: frontend
 
+    # ── LAN admin access — port 9080, no Host required, no TLS ────────────────
+    api-admin-lan:
+      rule: "PathPrefix(`/api`)"
+      entryPoints:
+        - admin
+      service: api
+
+    frontend-admin-lan:
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - admin
+      service: frontend
+
   services:
     api:
       loadBalancer:
