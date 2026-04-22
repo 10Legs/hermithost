@@ -356,6 +356,30 @@
 	function setStatsRange(r: StatRange): void {
 		statsRange = r;
 		loadStats(r);
+		loadPageStats(r);
+	}
+
+	// ── Page analytics ─────────────────────────────────────────────────────────
+	interface TopPage {
+		path: string;
+		requests: number;
+		human_requests: number;
+		avg_ms: number | null;
+		error_rate: number;
+		trend: number | null;
+	}
+	interface PageStatsData {
+		range: StatRange;
+		top_pages: TopPage[];
+		top_referrers: Array<{ referrer_domain: string; requests: number }>;
+	}
+	let pageStats: PageStatsData | null = null;
+
+	async function loadPageStats(range: StatRange): Promise<void> {
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/stats/pages?range=${range}`);
+			if (res.ok) pageStats = await res.json();
+		} catch { /* silently fail */ }
 	}
 
 	function formatBytes(bytes: number): string {
@@ -476,6 +500,7 @@
 
 		// Load stats for overview tab
 		loadStats(statsRange);
+		loadPageStats(statsRange);
 
 		// Poll stats every 60s
 		const statsPollTimer = setInterval(() => loadStats(statsRange), 60_000);
@@ -860,6 +885,65 @@
 					</div>
 				</div>
 			{/if}
+
+			<!-- Top Pages Panel -->
+			<div class="stats-panel">
+				<div class="stats-panel-header">
+					<h2 class="stats-panel-title">Top Pages</h2>
+				</div>
+				{#if pageStats === null}
+					<p class="stats-empty">Page analytics will appear here once traffic is recorded.</p>
+				{:else if pageStats.top_pages.length === 0}
+					<p class="stats-empty">No page data for this period yet.</p>
+				{:else}
+					<div class="top-pages-list">
+						{#each pageStats.top_pages as page, i}
+							{@const pct = pageStats.top_pages[0].requests > 0
+								? (page.requests / pageStats.top_pages[0].requests) * 100 : 0}
+							<div class="top-page-row">
+								<span class="page-rank text-muted mono">{i + 1}</span>
+								<div class="page-bar-wrap">
+									<div class="page-bar" style="width: {pct}%"></div>
+									<span class="page-path mono" title={page.path}>{page.path}</span>
+								</div>
+								<span class="page-count mono">{page.requests.toLocaleString()}</span>
+								{#if page.trend !== null}
+									<span class="page-trend" class:trend-up={page.trend > 0} class:trend-down={page.trend < 0}>
+										{page.trend > 0 ? '▲' : '▼'} {Math.abs(page.trend)}%
+									</span>
+								{/if}
+								{#if page.avg_ms !== null}
+									<span class="page-ms text-muted mono">{Math.round(page.avg_ms)}ms</span>
+								{/if}
+								<span
+									class="page-error mono"
+									class:text-warning={page.error_rate > 0.01 && page.error_rate <= 0.05}
+									class:text-danger={page.error_rate > 0.05}
+								>{(page.error_rate * 100).toFixed(1)}% err</span>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+
+			<!-- Top Referrers Panel -->
+			<div class="stats-panel">
+				<div class="stats-panel-header">
+					<h2 class="stats-panel-title">Top Referrers</h2>
+				</div>
+				{#if pageStats === null || pageStats.top_referrers.length === 0}
+					<p class="stats-empty">No referrer data for this period yet.</p>
+				{:else}
+					<div class="referrers-list">
+						{#each pageStats.top_referrers.slice(0, 10) as ref}
+							<div class="referrer-row">
+								<span class="referrer-domain mono">{ref.referrer_domain || 'direct'}</span>
+								<span class="mono text-secondary">{ref.requests.toLocaleString()}</span>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
 		</div>
 	{/if}
 
@@ -2266,6 +2350,23 @@
 		font-size: 13px;
 		color: var(--text-secondary);
 	}
+
+	/* ── Top Pages + Referrers ───────────────────────────────────────────────── */
+	.top-pages-list { display: flex; flex-direction: column; gap: 6px; }
+	.top-page-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+	.page-rank { width: 16px; text-align: right; color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
+	.page-bar-wrap { flex: 1; position: relative; min-width: 0; }
+	.page-bar { position: absolute; left: 0; top: 0; bottom: 0; background: color-mix(in srgb, var(--accent-teal) 20%, transparent); border-radius: 2px; pointer-events: none; }
+	.page-path { position: relative; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; padding: 3px 6px; color: var(--text-primary); }
+	.page-count { color: var(--text-secondary); white-space: nowrap; flex-shrink: 0; }
+	.page-ms { font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+	.page-error { font-size: 11px; white-space: nowrap; flex-shrink: 0; color: var(--text-muted); }
+	.page-trend { font-size: 10px; font-family: var(--font-mono); white-space: nowrap; flex-shrink: 0; }
+	.trend-up { color: var(--success); }
+	.trend-down { color: var(--danger); }
+	.referrers-list { display: flex; flex-direction: column; gap: 4px; }
+	.referrer-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 2px 0; }
+	.referrer-domain { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 	/* ── Range Tabs ──────────────────────────────────────────────────────────── */
 	.stat-tabs {

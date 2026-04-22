@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { querySiteStats, queryPulse, StatRange } from '../services/stats';
+import { querySiteStats, queryPulse, queryPageStats, StatRange } from '../services/stats';
 import { liveStatsEmitter, LiveSnapshot } from '../services/liveStats';
 
 const router = Router({ mergeParams: true });
@@ -79,6 +79,25 @@ router.get('/live', (req: Request, res: Response) => {
     clearInterval(keepAlive);
     liveStatsEmitter.off('snapshot', onSnapshot);
   });
+});
+
+// ── GET /api/sites/:slug/stats/pages?range=24h|7d|30d ────────────────────────
+router.get('/pages', (req: Request, res: Response) => {
+  const { slug } = req.params;
+  const range = (req.query.range as string) ?? '24h';
+
+  if (!VALID_RANGES.has(range as StatRange)) {
+    res.status(400).json({ error: 'range must be one of: 24h, 7d, 30d' });
+    return;
+  }
+
+  try {
+    const result = queryPageStats(`site-${slug}`, range as StatRange);
+    res.status(200).json(result);
+  } catch (err) {
+    console.error(`[stats] GET /pages for ${slug} failed:`, (err as Error).message);
+    res.status(500).json({ error: 'Failed to query page stats' });
+  }
 });
 
 export default router;

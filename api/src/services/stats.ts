@@ -34,6 +34,33 @@ export function getDb(): Database.Database {
       file_offset  INTEGER NOT NULL DEFAULT 0
     );
     INSERT OR IGNORE INTO ingest_cursor (id, file_offset) VALUES (1, 0);
+
+    CREATE TABLE IF NOT EXISTS page_stats_rollup (
+      router_name  TEXT    NOT NULL,
+      bucket_ts    INTEGER NOT NULL,
+      path         TEXT    NOT NULL,
+      requests     INTEGER NOT NULL DEFAULT 0,
+      human_reqs   INTEGER NOT NULL DEFAULT 0,
+      bot_reqs     INTEGER NOT NULL DEFAULT 0,
+      bytes_out    INTEGER NOT NULL DEFAULT 0,
+      sum_ms       REAL    NOT NULL DEFAULT 0,
+      status_2xx   INTEGER NOT NULL DEFAULT 0,
+      status_4xx   INTEGER NOT NULL DEFAULT 0,
+      status_5xx   INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (router_name, bucket_ts, path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_page_stats_router_bucket
+      ON page_stats_rollup (router_name, bucket_ts DESC);
+
+    CREATE TABLE IF NOT EXISTS referrer_stats_rollup (
+      router_name     TEXT    NOT NULL,
+      bucket_ts       INTEGER NOT NULL,
+      referrer_domain TEXT    NOT NULL,
+      requests        INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (router_name, bucket_ts, referrer_domain)
+    );
+    CREATE INDEX IF NOT EXISTS idx_referrer_stats_router_bucket
+      ON referrer_stats_rollup (router_name, bucket_ts DESC);
   `);
   return _db;
 }
@@ -198,4 +225,131 @@ export function queryPulse(routerName: string): { buckets: PulseBucket[]; max_re
 
   const max_requests = rows.reduce((m, r) => Math.max(m, r.requests), 0);
   return { buckets: rows, max_requests };
+}
+
+// ── Page-level stats ──────────────────────────────────────────────────────────
+
+export interface PageRollupIncrement {
+  router_name: string;
+  bucket_ts: number;
+  path: string;
+  requests: number;
+  human_reqs: number;
+  bot_reqs: number;
+  bytes_out: number;
+  sum_ms: number;
+  status_2xx: number;
+  status_4xx: number;
+  status_5xx: number;
+}
+
+export function writePageRollups(
+  pages: PageRollupIncrement[],
+  refs: Array<{ router_name: string; bucket_ts: number; referrer_domain: string; requests: number }>
+): void {
+  const db = getDb();
+  const upsertPage = db.prepare(`
+    INSERT INTO page_stats_rollup
+      (router_name, bucket_ts, path, requests, human_reqs, bot_reqs, bytes_out, sum_ms, status_2xx, status_4xx, status_5xx)
+    VALUES
+      (@router_name, @bucket_ts, @path, @requests, @human_reqs, @bot_reqs, @bytes_out, @sum_ms, @status_2xx, @status_4xx, @status_5xx)
+    ON CONFLICT(router_name, bucket_ts, path) DO UPDATE SET
+      requests   = requests   + excluded.requests,
+      human_reqs = human_reqs + excluded.human_reqs,
+      bot_reqs   = bot_reqs   + excluded.bot_reqs,
+      bytes_out  = bytes_out  + excluded.bytes_out,
+      sum_ms     = sum_ms     + excluded.sum_ms,
+      status_2xx = status_2xx + excluded.status_2xx,
+      status_4xx = status_4xx + excluded.status_4xx,
+      status_5xx = status_5xx + excluded.status_5xx
+  `);
+  const upsertRef = db.prepare(`
+    INSERT INTO referrer_stats_rollup (router_name, bucket_ts, referrer_domain, requests)
+    VALUES (@router_name, @bucket_ts, @referrer_domain, @requests)
+    ON CONFLICT(router_name, bucket_ts, referrer_domain) DO UPDATE SET
+      requests = requests + excluded.requests
+  `);
+  db.transaction(() => {
+    for (const p of pages) upsertPage.run(p);
+    for (const r of refs) upsertRef.run(r);
+  })();
+}
+
+export interface TopPage {
+  path: string;
+  requests: number;
+  human_requests: number;
+  avg_ms: number | null;
+  error_rate: number;
+  trend: number | null; // % change vs. prior period; null if no prior data
+}
+
+export interface PageStatsResult {
+  range: StatRange;
+  top_pages: TopPage[];
+  top_referrers: Array<{ referrer_domain: string; requests: number }>;
+}
+
+export function queryPageStats(routerName: string, range: StatRange, limit = 25): PageStatsResult {
+  const db = getDb();
+  const now = Math.floor(Date.now() / 1000);
+  const since = toBucket(now - RANGE_SECS[range]);
+  const prevSince = toBucket(now - RANGE_SECS[range] * 2);
+
+  const pages = db.prepare(`
+    SELECT path,
+           SUM(requests)   AS requests,
+           SUM(human_reqs) AS human_requests,
+           SUM(sum_ms)     AS sum_ms,
+           SUM(status_4xx) + SUM(status_5xx) AS errors
+    FROM page_stats_rollup
+    WHERE router_name = ? AND bucket_ts >= ?
+    GROUP BY path
+    ORDER BY requests DESC
+    LIMIT ?
+  `).all(routerName, since, limit) as Array<{
+    path: string; requests: number; human_requests: number; sum_ms: number; errors: number;
+  }>;
+
+  // Prior period for trend computation
+  const prevPages = db.prepare(`
+    SELECT path, SUM(requests) AS requests
+    FROM page_stats_rollup
+    WHERE router_name = ? AND bucket_ts >= ? AND bucket_ts < ?
+    GROUP BY path
+  `).all(routerName, prevSince, since) as Array<{ path: string; requests: number }>;
+  const prevMap = new Map(prevPages.map(r => [r.path, r.requests]));
+
+  const refs = db.prepare(`
+    SELECT referrer_domain, SUM(requests) AS requests
+    FROM referrer_stats_rollup
+    WHERE router_name = ? AND bucket_ts >= ?
+    GROUP BY referrer_domain
+    ORDER BY requests DESC
+    LIMIT 20
+  `).all(routerName, since) as Array<{ referrer_domain: string; requests: number }>;
+
+  return {
+    range,
+    top_pages: pages.map(r => {
+      const prev = prevMap.get(r.path) ?? 0;
+      const trend = prev > 0 ? Math.round(((r.requests - prev) / prev) * 100) : null;
+      return {
+        path: r.path,
+        requests: r.requests,
+        human_requests: r.human_requests,
+        avg_ms: r.requests > 0 ? r.sum_ms / r.requests : null,
+        error_rate: r.requests > 0 ? r.errors / r.requests : 0,
+        trend,
+      };
+    }),
+    top_referrers: refs,
+  };
+}
+
+export function pruneOldPageStats(): void {
+  const db = getDb();
+  const cutoff = Math.floor(Date.now() / 1000) - 90 * 86400;
+  db.prepare('DELETE FROM page_stats_rollup WHERE bucket_ts < ?').run(cutoff);
+  db.prepare('DELETE FROM referrer_stats_rollup WHERE bucket_ts < ?').run(cutoff);
 }

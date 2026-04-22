@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { getCursor, writeRollups, toBucket, RollupIncrement } from './stats';
+import { getCursor, writeRollups, writePageRollups, pruneOldPageStats, toBucket, RollupIncrement, PageRollupIncrement } from './stats';
 
 const LOG_PATH = process.env.TRAEFIK_LOG_PATH ?? '/traefik-logs/traefik-access.log';
 const INTERVAL_MS = Number(process.env.STATS_INGEST_INTERVAL_MS ?? 5_000);
@@ -45,6 +45,18 @@ interface TraefikLogEntry {
   RequestContentSize?: number;
   StartUTC?: string;
   'request_User-Agent'?: string;
+  RequestPath?: string;
+  'request_Referer'?: string;
+}
+
+function normalizePath(raw: string): string {
+  if (!raw) return '/';
+  return (raw.split('?')[0].substring(0, 512).replace(/\/+/g, '/')) || '/';
+}
+
+function extractReferrerDomain(referer: string): string {
+  if (!referer) return '';
+  try { return new URL(referer).hostname.toLowerCase(); } catch { return ''; }
 }
 
 // ── Main ingest function ──────────────────────────────────────────────────────
@@ -80,6 +92,8 @@ function ingest(): void {
   // Track unique IPs per bucket per router using Sets
   type BucketKey = string; // `${routerName}|${bucketTs}`
   const acc = new Map<BucketKey, Omit<RollupIncrement, 'unique_ips'> & { ips: Set<string> }>();
+  const pageAcc = new Map<string, PageRollupIncrement>();
+  const refAcc = new Map<string, { router_name: string; bucket_ts: number; referrer_domain: string; requests: number }>();
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -143,6 +157,29 @@ function ingest(): void {
     else if (status >= 400 && status < 500) row.status_4xx++;
     else if (status >= 500) row.status_5xx++;
     if (clientIp) row.ips.add(clientIp);
+
+    // Page-level accumulation
+    const path = normalizePath(entry.RequestPath ?? '');
+    const pageKey = `${routerName}|${bucket}|${path}`;
+    let pr = pageAcc.get(pageKey);
+    if (!pr) {
+      pr = { router_name: routerName, bucket_ts: bucket, path, requests: 0, human_reqs: 0, bot_reqs: 0, bytes_out: 0, sum_ms: 0, status_2xx: 0, status_4xx: 0, status_5xx: 0 };
+      pageAcc.set(pageKey, pr);
+    }
+    pr.requests++;
+    if (bot) pr.bot_reqs++; else pr.human_reqs++;
+    pr.bytes_out += bytesOut;
+    pr.sum_ms += durationMs;
+    if (status >= 200 && status < 300) pr.status_2xx++;
+    else if (status >= 400 && status < 500) pr.status_4xx++;
+    else if (status >= 500) pr.status_5xx++;
+
+    // Referrer accumulation
+    const refDomain = extractReferrerDomain(entry['request_Referer'] ?? '');
+    const refKey = `${routerName}|${bucket}|${refDomain}`;
+    const rr = refAcc.get(refKey) ?? { router_name: routerName, bucket_ts: bucket, referrer_domain: refDomain, requests: 0 };
+    rr.requests++;
+    refAcc.set(refKey, rr);
   }
 
   if (acc.size === 0) {
@@ -158,7 +195,8 @@ function ingest(): void {
   }
 
   writeRollups(increments, newOffset);
-  console.log(`[stats-ingest] ${increments.length} bucket(s) updated, offset=${newOffset}`);
+  if (pageAcc.size > 0) writePageRollups([...pageAcc.values()], [...refAcc.values()]);
+  console.log(`[stats-ingest] ${increments.length} bucket(s) updated, ${pageAcc.size} page path(s), offset=${newOffset}`);
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
@@ -173,4 +211,6 @@ export function startStatsIngester(): void {
       console.warn('[stats-ingest] Ingest error:', (err as Error).message);
     }
   }, INTERVAL_MS);
+  // Prune page stats older than 90 days, once per hour
+  setInterval(() => { try { pruneOldPageStats(); } catch {} }, 3_600_000);
 }

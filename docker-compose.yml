@@ -215,6 +215,7 @@ services:
       - "--accesslog.format=json"
       - "--accesslog.fields.headers.defaultmode=drop"
       - "--accesslog.fields.headers.names.User-Agent=keep"
+      - "--accesslog.fields.headers.names.Referer=keep"
       # ── Prometheus metrics ──────────────────────────────────────────────────
       - "--metrics.prometheus=true"
       - "--metrics.prometheus.addEntryPointsLabels=true"
