@@ -196,6 +196,36 @@
 	$: warningSites = sites.filter(s => s.overallStatus === 'warning').length;
 	$: errorSites = sites.filter(s => s.overallStatus === 'error').length;
 	$: pendingSites = sites.filter(s => s.overallStatus === 'pending').length;
+
+	// ── Pulse strips ───────────────────────────────────────────────────────────
+	interface PulseBucket { ts: number; requests: number; }
+	let pulseData: Record<string, { buckets: PulseBucket[]; max: number }> = {};
+
+	async function loadPulse(slug: string): Promise<void> {
+		try {
+			const res = await fetch(`/api/sites/${slug}/stats/pulse`);
+			if (res.ok) {
+				const body: { buckets: PulseBucket[]; max_requests: number } = await res.json();
+				pulseData = { ...pulseData, [slug]: { buckets: body.buckets, max: body.max_requests } };
+			}
+		} catch { /* silently skip */ }
+	}
+
+	onMount(() => {
+		// Kick off pulse load for all sites (after status probes)
+		setTimeout(() => {
+			for (const s of data.sites) loadPulse(s.slug);
+		}, 500);
+	});
+
+	function pulseColor(requests: number, max: number): string {
+		if (max === 0 || requests === 0) return 'var(--bg-elevated)';
+		const ratio = requests / max;
+		if (ratio < 0.2) return 'rgba(76,175,130,0.25)';
+		if (ratio < 0.5) return 'rgba(76,175,130,0.5)';
+		if (ratio < 0.8) return 'rgba(76,175,130,0.75)';
+		return 'rgba(76,175,130,1)';
+	}
 </script>
 
 <svelte:window on:keydown={handleAddKeydown} />
@@ -232,6 +262,7 @@
 					<th>SSL</th>
 					<th>DNS</th>
 					<th>Last Deploy</th>
+					<th>Traffic (24h)</th>
 					<th>Server</th>
 					<th></th>
 				</tr>
@@ -271,6 +302,21 @@
 						</td>
 						<td>
 							<span class="{lastDeployClass(site)} mono">{lastDeployLabel(site)}{lastDeployStatus(site)}</span>
+						</td>
+						<td class="cell-pulse">
+							{@const pulse = pulseData[site.slug]}
+							{#if pulse && pulse.buckets.length > 0}
+								<div class="pulse-strip" title="Request volume — last 24h">
+									{#each pulse.buckets as bucket}
+										<span
+											class="pulse-col"
+											style="background:{pulseColor(bucket.requests, pulse.max)}"
+										></span>
+									{/each}
+								</div>
+							{:else}
+								<span class="text-muted mono" style="font-size:11px">—</span>
+							{/if}
 						</td>
 						<td>
 							<span class="mono text-secondary">{site.server}</span>
@@ -789,5 +835,27 @@
 		background: var(--bg-elevated);
 		padding: 1px 4px;
 		border-radius: 3px;
+	}
+
+	/* Pulse strip */
+	.cell-pulse {
+		width: 120px;
+		min-width: 100px;
+	}
+
+	.pulse-strip {
+		display: flex;
+		gap: 1px;
+		align-items: flex-end;
+		height: 20px;
+		width: 100%;
+	}
+
+	.pulse-col {
+		flex: 1;
+		height: 100%;
+		border-radius: 1px;
+		min-width: 1px;
+		transition: background 0.2s;
 	}
 </style>

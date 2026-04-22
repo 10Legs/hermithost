@@ -316,6 +316,62 @@
 		}
 	}
 
+	// ── Traffic stats ─────────────────────────────────────────────────────────
+	type StatRange = '24h' | '7d' | '30d';
+	let statsRange: StatRange = '24h';
+	let statsLoading = false;
+
+	interface SiteStats {
+		range: StatRange;
+		requests: number;
+		human_requests: number;
+		bot_requests: number;
+		bandwidth_bytes: number;
+		error_rate: number;
+		avg_ms: number | null;
+		sparkline: Array<{ ts: number; requests: number }>;
+	}
+
+	let stats: SiteStats | null = null;
+	let statsError = false;
+
+	async function loadStats(range: StatRange): Promise<void> {
+		statsLoading = true;
+		statsError = false;
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/stats?range=${range}`);
+			if (res.ok) {
+				stats = await res.json();
+			} else {
+				statsError = true;
+			}
+		} catch {
+			statsError = true;
+		} finally {
+			statsLoading = false;
+		}
+	}
+
+	function setStatsRange(r: StatRange): void {
+		statsRange = r;
+		loadStats(r);
+	}
+
+	function formatBytes(bytes: number): string {
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+		if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+		return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+	}
+
+	function sparklinePath(points: Array<{ ts: number; requests: number }>, w: number, h: number): string {
+		if (points.length < 2) return '';
+		const maxReq = Math.max(...points.map(p => p.requests), 1);
+		const xs = points.map((_, i) => (i / (points.length - 1)) * w);
+		const ys = points.map(p => h - (p.requests / maxReq) * (h - 2) - 1);
+		return xs.map((x, i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
+	}
+
 	// Deploy key
 	let deployPublicKey = '';
 	let deployKeyCopied = false;
@@ -362,6 +418,12 @@
 		} catch {
 			// silently fail — key will be empty
 		}
+		// Load stats for overview tab
+		loadStats(statsRange);
+
+		// Poll stats every 60s
+		const statsPollTimer = setInterval(() => loadStats(statsRange), 60_000);
+		return () => clearInterval(statsPollTimer);
 	});
 </script>
 
@@ -549,6 +611,80 @@
 						<div class="status-card-value mono text-muted">Never deployed</div>
 					{/if}
 				</div>
+			</div>
+
+			<!-- Traffic Stats Panel -->
+			<div class="stats-panel">
+				<div class="stats-panel-header">
+					<h2 class="stats-panel-title">Traffic</h2>
+					<div class="range-toggle">
+						{#each (['24h', '7d', '30d'] as StatRange[]) as r}
+							<button
+								class="range-btn"
+								class:range-btn-active={statsRange === r}
+								on:click={() => setStatsRange(r)}
+							>{r}</button>
+						{/each}
+					</div>
+				</div>
+
+				{#if statsError}
+					<p class="stats-empty">No traffic data yet — starts collecting once Traefik access logging is active.</p>
+				{:else if stats !== null}
+					<div class="stats-row">
+						<div class="stat-item">
+							<span class="stat-label">Requests</span>
+							<span class="stat-value mono">{stats.requests.toLocaleString()}</span>
+						</div>
+						<div class="stat-item">
+							<span class="stat-label">Visitors</span>
+							<span class="stat-value mono">{stats.human_requests.toLocaleString()}</span>
+							{#if stats.bot_requests > 0}
+								<span class="stat-sub text-secondary">{stats.bot_requests.toLocaleString()} bots</span>
+							{/if}
+						</div>
+						<div class="stat-item">
+							<span class="stat-label">Data served</span>
+							<span class="stat-value mono">{formatBytes(stats.bandwidth_bytes)}</span>
+						</div>
+						<div class="stat-item">
+							<span class="stat-label">Avg response</span>
+							<span class="stat-value mono">{stats.avg_ms !== null ? `${Math.round(stats.avg_ms)}ms` : '—'}</span>
+						</div>
+						<div class="stat-item">
+							<span class="stat-label">Error rate</span>
+							<span
+								class="stat-value mono"
+								class:text-danger={stats.error_rate > 0.05}
+								class:text-warning={stats.error_rate > 0.01 && stats.error_rate <= 0.05}
+							>{stats.requests > 0 ? `${(stats.error_rate * 100).toFixed(1)}%` : '—'}</span>
+						</div>
+					</div>
+
+					{#if stats.sparkline.length >= 2}
+						<div class="sparkline-wrap">
+							<svg
+								width="100%"
+								height="48"
+								viewBox="0 0 600 48"
+								preserveAspectRatio="none"
+								aria-hidden="true"
+							>
+								<path
+									d={sparklinePath(stats.sparkline, 600, 48)}
+									fill="none"
+									stroke="var(--accent-teal)"
+									stroke-width="1.5"
+									stroke-linejoin="round"
+									stroke-linecap="round"
+									opacity="0.8"
+								/>
+							</svg>
+						</div>
+					{/if}
+				{:else if statsLoading}
+					<p class="stats-loading text-secondary">Loading…</p>
+				{/if}
 			</div>
 
 			{#if site.overallStatus === 'warning' || site.overallStatus === 'error'}
@@ -1715,5 +1851,129 @@
 		word-break: break-all;
 		white-space: pre-wrap;
 		display: block;
+	}
+
+	/* Traffic stats panel */
+	.stats-panel {
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 16px 20px;
+		margin-bottom: 20px;
+	}
+
+	.stats-panel-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 16px;
+	}
+
+	.stats-panel-title {
+		font-size: 13px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-secondary);
+	}
+
+	.range-toggle {
+		display: flex;
+		border: 1px solid var(--border-bright);
+		border-radius: 4px;
+		overflow: hidden;
+	}
+
+	.range-btn {
+		background: transparent;
+		border: none;
+		border-right: 1px solid var(--border-bright);
+		color: var(--text-secondary);
+		font-size: 11px;
+		font-weight: 500;
+		padding: 4px 10px;
+		cursor: pointer;
+		transition: background 0.1s, color 0.1s;
+		font-family: var(--font-mono);
+	}
+
+	.range-btn:last-child {
+		border-right: none;
+	}
+
+	.range-btn:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.range-btn-active {
+		background: var(--accent-teal);
+		color: #fff;
+	}
+
+	.range-btn-active:hover {
+		background: var(--accent-teal-dim);
+		color: #fff;
+	}
+
+	.stats-row {
+		display: flex;
+		gap: 32px;
+		flex-wrap: wrap;
+		margin-bottom: 16px;
+	}
+
+	.stat-item {
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		min-width: 80px;
+	}
+
+	.stat-label {
+		font-size: 11px;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-muted);
+	}
+
+	.stat-value {
+		font-size: 22px;
+		font-weight: 500;
+		color: var(--text-primary);
+		line-height: 1.1;
+	}
+
+	.stat-sub {
+		font-size: 11px;
+		font-family: var(--font-mono);
+	}
+
+	.sparkline-wrap {
+		width: 100%;
+		height: 48px;
+		border-top: 1px solid var(--border);
+		padding-top: 8px;
+		overflow: hidden;
+	}
+
+	.sparkline-wrap svg {
+		display: block;
+		width: 100%;
+		height: 40px;
+	}
+
+	.stats-empty {
+		font-size: 12px;
+		color: var(--text-secondary);
+		padding: 8px 0;
+		margin: 0;
+	}
+
+	.stats-loading {
+		font-size: 12px;
+		padding: 8px 0;
+		margin: 0;
 	}
 </style>

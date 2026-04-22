@@ -6,7 +6,9 @@ import hostedRouter from './routes/hosted';
 import dnsRouter from './routes/dns';
 import backupRouter from './routes/backup';
 import configRouter from './routes/config';
+import statsRouter from './routes/stats';
 import { getDeployedSite } from './services/githubDeploy';
+import { startStatsIngester } from './services/statsIngester';
 import { readNsHostname, readNsServerIp } from './routes/config';
 import { createTechnitiumClient } from './services/technitium';
 import { ensureNsGlueRecords, cleanBadNsRecords } from './routes/sites';
@@ -25,6 +27,7 @@ app.use('/api/hosted', hostedRouter);
 app.use('/api/dns', dnsRouter);
 app.use('/api/backup', backupRouter);
 app.use('/api/config', configRouter);
+app.use('/api/sites/:slug/stats', statsRouter);
 
 // Dynamic static file serving for deployed sites
 // GET /hosted/:slug/* → serves from the site's detected serveDir
@@ -62,6 +65,9 @@ app.listen(PORT, () => {
   } else {
     console.warn('[technitium] TECHNITIUM_URL not set — DNS routes will fail at startup');
   }
+
+  // Start stats ingester (reads Traefik access log → SQLite rollups)
+  startStatsIngester();
 
   // Non-blocking DNS startup fixup — sets dnsServerDomain, creates glue records,
   // and removes stale container-ID NS records left from unconfigured Technitium.

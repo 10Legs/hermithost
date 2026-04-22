@@ -209,6 +209,12 @@ services:
       - "--certificatesresolvers.internal-ca.acme.httpchallenge.entrypoint=http"
       - "--certificatesresolvers.internal-ca.acme.email=internal@hermithost.hh"
       - "--certificatesresolvers.internal-ca.acme.storage=/acme/internal-acme.json"
+      # ── Access logging (JSON) ───────────────────────────────────────────────
+      - "--accesslog=true"
+      - "--accesslog.filepath=/logs/traefik-access.log"
+      - "--accesslog.format=json"
+      - "--accesslog.fields.headers.defaultmode=drop"
+      - "--accesslog.fields.headers.names.User-Agent=keep"
     environment:
       # Trust step-ca root CA so Lego can negotiate with it
       LEGO_CA_CERTIFICATES: "/home/step/certs/root_ca.crt"
@@ -221,6 +227,7 @@ services:
       - ./traefik/conf.d:/etc/traefik/conf.d
       - traefik-acme:/acme
       - step-ca-data:/home/step:ro
+      - traefik-logs:/logs
     networks:
       - hermithost-net
       - coolify
@@ -255,6 +262,8 @@ services:
       NS_HOSTNAME: "${NS_HOSTNAME:-}"
       NS_SERVER_IP: "${NS_SERVER_IP:-}"
       NETWORK_MODE: "${NETWORK_MODE:-external}"
+      TRAEFIK_LOG_PATH: "/traefik-logs/traefik-access.log"
+      STATS_INGEST_INTERVAL_MS: "${STATS_INGEST_INTERVAL_MS:-60000}"
       PGHOST: "coolify-db"
       PGPORT: "5432"
       PGDATABASE: "coolify"
@@ -267,6 +276,8 @@ services:
       - ./traefik/conf.d:/app/traefik-conf.d
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - step-ca-data:/home/step:ro
+      - traefik-logs:/traefik-logs:ro
+      - hermithost-stats:/app/data
     networks:
       - hermithost-net
       - coolify
@@ -315,3 +326,5 @@ volumes:
   coolify-api-token:
   ssh-bridge-host-keys:
   step-ca-data:
+  traefik-logs:
+  hermithost-stats:
