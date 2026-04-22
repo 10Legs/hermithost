@@ -13,6 +13,8 @@ export interface DnsPageData {
   nsHostname: string | null;
 }
 
+export const ssr = false;
+
 export const load: PageLoad = async ({ fetch }): Promise<DnsPageData> => {
   const [zonesRes, configRes] = await Promise.all([
     fetch('/api/dns/zones'),

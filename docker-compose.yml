@@ -270,6 +270,7 @@ services:
       NETWORK_MODE: "${NETWORK_MODE:-external}"
       TRAEFIK_LOG_PATH: "/traefik-logs/traefik-access.log"
       STATS_INGEST_INTERVAL_MS: "${STATS_INGEST_INTERVAL_MS:-60000}"
+      DATA_DIR: "/app/data/lifecycle"
       PGHOST: "coolify-db"
       PGPORT: "5432"
       PGDATABASE: "coolify"
@@ -280,10 +281,11 @@ services:
       - coolify-api-token:/coolify-api-token
       - coolify-keys:/coolify-keys:ro
       - ./traefik/conf.d:/app/traefik-conf.d
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/run/docker.sock:/var/run/docker.sock
       - step-ca-data:/home/step:ro
       - traefik-logs:/traefik-logs:ro
       - hermithost-stats:/app/data
+      - ./data:/app/data/lifecycle
     networks:
       - hermithost-net
       - coolify
@@ -293,6 +295,58 @@ services:
         condition: service_healthy
       coolify-server-setup:
         condition: service_completed_successfully
+
+  # ── Sites Restore (one-shot) ───────────────────────────────────
+  # Restores coolify-managed containers checkpointed by stack-down.sh.
+  # Only acts if data/restore-containers.json exists (written by controlled shutdown).
+  sites-restore:
+    image: docker:cli
+    restart: "no"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/restore-data
+    depends_on:
+      coolify:
+        condition: service_healthy
+      coolify-server-setup:
+        condition: service_completed_successfully
+    command: >
+      sh -c "
+        FILE=/restore-data/restore-containers.json
+        EVENT_FILE=/restore-data/restore-event.json
+        if [ ! -f \"$$FILE\" ]; then
+          echo '[sites-restore] No restore checkpoint — skipping.'
+          exit 0
+        fi
+        TOTAL=$$(cat \"$$FILE\" | grep -c '\"id\"' || echo 0)
+        if [ \"$$TOTAL\" -eq 0 ]; then
+          echo '[sites-restore] Empty restore list — skipping.'
+          rm -f \"$$FILE\"
+          exit 0
+        fi
+        echo \"[sites-restore] Restoring $$TOTAL container(s)...\"
+        RESTORED=0
+        FAILED=''
+        while IFS= read -r line; do
+          ID=$$(echo \"$$line\" | sed 's/.*\"id\": *\"\([^\"]*\)\".*/\1/' | grep -E '^[a-f0-9]+$$')
+          NAME=$$(echo \"$$line\" | sed 's/.*\"name\": *\"\([^\"]*\)\".*/\1/')
+          [ -z \"$$ID\" ] && continue
+          if docker start \"$$ID\" > /dev/null 2>&1; then
+            echo \"[sites-restore] Started: $$NAME ($$ID)\"
+            RESTORED=$$((RESTORED+1))
+          else
+            echo \"[sites-restore] Failed: $$NAME ($$ID)\"
+            FAILED=\"$$FAILED,\\\"$$NAME\\\"\"
+          fi
+        done < <(cat \"$$FILE\" | tr '{' '\n' | grep '\"id\"')
+        FAILED_JSON=\"[$$(echo $$FAILED | sed 's/^,//')]\";
+        printf '{\"total\":%d,\"restored\":%d,\"failed\":%s,\"at\":\"%s\"}' \
+          $$TOTAL $$RESTORED \"$$FAILED_JSON\" \"$$(date -u +%Y-%m-%dT%H:%M:%SZ)\" > \"$$EVENT_FILE\"
+        rm -f \"$$FILE\"
+        echo '[sites-restore] Done.'
+      "
+    networks:
+      - hermithost-net
 
   # ── Technitium DNS Server ──────────────────────────────────────
   technitium:

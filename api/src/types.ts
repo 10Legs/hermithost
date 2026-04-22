@@ -1,6 +1,41 @@
 // HermitHost internal type definitions.
 // All types mirror the TypeScript interfaces in the frontend src/lib/types.ts exactly.
 
+export type ContainerStatus = 'running' | 'stopped' | 'exited' | 'paused' | 'restarting' | 'dead';
+export type ContainerGroup = 'hermithost-stack' | 'deployed-sites';
+
+export interface ServiceContainer {
+  id: string;           // 12-char Docker short ID
+  name: string;         // container name, leading slash stripped
+  image: string;
+  status: ContainerStatus;
+  state: string;        // raw Docker state
+  uptime: string | null;  // Docker "Status" field e.g. "Up 3 hours"
+  group: ContainerGroup;
+  siteSlug: string | null;  // coolify.name label value
+}
+
+export interface ServiceGroup {
+  id: string;            // stable identifier for keying
+  name: string;          // display name
+  domain: string | null; // only set for deployed site groups
+  abandoned: boolean;    // true if no matching Coolify application found
+  containers: ServiceContainer[];
+}
+
+export interface RestoreEvent {
+  total: number;
+  restored: number;
+  failed: string[];  // container names that failed to start
+  at: string;        // ISO timestamp
+}
+
+export interface ServicesResponse {
+  stackGroups: ServiceGroup[];
+  siteGroups: ServiceGroup[];
+  restoreEvent: RestoreEvent | null;
+}
+
 export type SiteStatus = 'healthy' | 'warning' | 'error' | 'pending';
 export type DeployStatus = 'success' | 'failed' | 'running' | 'pending';
 export type DnsRecordType = 'A' | 'AAAA' | 'CNAME' | 'MX' | 'TXT' | 'NS' | 'SRV' | 'CAA' | 'SOA' | 'PTR';

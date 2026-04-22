@@ -7,6 +7,7 @@ import dnsRouter from './routes/dns';
 import backupRouter from './routes/backup';
 import configRouter from './routes/config';
 import statsRouter from './routes/stats';
+import servicesRouter from './routes/services';
 import { getDeployedSite } from './services/githubDeploy';
 import { startStatsIngester } from './services/statsIngester';
 import { startLiveStats } from './services/liveStats';
@@ -29,6 +30,7 @@ app.use('/api/dns', dnsRouter);
 app.use('/api/backup', backupRouter);
 app.use('/api/config', configRouter);
 app.use('/api/sites/:slug/stats', statsRouter);
+app.use('/api/services', servicesRouter);
 
 // Dynamic static file serving for deployed sites
 // GET /hosted/:slug/* → serves from the site's detected serveDir

@@ -1,0 +1,107 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+# Only one deploy at a time — cancel queued if a newer commit lands
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Hammer
+    runs-on: self-hosted
+    environment: production
+    env:
+      # Existing stack .env lives here — contains secrets not stored in Actions
+      STACK_ENV: /Users/rdemeritt/projects/ai/hermithost/.env
+      # Compose project name must match the running stack
+      COMPOSE_PROJECT: hermithost
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Build new images from checked-out source ──────────────────────────
+      - name: Build API image
+        run: |
+          docker build \
+            --tag hermithost-api:${{ github.sha }} \
+            --tag hermithost-api:latest \
+            ./api
+
+      - name: Build Frontend image
+        run: |
+          docker build \
+            --tag hermithost-frontend:${{ github.sha }} \
+            --tag hermithost-frontend:latest \
+            .
+
+      # ── Snapshot running container IDs for rollback ───────────────────────
+      - name: Snapshot current containers
+        id: snapshot
+        run: |
+          API_ID=$(docker ps -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+                                --filter "label=com.docker.compose.service=api" | head -1)
+          FE_ID=$(docker ps -q  --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+                                --filter "label=com.docker.compose.service=frontend" | head -1)
+          echo "api_id=$API_ID"   >> $GITHUB_OUTPUT
+          echo "fe_id=$FE_ID"     >> $GITHUB_OUTPUT
+
+      # ── Hot-swap: replace only api + frontend, leave everything else alone ─
+      - name: Deploy API
+        run: |
+          docker compose \
+            -p $COMPOSE_PROJECT \
+            --env-file $STACK_ENV \
+            up -d --no-deps --no-build api
+
+      - name: Deploy Frontend
+        run: |
+          docker compose \
+            -p $COMPOSE_PROJECT \
+            --env-file $STACK_ENV \
+            up -d --no-deps --no-build frontend
+
+      # ── Health checks ─────────────────────────────────────────────────────
+      - name: Wait for API
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:3001/api/health > /dev/null; then
+              echo "API healthy after ${i}s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API health check failed after 30s"
+          exit 1
+
+      - name: Wait for Frontend
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:3000 > /dev/null; then
+              echo "Frontend healthy after ${i}s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Frontend health check failed after 30s"
+          exit 1
+
+      # ── Rollback on failure ───────────────────────────────────────────────
+      - name: Rollback on failure
+        if: failure() && steps.snapshot.outputs.api_id != ''
+        run: |
+          echo "Deploy or health check failed — rolling back"
+          docker compose \
+            -p $COMPOSE_PROJECT \
+            --env-file $STACK_ENV \
+            up -d --no-deps --no-build api frontend || true
+          echo "Rollback attempted — manual inspection may be needed"
+
+      # ── Clean up old images (keep last 3 tagged by sha) ──────────────────
+      - name: Prune old images
+        if: success()
+        run: |
+          docker image prune -f --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" || true

@@ -21,5 +21,9 @@ test-dns-*.js
 test-results-*.json
 test-cname-bug-results.json
 
+# Lifecycle checkpoint data (runtime files — not source)
+data/*
+!data/.gitkeep
+
 # Harness workspace (should live in molt-and-deploy-harness, not here)
 clients/

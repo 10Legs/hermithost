@@ -1,3 +1,38 @@
+export type ContainerStatus = 'running' | 'stopped' | 'exited' | 'paused' | 'restarting' | 'dead';
+export type ContainerGroup = 'hermithost-stack' | 'deployed-sites';
+
+export interface ServiceContainer {
+	id: string;
+	name: string;
+	image: string;
+	status: ContainerStatus;
+	state: string;
+	uptime: string | null;
+	group: ContainerGroup;
+	siteSlug: string | null;
+}
+
+export interface ServiceGroup {
+	id: string;
+	name: string;
+	domain: string | null;
+	abandoned: boolean;
+	containers: ServiceContainer[];
+}
+
+export interface RestoreEvent {
+	total: number;
+	restored: number;
+	failed: string[];
+	at: string;
+}
+
+export interface ServicesResponse {
+	stackGroups: ServiceGroup[];
+	siteGroups: ServiceGroup[];
+	restoreEvent: RestoreEvent | null;
+}
+
 export type SiteStatus = 'healthy' | 'warning' | 'error' | 'pending';
 export type DeployStatus = 'success' | 'failed' | 'running' | 'pending';
 export type DnsRecordType = 'A' | 'AAAA' | 'CNAME' | 'MX' | 'TXT' | 'NS' | 'SRV' | 'SOA' | 'CAA' | 'PTR';
