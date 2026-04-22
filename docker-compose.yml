@@ -215,6 +215,11 @@ services:
       - "--accesslog.format=json"
       - "--accesslog.fields.headers.defaultmode=drop"
       - "--accesslog.fields.headers.names.User-Agent=keep"
+      # ── Prometheus metrics ──────────────────────────────────────────────────
+      - "--metrics.prometheus=true"
+      - "--metrics.prometheus.addEntryPointsLabels=true"
+      - "--metrics.prometheus.addRoutersLabels=true"
+      - "--metrics.prometheus.addServicesLabels=true"
     environment:
       # Trust step-ca root CA so Lego can negotiate with it
       LEGO_CA_CERTIFICATES: "/home/step/certs/root_ca.crt"

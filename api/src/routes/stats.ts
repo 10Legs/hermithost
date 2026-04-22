@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { querySiteStats, queryPulse, StatRange } from '../services/stats';
+import { liveStatsEmitter, LiveSnapshot } from '../services/liveStats';
 
 const router = Router({ mergeParams: true });
 
@@ -38,6 +39,46 @@ router.get('/pulse', (req: Request, res: Response) => {
     console.error(`[stats] GET /stats/pulse for ${slug} failed:`, (err as Error).message);
     res.status(500).json({ error: 'Failed to query pulse stats' });
   }
+});
+
+// ── GET /api/sites/:slug/stats/live — Server-Sent Events ─────────────────────
+// Streams live Prometheus-derived stats every 3s.
+// Client connects once; server pushes updates until disconnect.
+router.get('/live', (req: Request, res: Response) => {
+  const { slug } = req.params;
+  const routerName = `site-${slug}`;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx/proxy buffering
+  res.flushHeaders();
+
+  // Send a keep-alive comment every 20s to prevent proxy timeouts
+  const keepAlive = setInterval(() => {
+    res.write(': keep-alive\n\n');
+  }, 20_000);
+
+  const onSnapshot = (snapshots: LiveSnapshot[]) => {
+    const snap = snapshots.find(s => s.routerName === routerName);
+    const payload: LiveSnapshot = snap ?? {
+      routerName,
+      reqPerSec: 0,
+      avgLatencyMs: null,
+      activeConnections: 0,
+      bandwidthOutBps: 0,
+      bandwidthInBps: 0,
+      ts: Date.now(),
+    };
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  liveStatsEmitter.on('snapshot', onSnapshot);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    liveStatsEmitter.off('snapshot', onSnapshot);
+  });
 });
 
 export default router;

@@ -9,6 +9,7 @@ import configRouter from './routes/config';
 import statsRouter from './routes/stats';
 import { getDeployedSite } from './services/githubDeploy';
 import { startStatsIngester } from './services/statsIngester';
+import { startLiveStats } from './services/liveStats';
 import { readNsHostname, readNsServerIp } from './routes/config';
 import { createTechnitiumClient } from './services/technitium';
 import { ensureNsGlueRecords, cleanBadNsRecords } from './routes/sites';
@@ -68,6 +69,8 @@ app.listen(PORT, () => {
 
   // Start stats ingester (reads Traefik access log → SQLite rollups)
   startStatsIngester();
+  // Start live stats scraper (Traefik Prometheus → SSE)
+  startLiveStats();
 
   // Non-blocking DNS startup fixup — sets dnsServerDomain, creates glue records,
   // and removes stale container-ID NS records left from unconfigured Technitium.

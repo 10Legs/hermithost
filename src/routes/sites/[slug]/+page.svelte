@@ -409,22 +409,53 @@
 		window.open(`https://github.com/${ownerRepo}/settings/keys/new`, '_blank');
 	}
 
-	onMount(async () => {
-		try {
-			const res = await fetch('/api/config/deploy-key');
-			if (res.ok) {
-				const body: { public_key: string } = await res.json();
-				deployPublicKey = body.public_key;
-			}
-		} catch {
-			// silently fail — key will be empty
-		}
+	// ── Live stats (SSE) ──────────────────────────────────────────────────────
+	let liveConnected = false;
+	let liveReqPerSec = 0;
+	let liveBandwidthOutBps = 0;
+	let liveBandwidthInBps = 0;
+	let liveActiveConnections = 0;
+	let liveAvgLatencyMs: number | null = null;
+
+	function formatBps(bps: number): string {
+		if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} MB/s`;
+		if (bps >= 1_000) return `${(bps / 1_000).toFixed(1)} KB/s`;
+		return `${Math.round(bps)} B/s`;
+	}
+
+	onMount(() => {
+		// Fetch deploy key (async, fire-and-forget)
+		fetch('/api/config/deploy-key')
+			.then(res => res.ok ? res.json() : null)
+			.then((body: { public_key: string } | null) => {
+				if (body) deployPublicKey = body.public_key;
+			})
+			.catch(() => { /* silently fail */ });
+
 		// Load stats for overview tab
 		loadStats(statsRange);
 
 		// Poll stats every 60s
 		const statsPollTimer = setInterval(() => loadStats(statsRange), 60_000);
-		return () => clearInterval(statsPollTimer);
+
+		// Live stats via SSE
+		const es = new EventSource(`/api/sites/${site.slug}/stats/live`);
+		es.onopen = () => { liveConnected = true; };
+		es.onmessage = (e: MessageEvent) => {
+			const snap = JSON.parse(e.data);
+			liveReqPerSec = snap.reqPerSec;
+			liveBandwidthOutBps = snap.bandwidthOutBps;
+			liveBandwidthInBps = snap.bandwidthInBps;
+			liveActiveConnections = snap.activeConnections;
+			liveAvgLatencyMs = snap.avgLatencyMs;
+			liveConnected = true;
+		};
+		es.onerror = () => { liveConnected = false; };
+
+		return () => {
+			clearInterval(statsPollTimer);
+			es.close();
+		};
 	});
 </script>
 
@@ -610,6 +641,20 @@
 						<button class="btn btn-ghost btn-sm mt-8" on:click={() => openLog(latest)}>View log</button>
 					{:else}
 						<div class="status-card-value mono text-muted">Never deployed</div>
+					{/if}
+				</div>
+			</div>
+
+			<!-- Live Stats Bar -->
+			<div class="live-bar" class:live-bar-active={liveConnected}>
+				<span class="live-badge">● LIVE</span>
+				<div class="live-metrics">
+					<span><span class="live-num">{liveReqPerSec.toFixed(1)}</span> req/s</span>
+					<span><span class="live-num">{formatBps(liveBandwidthOutBps)}</span> out</span>
+					<span><span class="live-num">{formatBps(liveBandwidthInBps)}</span> in</span>
+					<span><span class="live-num">{liveActiveConnections}</span> active</span>
+					{#if liveAvgLatencyMs !== null}
+						<span><span class="live-num">{Math.round(liveAvgLatencyMs)}ms</span> avg</span>
 					{/if}
 				</div>
 			</div>
@@ -1852,6 +1897,46 @@
 		word-break: break-all;
 		white-space: pre-wrap;
 		display: block;
+	}
+
+	/* Live stats bar */
+	.live-bar {
+		display: flex;
+		align-items: center;
+		gap: 16px;
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 10px 16px;
+		margin-bottom: 12px;
+		opacity: 0.5;
+		transition: opacity 0.3s;
+	}
+	.live-bar-active {
+		opacity: 1;
+		border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+	}
+	.live-badge {
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		color: var(--text-muted);
+		white-space: nowrap;
+	}
+	.live-bar-active .live-badge {
+		color: #4caf50;
+	}
+	.live-metrics {
+		display: flex;
+		gap: 20px;
+		flex-wrap: wrap;
+		font-size: 12px;
+		color: var(--text-secondary);
+	}
+	.live-num {
+		font-family: var(--font-mono, monospace);
+		font-weight: 600;
+		color: var(--text-primary);
 	}
 
 	/* Traffic stats panel */

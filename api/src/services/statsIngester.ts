@@ -2,7 +2,7 @@ import fs from 'fs';
 import { getCursor, writeRollups, toBucket, RollupIncrement } from './stats';
 
 const LOG_PATH = process.env.TRAEFIK_LOG_PATH ?? '/traefik-logs/traefik-access.log';
-const INTERVAL_MS = Number(process.env.STATS_INGEST_INTERVAL_MS ?? 60_000);
+const INTERVAL_MS = Number(process.env.STATS_INGEST_INTERVAL_MS ?? 5_000);
 
 // ── Bot UA patterns ───────────────────────────────────────────────────────────
 const BOT_PATTERNS = [
