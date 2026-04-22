@@ -3,6 +3,7 @@ import type { DnsRecord } from '../../types';
 export interface DnsZone {
   name: string;
   disabled?: boolean;
+  internal?: boolean;
 }
 
 export interface DnsProvider {

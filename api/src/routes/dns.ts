@@ -14,7 +14,7 @@ router.get('/zones', async (_req: Request, res: Response) => {
   try {
     const provider = createDnsProvider();
     const zones = await provider.listZones();
-    res.status(200).json(zones);
+    res.status(200).json(zones.filter((z) => !z.internal && !z.name.endsWith('.arpa')));
   } catch (err) {
     console.error('[dns] GET /zones failed:', (err as Error).message);
     res.status(502).json({ error: 'Failed to retrieve zones from DNS server' });

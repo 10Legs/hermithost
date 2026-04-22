@@ -316,6 +316,129 @@
 		}
 	}
 
+	// ── Traffic stats ─────────────────────────────────────────────────────────
+	type StatRange = '24h' | '7d' | '30d';
+	const statRanges: StatRange[] = ['24h', '7d', '30d'];
+	let statsRange: StatRange = '24h';
+	let statsLoading = false;
+
+	interface SiteStats {
+		range: StatRange;
+		requests: number;
+		human_requests: number;
+		bot_requests: number;
+		bandwidth_bytes: number;
+		error_rate: number;
+		avg_ms: number | null;
+		sparkline: Array<{ ts: number; requests: number }>;
+	}
+
+	let stats: SiteStats | null = null;
+	let statsError = false;
+
+	async function loadStats(range: StatRange): Promise<void> {
+		statsLoading = true;
+		statsError = false;
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/stats?range=${range}`);
+			if (res.ok) {
+				stats = await res.json();
+			} else {
+				statsError = true;
+			}
+		} catch {
+			statsError = true;
+		} finally {
+			statsLoading = false;
+		}
+	}
+
+	function setStatsRange(r: StatRange): void {
+		statsRange = r;
+		loadStats(r);
+		loadPageStats(r);
+	}
+
+	// ── Page analytics ─────────────────────────────────────────────────────────
+	interface TopPage {
+		path: string;
+		requests: number;
+		human_requests: number;
+		avg_ms: number | null;
+		error_rate: number;
+		trend: number | null;
+	}
+	interface PageStatsData {
+		range: StatRange;
+		top_pages: TopPage[];
+		top_referrers: Array<{ referrer_domain: string; requests: number }>;
+	}
+	let pageStats: PageStatsData | null = null;
+
+	async function loadPageStats(range: StatRange): Promise<void> {
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/stats/pages?range=${range}`);
+			if (res.ok) pageStats = await res.json();
+		} catch { /* silently fail */ }
+	}
+
+	function formatBytes(bytes: number): string {
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+		if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+		return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+	}
+
+	function sparklinePath(points: Array<{ ts: number; requests: number }>, w: number, h: number): string {
+		if (points.length < 2) return '';
+		const maxReq = Math.max(...points.map(p => p.requests), 1);
+		const xs = points.map((_, i) => (i / (points.length - 1)) * w);
+		const ys = points.map(p => h - (p.requests / maxReq) * (h - 2) - 1);
+		return xs.map((x, i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
+	}
+
+	function sparklineAreaPoints(
+		points: Array<{ ts: number; requests: number }>,
+		w: number,
+		h: number
+	): string {
+		if (points.length < 2) return '';
+		const maxReq = Math.max(...points.map(p => p.requests), 1);
+		const xs = points.map((_, i) => (i / (points.length - 1)) * w);
+		const ys = points.map(p => h - (p.requests / maxReq) * (h - 2) - 1);
+		return xs.map((x, i) => `${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ') +
+			` ${w},${h} `;
+	}
+
+	let tooltipVisible = false;
+	let tooltipX: number | null = null;
+	let tooltipLeft = 0;
+	let tooltipData: { ts: number; requests: number } | null = null;
+
+	function handleSparklineMousemove(e: MouseEvent): void {
+		const svg = e.currentTarget as SVGSVGElement;
+		const rect = svg.getBoundingClientRect();
+		const svgX = ((e.clientX - rect.left) / rect.width) * 200;
+		tooltipX = svgX;
+		tooltipLeft = e.clientX - rect.left;
+		const points = stats?.sparkline ?? [];
+		if (points.length < 2) return;
+		const idx = Math.round((svgX / 200) * (points.length - 1));
+		const clamped = Math.max(0, Math.min(points.length - 1, idx));
+		tooltipData = points[clamped];
+		tooltipVisible = true;
+	}
+
+	function handleSparklineMouseleave(): void {
+		tooltipVisible = false;
+		tooltipX = null;
+		tooltipData = null;
+	}
+
+	function formatTooltipTime(ts: number): string {
+		return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+	}
+
 	// Deploy key
 	let deployPublicKey = '';
 	let deployKeyCopied = false;
@@ -352,16 +475,54 @@
 		window.open(`https://github.com/${ownerRepo}/settings/keys/new`, '_blank');
 	}
 
-	onMount(async () => {
-		try {
-			const res = await fetch('/api/config/deploy-key');
-			if (res.ok) {
-				const body: { public_key: string } = await res.json();
-				deployPublicKey = body.public_key;
-			}
-		} catch {
-			// silently fail — key will be empty
-		}
+	// ── Live stats (SSE) ──────────────────────────────────────────────────────
+	let liveConnected = false;
+	let liveReqPerSec = 0;
+	let liveBandwidthOutBps = 0;
+	let liveBandwidthInBps = 0;
+	let liveActiveConnections = 0;
+	let liveAvgLatencyMs: number | null = null;
+
+	function formatBps(bps: number): string {
+		if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} MB/s`;
+		if (bps >= 1_000) return `${(bps / 1_000).toFixed(1)} KB/s`;
+		return `${Math.round(bps)} B/s`;
+	}
+
+	onMount(() => {
+		// Fetch deploy key (async, fire-and-forget)
+		fetch('/api/config/deploy-key')
+			.then(res => res.ok ? res.json() : null)
+			.then((body: { public_key: string } | null) => {
+				if (body) deployPublicKey = body.public_key;
+			})
+			.catch(() => { /* silently fail */ });
+
+		// Load stats for overview tab
+		loadStats(statsRange);
+		loadPageStats(statsRange);
+
+		// Poll stats every 60s
+		const statsPollTimer = setInterval(() => loadStats(statsRange), 60_000);
+
+		// Live stats via SSE
+		const es = new EventSource(`/api/sites/${site.slug}/stats/live`);
+		es.onopen = () => { liveConnected = true; };
+		es.onmessage = (e: MessageEvent) => {
+			const snap = JSON.parse(e.data);
+			liveReqPerSec = snap.reqPerSec;
+			liveBandwidthOutBps = snap.bandwidthOutBps;
+			liveBandwidthInBps = snap.bandwidthInBps;
+			liveActiveConnections = snap.activeConnections;
+			liveAvgLatencyMs = snap.avgLatencyMs;
+			liveConnected = true;
+		};
+		es.onerror = () => { liveConnected = false; };
+
+		return () => {
+			clearInterval(statsPollTimer);
+			es.close();
+		};
 	});
 </script>
 
@@ -551,6 +712,167 @@
 				</div>
 			</div>
 
+			<!-- Live Zone -->
+			<div class="live-zone" class:live-zone-active={liveConnected}>
+				<div class="live-zone-header">
+					<div class="live-zone-label">
+						<span class="live-dot" class:live-dot-connected={liveConnected}></span>
+						<span class="live-badge-text">{liveConnected ? 'LIVE' : 'OFFLINE'}</span>
+					</div>
+					<span class="live-zone-sub">Real-time · aggregate across all connections</span>
+				</div>
+				<div class="live-zone-metrics">
+					<div class="live-metric">
+						<span class="live-metric-value">{liveReqPerSec.toFixed(1)}</span>
+						<span class="live-metric-label">req/s</span>
+					</div>
+					<div class="live-metric-divider"></div>
+					<div class="live-metric">
+						<span
+							class="live-metric-value"
+							class:text-warning={liveAvgLatencyMs !== null && liveAvgLatencyMs > 500 && liveAvgLatencyMs <= 2000}
+							class:text-danger={liveAvgLatencyMs !== null && liveAvgLatencyMs > 2000}
+						>{liveAvgLatencyMs !== null ? `${Math.round(liveAvgLatencyMs)}ms` : '—'}</span>
+						<span class="live-metric-label">latency</span>
+					</div>
+					<div class="live-metric-divider"></div>
+					<div class="live-metric">
+						<span class="live-metric-value">{formatBps(liveBandwidthOutBps)}</span>
+						<span class="live-metric-label">out</span>
+					</div>
+					<div class="live-metric">
+						<span class="live-metric-value">{formatBps(liveBandwidthInBps)}</span>
+						<span class="live-metric-label">in</span>
+					</div>
+					<div class="live-metric-divider"></div>
+					<div class="live-metric">
+						<span class="live-metric-value">{liveActiveConnections}</span>
+						<span class="live-metric-label">connections (total)</span>
+					</div>
+				</div>
+			</div>
+
+			<!-- Traffic Stats Panel -->
+			<div class="stats-panel">
+				<div class="stats-panel-header">
+					<h2 class="stats-panel-title">Traffic</h2>
+					<div class="stat-tabs" role="tablist" aria-label="Stats time range">
+						{#each statRanges as r}
+							<button
+								class="stat-tab"
+								class:stat-tab-active={statsRange === r}
+								role="tab"
+								aria-selected={statsRange === r}
+								on:click={() => setStatsRange(r)}
+							>{r}</button>
+						{/each}
+					</div>
+				</div>
+
+				{#if statsError}
+					<p class="stats-empty">No traffic data yet — starts collecting once Traefik access logging is active.</p>
+				{:else if stats !== null}
+					<div class="metric-grid">
+					<!-- Requests -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Requests</span>
+						</div>
+						<span class="metric-card-value">{stats.requests.toLocaleString()}</span>
+						{#if stats.sparkline.length >= 2}
+							<div class="metric-card-sparkline-wrap">
+								<svg
+									class="metric-sparkline"
+									width="100%"
+									height="36"
+									viewBox="0 0 200 36"
+									preserveAspectRatio="none"
+									aria-hidden="true"
+									on:mousemove={handleSparklineMousemove}
+									on:mouseleave={handleSparklineMouseleave}
+								>
+									<defs>
+										<linearGradient id="sparkline-fill-requests" x1="0" y1="0" x2="0" y2="1">
+											<stop offset="0%" stop-color="var(--accent-teal)" stop-opacity="0.5" />
+											<stop offset="100%" stop-color="var(--accent-teal)" stop-opacity="0" />
+										</linearGradient>
+									</defs>
+									<polygon
+										points="{sparklineAreaPoints(stats.sparkline, 200, 34)}0,34"
+										fill="url(#sparkline-fill-requests)"
+									/>
+									<path
+										d={sparklinePath(stats.sparkline, 200, 34)}
+										fill="none"
+										stroke="var(--accent-teal)"
+										stroke-width="1.5"
+										stroke-linejoin="round"
+										stroke-linecap="round"
+									/>
+									{#if tooltipX !== null}
+										<line class="sparkline-crosshair" x1={tooltipX} y1="0" x2={tooltipX} y2="36" />
+									{/if}
+								</svg>
+								{#if tooltipVisible && tooltipData}
+									<div class="sparkline-tooltip" style="left: {tooltipLeft}px;">
+										<span class="sparkline-tooltip-val">{tooltipData.requests.toLocaleString()}</span>
+										<span class="sparkline-tooltip-ts">{formatTooltipTime(tooltipData.ts)}</span>
+									</div>
+								{/if}
+							</div>
+						{/if}
+					</div>
+
+					<!-- Visitors -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Visitors</span>
+							{#if stats.bot_requests > 0}
+								<span class="metric-card-badge">{stats.bot_requests.toLocaleString()} bots</span>
+							{/if}
+						</div>
+						<span class="metric-card-value">{stats.human_requests.toLocaleString()}</span>
+					</div>
+
+					<!-- Avg Latency -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Avg Latency</span>
+						</div>
+						<span
+							class="metric-card-value"
+							class:text-warning={stats.avg_ms !== null && stats.avg_ms > 500 && stats.avg_ms <= 2000}
+							class:text-danger={stats.avg_ms !== null && stats.avg_ms > 2000}
+						>{stats.avg_ms !== null ? `${Math.round(stats.avg_ms)}ms` : '—'}</span>
+						{#if stats.avg_ms !== null && stats.avg_ms > 500}
+							<span class="metric-card-threshold-label">
+								{stats.avg_ms > 2000 ? 'Critical (>2s)' : 'Elevated (>500ms)'}
+							</span>
+						{/if}
+					</div>
+
+					<!-- Error Rate -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Error Rate</span>
+						</div>
+						<span
+							class="metric-card-value"
+							class:text-warning={stats.error_rate > 0.01 && stats.error_rate <= 0.05}
+							class:text-danger={stats.error_rate > 0.05}
+						>{stats.requests > 0 ? `${(stats.error_rate * 100).toFixed(1)}%` : '—'}</span>
+					</div>
+				</div>
+
+				<div class="stats-bandwidth-row">
+					<span class="stats-bandwidth-label">Data served</span>
+					<span class="stats-bandwidth-value mono">{formatBytes(stats.bandwidth_bytes)}</span>
+				</div>
+				{:else if statsLoading}
+					<p class="stats-loading text-secondary">Loading…</p>
+				{/if}
+			</div>
+
 			{#if site.overallStatus === 'warning' || site.overallStatus === 'error'}
 				<div class="alert-banner" class:alert-danger={site.overallStatus === 'error'} class:alert-warning={site.overallStatus === 'warning'}>
 					<span class="alert-icon">{site.overallStatus === 'error' ? '✗' : '⚠'}</span>
@@ -563,6 +885,65 @@
 					</div>
 				</div>
 			{/if}
+
+			<!-- Top Pages Panel -->
+			<div class="stats-panel">
+				<div class="stats-panel-header">
+					<h2 class="stats-panel-title">Top Pages</h2>
+				</div>
+				{#if pageStats === null}
+					<p class="stats-empty">Page analytics will appear here once traffic is recorded.</p>
+				{:else if pageStats.top_pages.length === 0}
+					<p class="stats-empty">No page data for this period yet.</p>
+				{:else}
+					<div class="top-pages-list">
+						{#each pageStats.top_pages as page, i}
+							{@const pct = pageStats.top_pages[0].requests > 0
+								? (page.requests / pageStats.top_pages[0].requests) * 100 : 0}
+							<div class="top-page-row">
+								<span class="page-rank text-muted mono">{i + 1}</span>
+								<div class="page-bar-wrap">
+									<div class="page-bar" style="width: {pct}%"></div>
+									<span class="page-path mono" title={page.path}>{page.path}</span>
+								</div>
+								<span class="page-count mono">{page.requests.toLocaleString()}</span>
+								{#if page.trend !== null}
+									<span class="page-trend" class:trend-up={page.trend > 0} class:trend-down={page.trend < 0}>
+										{page.trend > 0 ? '▲' : '▼'} {Math.abs(page.trend)}%
+									</span>
+								{/if}
+								{#if page.avg_ms !== null}
+									<span class="page-ms text-muted mono">{Math.round(page.avg_ms)}ms</span>
+								{/if}
+								<span
+									class="page-error mono"
+									class:text-warning={page.error_rate > 0.01 && page.error_rate <= 0.05}
+									class:text-danger={page.error_rate > 0.05}
+								>{(page.error_rate * 100).toFixed(1)}% err</span>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+
+			<!-- Top Referrers Panel -->
+			<div class="stats-panel">
+				<div class="stats-panel-header">
+					<h2 class="stats-panel-title">Top Referrers</h2>
+				</div>
+				{#if pageStats === null || pageStats.top_referrers.length === 0}
+					<p class="stats-empty">No referrer data for this period yet.</p>
+				{:else}
+					<div class="referrers-list">
+						{#each pageStats.top_referrers.slice(0, 10) as ref}
+							<div class="referrer-row">
+								<span class="referrer-domain mono">{ref.referrer_domain || 'direct'}</span>
+								<span class="mono text-secondary">{ref.requests.toLocaleString()}</span>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
 		</div>
 	{/if}
 
@@ -1715,5 +2096,348 @@
 		word-break: break-all;
 		white-space: pre-wrap;
 		display: block;
+	}
+
+	/* Traffic stats panel */
+	.stats-panel {
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 16px 20px;
+		margin-bottom: 20px;
+	}
+
+	.stats-panel-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 16px;
+	}
+
+	.stats-panel-title {
+		font-size: 13px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-secondary);
+	}
+
+	.stats-empty {
+		font-size: 12px;
+		color: var(--text-secondary);
+		padding: 8px 0;
+		margin: 0;
+	}
+
+	.stats-loading {
+		font-size: 12px;
+		padding: 8px 0;
+		margin: 0;
+	}
+
+	/* ── Live Zone ─────────────────────────────────────────────────────────── */
+	.live-zone {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-left: 3px solid var(--live-disconnected);
+		border-radius: 8px;
+		padding: 12px 16px;
+		margin-bottom: 12px;
+		opacity: 0.55;
+		transition: opacity 0.3s ease, border-color 0.3s ease;
+	}
+	.live-zone-active {
+		opacity: 1;
+		border-left-color: var(--live-connected);
+		background: color-mix(in srgb, var(--live-connected) 4%, var(--bg-surface));
+	}
+	.live-zone-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+	.live-zone-label {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+	}
+	.live-badge-text {
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.1em;
+		color: var(--live-disconnected);
+		font-family: var(--font-mono);
+	}
+	.live-zone-active .live-badge-text {
+		color: var(--live-connected);
+	}
+	.live-zone-sub {
+		font-size: 11px;
+		color: var(--text-muted);
+	}
+	.live-zone-metrics {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		row-gap: 8px;
+	}
+	.live-metric {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 0 16px 0 0;
+	}
+	.live-metric-value {
+		font-family: var(--font-mono);
+		font-size: 20px;
+		font-weight: 600;
+		color: var(--text-primary);
+		line-height: 1;
+	}
+	.live-metric-label {
+		font-size: 10px;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-muted);
+	}
+	.live-metric-divider {
+		width: 1px;
+		height: 28px;
+		background: var(--border-bright);
+		margin: 0 16px 0 0;
+		flex-shrink: 0;
+		align-self: center;
+	}
+	.live-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--live-disconnected);
+		flex-shrink: 0;
+		transition: background 0.3s;
+	}
+	.live-dot-connected {
+		background: var(--live-connected);
+		animation: live-pulse 1.8s ease-in-out infinite;
+	}
+	@keyframes live-pulse {
+		0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--live-connected) 70%, transparent); }
+		60%  { box-shadow: 0 0 0 6px color-mix(in srgb, var(--live-connected) 0%, transparent); }
+		100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--live-connected) 0%, transparent); }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.live-dot-connected { animation: none; }
+	}
+
+	/* ── Metric Grid ─────────────────────────────────────────────────────────── */
+	.metric-grid {
+		display: grid;
+		grid-template-columns: repeat(4, 1fr);
+		gap: 10px;
+		margin-bottom: 12px;
+	}
+	.metric-card {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 12px 14px 10px;
+		min-height: 100px;
+		position: relative;
+		overflow: hidden;
+	}
+	.metric-card-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 6px;
+	}
+	.metric-card-label {
+		font-size: 10px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.09em;
+		color: var(--text-muted);
+	}
+	.metric-card-badge {
+		font-size: 10px;
+		font-family: var(--font-mono);
+		color: var(--text-secondary);
+		background: var(--bg-hover);
+		border-radius: 3px;
+		padding: 1px 5px;
+	}
+	.metric-card-value {
+		font-family: var(--font-mono);
+		font-size: 26px;
+		font-weight: 600;
+		color: var(--text-primary);
+		line-height: 1.1;
+		letter-spacing: -0.01em;
+	}
+	.metric-card-threshold-label {
+		font-size: 10px;
+		color: var(--text-muted);
+		font-family: var(--font-mono);
+	}
+	.metric-card-sparkline-wrap {
+		margin-top: auto;
+		padding-top: 8px;
+		position: relative;
+	}
+	.metric-sparkline {
+		display: block;
+		width: 100%;
+		height: 36px;
+		cursor: crosshair;
+	}
+	.sparkline-crosshair {
+		stroke: var(--text-muted);
+		stroke-width: 1;
+		stroke-dasharray: 2 2;
+		pointer-events: none;
+	}
+	.sparkline-tooltip {
+		position: absolute;
+		bottom: calc(100% + 4px);
+		transform: translateX(-50%);
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-bright);
+		border-radius: 5px;
+		padding: 4px 8px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 1px;
+		pointer-events: none;
+		white-space: nowrap;
+		z-index: 10;
+	}
+	.sparkline-tooltip-val {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+	.sparkline-tooltip-ts {
+		font-size: 10px;
+		color: var(--text-secondary);
+	}
+
+	/* ── Bandwidth row ───────────────────────────────────────────────────────── */
+	.stats-bandwidth-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px 0 4px;
+		border-top: 1px solid var(--border);
+		margin-top: 4px;
+	}
+	.stats-bandwidth-label {
+		font-size: 11px;
+		color: var(--text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+	}
+	.stats-bandwidth-value {
+		font-size: 13px;
+		color: var(--text-secondary);
+	}
+
+	/* ── Top Pages + Referrers ───────────────────────────────────────────────── */
+	.top-pages-list { display: flex; flex-direction: column; gap: 6px; }
+	.top-page-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+	.page-rank { width: 16px; text-align: right; color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
+	.page-bar-wrap { flex: 1; position: relative; min-width: 0; }
+	.page-bar { position: absolute; left: 0; top: 0; bottom: 0; background: color-mix(in srgb, var(--accent-teal) 20%, transparent); border-radius: 2px; pointer-events: none; }
+	.page-path { position: relative; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; padding: 3px 6px; color: var(--text-primary); }
+	.page-count { color: var(--text-secondary); white-space: nowrap; flex-shrink: 0; }
+	.page-ms { font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+	.page-error { font-size: 11px; white-space: nowrap; flex-shrink: 0; color: var(--text-muted); }
+	.page-trend { font-size: 10px; font-family: var(--font-mono); white-space: nowrap; flex-shrink: 0; }
+	.trend-up { color: var(--success); }
+	.trend-down { color: var(--danger); }
+	.referrers-list { display: flex; flex-direction: column; gap: 4px; }
+	.referrer-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 2px 0; }
+	.referrer-domain { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+	/* ── Range Tabs ──────────────────────────────────────────────────────────── */
+	.stat-tabs {
+		display: flex;
+		gap: 2px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-bright);
+		border-radius: 6px;
+		padding: 3px;
+	}
+	.stat-tab {
+		background: transparent;
+		border: none;
+		border-radius: 4px;
+		color: var(--text-secondary);
+		font-size: 11px;
+		font-weight: 500;
+		font-family: var(--font-mono);
+		padding: 4px 10px;
+		min-height: 36px;
+		cursor: pointer;
+		transition: background 0.15s, color 0.15s;
+		line-height: 1;
+	}
+	.stat-tab:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+	.stat-tab-active {
+		background: var(--accent-teal);
+		color: #fff;
+	}
+	.stat-tab-active:hover {
+		background: var(--accent-teal-dim);
+		color: #fff;
+	}
+	.stat-tab:focus-visible {
+		outline: 2px solid var(--accent-teal);
+		outline-offset: 1px;
+	}
+
+	/* ── Mobile ──────────────────────────────────────────────────────────────── */
+	@media (max-width: 768px) {
+		.live-zone-metrics {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 8px;
+		}
+		.live-metric-divider {
+			width: 100%;
+			height: 1px;
+			margin: 0;
+		}
+		.live-zone-header {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 2px;
+		}
+		.metric-grid {
+			grid-template-columns: repeat(2, 1fr);
+		}
+		.metric-card-value {
+			font-size: 22px;
+		}
+		.stat-tabs {
+			flex-wrap: wrap;
+		}
+	}
+	@media (max-width: 480px) {
+		.metric-grid {
+			grid-template-columns: 1fr;
+		}
 	}
 </style>

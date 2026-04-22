@@ -232,6 +232,18 @@ export class TechnitiumClient {
       await handleResponse<TechnitiumDeleteResponse>(res, 'POST /api/settings/set');
     });
   }
+
+  async setForwarders(forwarderIps: string[]): Promise<void> {
+    return this.withTokenRetry(async () => {
+      const active = forwarderIps.filter(ip => ip.trim());
+      const body = this.buildParams({
+        forwarders: active.join(','),
+        enableForwarders: active.length > 0,
+      });
+      const res = await fetch(`${this.baseUrl}/api/settings/set`, { method: 'POST', headers: this.postHeaders, body });
+      await handleResponse<TechnitiumDeleteResponse>(res, 'POST /api/settings/set');
+    });
+  }
 }
 
 export function createTechnitiumClient(

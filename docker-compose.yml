@@ -96,6 +96,34 @@ services:
       retries: 10
       timeout: 2s
 
+  # ── step-ca Init (one-shot) ───────────────────────────────────
+  # Generates the HermitHost root CA and ACME provisioner on first boot.
+  # Idempotent: skips if /home/step/config/ca.json already exists.
+  step-ca-init:
+    image: smallstep/step-ca:latest
+    user: root
+    entrypoint: ["/bin/sh", "/scripts/step-ca-init.sh"]
+    volumes:
+      - step-ca-data:/home/step
+      - ./scripts/step-ca-init.sh:/scripts/step-ca-init.sh:ro
+    networks:
+      - hermithost-net
+    restart: "no"
+
+  # ── step-ca (Local Certificate Authority) ─────────────────────
+  # Issues TLS certificates for .hh domains in internal mode.
+  # Traefik uses this as the ACME CA instead of Let's Encrypt.
+  step-ca:
+    image: smallstep/step-ca:latest
+    volumes:
+      - step-ca-data:/home/step
+    networks:
+      - hermithost-net
+    restart: unless-stopped
+    depends_on:
+      step-ca-init:
+        condition: service_completed_successfully
+
   # ── Coolify Keys Init (one-shot) ──────────────────────────────
   coolify-keys-init:
     image: alpine
@@ -175,6 +203,27 @@ services:
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=http"
       - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/acme/acme.json"
+      # ── Internal CA resolver (step-ca) ─────────────────────────
+      - "--certificatesresolvers.internal-ca.acme.caserver=https://step-ca:9000/acme/acme/directory"
+      - "--certificatesresolvers.internal-ca.acme.httpchallenge=true"
+      - "--certificatesresolvers.internal-ca.acme.httpchallenge.entrypoint=http"
+      - "--certificatesresolvers.internal-ca.acme.email=internal@hermithost.hh"
+      - "--certificatesresolvers.internal-ca.acme.storage=/acme/internal-acme.json"
+      # ── Access logging (JSON) ───────────────────────────────────────────────
+      - "--accesslog=true"
+      - "--accesslog.filepath=/logs/traefik-access.log"
+      - "--accesslog.format=json"
+      - "--accesslog.fields.headers.defaultmode=drop"
+      - "--accesslog.fields.headers.names.User-Agent=keep"
+      - "--accesslog.fields.headers.names.Referer=keep"
+      # ── Prometheus metrics ──────────────────────────────────────────────────
+      - "--metrics.prometheus=true"
+      - "--metrics.prometheus.addEntryPointsLabels=true"
+      - "--metrics.prometheus.addRoutersLabels=true"
+      - "--metrics.prometheus.addServicesLabels=true"
+    environment:
+      # Trust step-ca root CA so Lego can negotiate with it
+      LEGO_CA_CERTIFICATES: "/home/step/certs/root_ca.crt"
     ports:
       - "${TRAEFIK_HTTP_PORT:-8080}:80"
       - "${TRAEFIK_HTTPS_PORT:-8443}:443"
@@ -183,6 +232,8 @@ services:
     volumes:
       - ./traefik/conf.d:/etc/traefik/conf.d
       - traefik-acme:/acme
+      - step-ca-data:/home/step:ro
+      - traefik-logs:/logs
     networks:
       - hermithost-net
       - coolify
@@ -216,6 +267,9 @@ services:
       CLOUDFLARE_TOKEN: "${CLOUDFLARE_TOKEN:-}"
       NS_HOSTNAME: "${NS_HOSTNAME:-}"
       NS_SERVER_IP: "${NS_SERVER_IP:-}"
+      NETWORK_MODE: "${NETWORK_MODE:-external}"
+      TRAEFIK_LOG_PATH: "/traefik-logs/traefik-access.log"
+      STATS_INGEST_INTERVAL_MS: "${STATS_INGEST_INTERVAL_MS:-60000}"
       PGHOST: "coolify-db"
       PGPORT: "5432"
       PGDATABASE: "coolify"
@@ -227,6 +281,9 @@ services:
       - coolify-keys:/coolify-keys:ro
       - ./traefik/conf.d:/app/traefik-conf.d
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - step-ca-data:/home/step:ro
+      - traefik-logs:/traefik-logs:ro
+      - hermithost-stats:/app/data
     networks:
       - hermithost-net
       - coolify
@@ -274,3 +331,6 @@ volumes:
   coolify-keys:
   coolify-api-token:
   ssh-bridge-host-keys:
+  step-ca-data:
+  traefik-logs:
+  hermithost-stats:

@@ -2,7 +2,7 @@ import { readFileSync } from 'fs';
 import { createCoolifyClient } from './coolify';
 import { createTechnitiumClient } from './technitium';
 import { embedPatInRepoUrl, linkGithubKey } from '../routes/sites';
-import { readNsHostname } from '../routes/config';
+import { readNsHostname, readNsServerIp, readNetworkMode } from '../routes/config';
 
 // Basic FQDN pattern — rejects bare hostnames, IPs, and embedded paths.
 // Allows subdomains (sub.example.com) and TLDs of 2-24 chars.
@@ -66,10 +66,12 @@ function extractPat(repoUrl: string): { cleanUrl: string; token: string } | null
 }
 
 // Provision DNS A record for a site domain — tracked version that returns success/failure.
+// In internal mode: uses NS_SERVER_IP (LAN IP), creates ${slug}.hh zone in Technitium.
 // Non-fatal: failures are returned as a string, never thrown.
 async function provisionSiteDns(domain: string): Promise<string | null> {
-  const serverIp = readNsHostname();
-  if (!serverIp) return 'NS_HOSTNAME not set';
+  const isInternal = readNetworkMode() === 'internal';
+  const serverIp = isInternal ? readNsServerIp() : readNsHostname();
+  if (!serverIp) return isInternal ? 'NS_SERVER_IP not set' : 'NS_HOSTNAME not set';
 
   const bare = domain.replace(/^https?:\/\//, '').replace(/\/.*$/, '').trim();
   if (!bare) return 'empty domain';
@@ -78,6 +80,12 @@ async function provisionSiteDns(domain: string): Promise<string | null> {
   if (!client) return 'Technitium not configured';
 
   try {
+    if (isInternal) {
+      // Ensure .hh root zone exists
+      await client.createZone('hh', 'Primary').catch((err: Error) => {
+        if (!err.message.toLowerCase().includes('already exists')) throw err;
+      });
+    }
     await client.createZone(bare, 'Primary').catch((err: Error) => {
       if (!err.message.toLowerCase().includes('already exists')) throw err;
     });
