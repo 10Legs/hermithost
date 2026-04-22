@@ -373,6 +373,48 @@
 		return xs.map((x, i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
 	}
 
+	function sparklineAreaPoints(
+		points: Array<{ ts: number; requests: number }>,
+		w: number,
+		h: number
+	): string {
+		if (points.length < 2) return '';
+		const maxReq = Math.max(...points.map(p => p.requests), 1);
+		const xs = points.map((_, i) => (i / (points.length - 1)) * w);
+		const ys = points.map(p => h - (p.requests / maxReq) * (h - 2) - 1);
+		return xs.map((x, i) => `${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ') +
+			` ${w},${h} `;
+	}
+
+	let tooltipVisible = false;
+	let tooltipX: number | null = null;
+	let tooltipLeft = 0;
+	let tooltipData: { ts: number; requests: number } | null = null;
+
+	function handleSparklineMousemove(e: MouseEvent): void {
+		const svg = e.currentTarget as SVGSVGElement;
+		const rect = svg.getBoundingClientRect();
+		const svgX = ((e.clientX - rect.left) / rect.width) * 200;
+		tooltipX = svgX;
+		tooltipLeft = e.clientX - rect.left;
+		const points = stats?.sparkline ?? [];
+		if (points.length < 2) return;
+		const idx = Math.round((svgX / 200) * (points.length - 1));
+		const clamped = Math.max(0, Math.min(points.length - 1, idx));
+		tooltipData = points[clamped];
+		tooltipVisible = true;
+	}
+
+	function handleSparklineMouseleave(): void {
+		tooltipVisible = false;
+		tooltipX = null;
+		tooltipData = null;
+	}
+
+	function formatTooltipTime(ts: number): string {
+		return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+	}
+
 	// Deploy key
 	let deployPublicKey = '';
 	let deployKeyCopied = false;
@@ -645,17 +687,43 @@
 				</div>
 			</div>
 
-			<!-- Live Stats Bar -->
-			<div class="live-bar" class:live-bar-active={liveConnected}>
-				<span class="live-badge">● LIVE</span>
-				<div class="live-metrics">
-					<span><span class="live-num">{liveReqPerSec.toFixed(1)}</span> req/s</span>
-					<span><span class="live-num">{formatBps(liveBandwidthOutBps)}</span> out</span>
-					<span><span class="live-num">{formatBps(liveBandwidthInBps)}</span> in</span>
-					<span><span class="live-num">{liveActiveConnections}</span> active</span>
-					{#if liveAvgLatencyMs !== null}
-						<span><span class="live-num">{Math.round(liveAvgLatencyMs)}ms</span> avg</span>
-					{/if}
+			<!-- Live Zone -->
+			<div class="live-zone" class:live-zone-active={liveConnected}>
+				<div class="live-zone-header">
+					<div class="live-zone-label">
+						<span class="live-dot" class:live-dot-connected={liveConnected}></span>
+						<span class="live-badge-text">{liveConnected ? 'LIVE' : 'OFFLINE'}</span>
+					</div>
+					<span class="live-zone-sub">Real-time · aggregate across all connections</span>
+				</div>
+				<div class="live-zone-metrics">
+					<div class="live-metric">
+						<span class="live-metric-value">{liveReqPerSec.toFixed(1)}</span>
+						<span class="live-metric-label">req/s</span>
+					</div>
+					<div class="live-metric-divider"></div>
+					<div class="live-metric">
+						<span
+							class="live-metric-value"
+							class:text-warning={liveAvgLatencyMs !== null && liveAvgLatencyMs > 500 && liveAvgLatencyMs <= 2000}
+							class:text-danger={liveAvgLatencyMs !== null && liveAvgLatencyMs > 2000}
+						>{liveAvgLatencyMs !== null ? `${Math.round(liveAvgLatencyMs)}ms` : '—'}</span>
+						<span class="live-metric-label">latency</span>
+					</div>
+					<div class="live-metric-divider"></div>
+					<div class="live-metric">
+						<span class="live-metric-value">{formatBps(liveBandwidthOutBps)}</span>
+						<span class="live-metric-label">out</span>
+					</div>
+					<div class="live-metric">
+						<span class="live-metric-value">{formatBps(liveBandwidthInBps)}</span>
+						<span class="live-metric-label">in</span>
+					</div>
+					<div class="live-metric-divider"></div>
+					<div class="live-metric">
+						<span class="live-metric-value">{liveActiveConnections}</span>
+						<span class="live-metric-label">connections (total)</span>
+					</div>
 				</div>
 			</div>
 
@@ -663,11 +731,13 @@
 			<div class="stats-panel">
 				<div class="stats-panel-header">
 					<h2 class="stats-panel-title">Traffic</h2>
-					<div class="range-toggle">
+					<div class="stat-tabs" role="tablist" aria-label="Stats time range">
 						{#each statRanges as r}
 							<button
-								class="range-btn"
-								class:range-btn-active={statsRange === r}
+								class="stat-tab"
+								class:stat-tab-active={statsRange === r}
+								role="tab"
+								aria-selected={statsRange === r}
 								on:click={() => setStatsRange(r)}
 							>{r}</button>
 						{/each}
@@ -677,57 +747,102 @@
 				{#if statsError}
 					<p class="stats-empty">No traffic data yet — starts collecting once Traefik access logging is active.</p>
 				{:else if stats !== null}
-					<div class="stats-row">
-						<div class="stat-item">
-							<span class="stat-label">Requests</span>
-							<span class="stat-value mono">{stats.requests.toLocaleString()}</span>
+					<div class="metric-grid">
+					<!-- Requests -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Requests</span>
 						</div>
-						<div class="stat-item">
-							<span class="stat-label">Visitors</span>
-							<span class="stat-value mono">{stats.human_requests.toLocaleString()}</span>
-							{#if stats.bot_requests > 0}
-								<span class="stat-sub text-secondary">{stats.bot_requests.toLocaleString()} bots</span>
-							{/if}
-						</div>
-						<div class="stat-item">
-							<span class="stat-label">Data served</span>
-							<span class="stat-value mono">{formatBytes(stats.bandwidth_bytes)}</span>
-						</div>
-						<div class="stat-item">
-							<span class="stat-label">Avg response</span>
-							<span class="stat-value mono">{stats.avg_ms !== null ? `${Math.round(stats.avg_ms)}ms` : '—'}</span>
-						</div>
-						<div class="stat-item">
-							<span class="stat-label">Error rate</span>
-							<span
-								class="stat-value mono"
-								class:text-danger={stats.error_rate > 0.05}
-								class:text-warning={stats.error_rate > 0.01 && stats.error_rate <= 0.05}
-							>{stats.requests > 0 ? `${(stats.error_rate * 100).toFixed(1)}%` : '—'}</span>
-						</div>
+						<span class="metric-card-value">{stats.requests.toLocaleString()}</span>
+						{#if stats.sparkline.length >= 2}
+							<div class="metric-card-sparkline-wrap">
+								<svg
+									class="metric-sparkline"
+									width="100%"
+									height="36"
+									viewBox="0 0 200 36"
+									preserveAspectRatio="none"
+									aria-hidden="true"
+									on:mousemove={handleSparklineMousemove}
+									on:mouseleave={handleSparklineMouseleave}
+								>
+									<defs>
+										<linearGradient id="sparkline-fill-requests" x1="0" y1="0" x2="0" y2="1">
+											<stop offset="0%" stop-color="var(--accent-teal)" stop-opacity="0.5" />
+											<stop offset="100%" stop-color="var(--accent-teal)" stop-opacity="0" />
+										</linearGradient>
+									</defs>
+									<polygon
+										points="{sparklineAreaPoints(stats.sparkline, 200, 34)}0,34"
+										fill="url(#sparkline-fill-requests)"
+									/>
+									<path
+										d={sparklinePath(stats.sparkline, 200, 34)}
+										fill="none"
+										stroke="var(--accent-teal)"
+										stroke-width="1.5"
+										stroke-linejoin="round"
+										stroke-linecap="round"
+									/>
+									{#if tooltipX !== null}
+										<line class="sparkline-crosshair" x1={tooltipX} y1="0" x2={tooltipX} y2="36" />
+									{/if}
+								</svg>
+								{#if tooltipVisible && tooltipData}
+									<div class="sparkline-tooltip" style="left: {tooltipLeft}px;">
+										<span class="sparkline-tooltip-val">{tooltipData.requests.toLocaleString()}</span>
+										<span class="sparkline-tooltip-ts">{formatTooltipTime(tooltipData.ts)}</span>
+									</div>
+								{/if}
+							</div>
+						{/if}
 					</div>
 
-					{#if stats.sparkline.length >= 2}
-						<div class="sparkline-wrap">
-							<svg
-								width="100%"
-								height="48"
-								viewBox="0 0 600 48"
-								preserveAspectRatio="none"
-								aria-hidden="true"
-							>
-								<path
-									d={sparklinePath(stats.sparkline, 600, 48)}
-									fill="none"
-									stroke="var(--accent-teal)"
-									stroke-width="1.5"
-									stroke-linejoin="round"
-									stroke-linecap="round"
-									opacity="0.8"
-								/>
-							</svg>
+					<!-- Visitors -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Visitors</span>
+							{#if stats.bot_requests > 0}
+								<span class="metric-card-badge">{stats.bot_requests.toLocaleString()} bots</span>
+							{/if}
 						</div>
-					{/if}
+						<span class="metric-card-value">{stats.human_requests.toLocaleString()}</span>
+					</div>
+
+					<!-- Avg Latency -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Avg Latency</span>
+						</div>
+						<span
+							class="metric-card-value"
+							class:text-warning={stats.avg_ms !== null && stats.avg_ms > 500 && stats.avg_ms <= 2000}
+							class:text-danger={stats.avg_ms !== null && stats.avg_ms > 2000}
+						>{stats.avg_ms !== null ? `${Math.round(stats.avg_ms)}ms` : '—'}</span>
+						{#if stats.avg_ms !== null && stats.avg_ms > 500}
+							<span class="metric-card-threshold-label">
+								{stats.avg_ms > 2000 ? 'Critical (>2s)' : 'Elevated (>500ms)'}
+							</span>
+						{/if}
+					</div>
+
+					<!-- Error Rate -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Error Rate</span>
+						</div>
+						<span
+							class="metric-card-value"
+							class:text-warning={stats.error_rate > 0.01 && stats.error_rate <= 0.05}
+							class:text-danger={stats.error_rate > 0.05}
+						>{stats.requests > 0 ? `${(stats.error_rate * 100).toFixed(1)}%` : '—'}</span>
+					</div>
+				</div>
+
+				<div class="stats-bandwidth-row">
+					<span class="stats-bandwidth-label">Data served</span>
+					<span class="stats-bandwidth-value mono">{formatBytes(stats.bandwidth_bytes)}</span>
+				</div>
 				{:else if statsLoading}
 					<p class="stats-loading text-secondary">Loading…</p>
 				{/if}
@@ -1899,46 +2014,6 @@
 		display: block;
 	}
 
-	/* Live stats bar */
-	.live-bar {
-		display: flex;
-		align-items: center;
-		gap: 16px;
-		background: var(--bg-surface);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		padding: 10px 16px;
-		margin-bottom: 12px;
-		opacity: 0.5;
-		transition: opacity 0.3s;
-	}
-	.live-bar-active {
-		opacity: 1;
-		border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-	}
-	.live-badge {
-		font-size: 10px;
-		font-weight: 700;
-		letter-spacing: 0.08em;
-		color: var(--text-muted);
-		white-space: nowrap;
-	}
-	.live-bar-active .live-badge {
-		color: #4caf50;
-	}
-	.live-metrics {
-		display: flex;
-		gap: 20px;
-		flex-wrap: wrap;
-		font-size: 12px;
-		color: var(--text-secondary);
-	}
-	.live-num {
-		font-family: var(--font-mono, monospace);
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-
 	/* Traffic stats panel */
 	.stats-panel {
 		background: var(--bg-surface);
@@ -1963,93 +2038,6 @@
 		color: var(--text-secondary);
 	}
 
-	.range-toggle {
-		display: flex;
-		border: 1px solid var(--border-bright);
-		border-radius: 4px;
-		overflow: hidden;
-	}
-
-	.range-btn {
-		background: transparent;
-		border: none;
-		border-right: 1px solid var(--border-bright);
-		color: var(--text-secondary);
-		font-size: 11px;
-		font-weight: 500;
-		padding: 4px 10px;
-		cursor: pointer;
-		transition: background 0.1s, color 0.1s;
-		font-family: var(--font-mono);
-	}
-
-	.range-btn:last-child {
-		border-right: none;
-	}
-
-	.range-btn:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
-	}
-
-	.range-btn-active {
-		background: var(--accent-teal);
-		color: #fff;
-	}
-
-	.range-btn-active:hover {
-		background: var(--accent-teal-dim);
-		color: #fff;
-	}
-
-	.stats-row {
-		display: flex;
-		gap: 32px;
-		flex-wrap: wrap;
-		margin-bottom: 16px;
-	}
-
-	.stat-item {
-		display: flex;
-		flex-direction: column;
-		gap: 3px;
-		min-width: 80px;
-	}
-
-	.stat-label {
-		font-size: 11px;
-		font-weight: 500;
-		text-transform: uppercase;
-		letter-spacing: 0.07em;
-		color: var(--text-muted);
-	}
-
-	.stat-value {
-		font-size: 22px;
-		font-weight: 500;
-		color: var(--text-primary);
-		line-height: 1.1;
-	}
-
-	.stat-sub {
-		font-size: 11px;
-		font-family: var(--font-mono);
-	}
-
-	.sparkline-wrap {
-		width: 100%;
-		height: 48px;
-		border-top: 1px solid var(--border);
-		padding-top: 8px;
-		overflow: hidden;
-	}
-
-	.sparkline-wrap svg {
-		display: block;
-		width: 100%;
-		height: 40px;
-	}
-
 	.stats-empty {
 		font-size: 12px;
 		color: var(--text-secondary);
@@ -2061,5 +2049,294 @@
 		font-size: 12px;
 		padding: 8px 0;
 		margin: 0;
+	}
+
+	/* ── Live Zone ─────────────────────────────────────────────────────────── */
+	.live-zone {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-left: 3px solid var(--live-disconnected);
+		border-radius: 8px;
+		padding: 12px 16px;
+		margin-bottom: 12px;
+		opacity: 0.55;
+		transition: opacity 0.3s ease, border-color 0.3s ease;
+	}
+	.live-zone-active {
+		opacity: 1;
+		border-left-color: var(--live-connected);
+		background: color-mix(in srgb, var(--live-connected) 4%, var(--bg-surface));
+	}
+	.live-zone-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+	.live-zone-label {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+	}
+	.live-badge-text {
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.1em;
+		color: var(--live-disconnected);
+		font-family: var(--font-mono);
+	}
+	.live-zone-active .live-badge-text {
+		color: var(--live-connected);
+	}
+	.live-zone-sub {
+		font-size: 11px;
+		color: var(--text-muted);
+	}
+	.live-zone-metrics {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		row-gap: 8px;
+	}
+	.live-metric {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 0 16px 0 0;
+	}
+	.live-metric-value {
+		font-family: var(--font-mono);
+		font-size: 20px;
+		font-weight: 600;
+		color: var(--text-primary);
+		line-height: 1;
+	}
+	.live-metric-label {
+		font-size: 10px;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-muted);
+	}
+	.live-metric-divider {
+		width: 1px;
+		height: 28px;
+		background: var(--border-bright);
+		margin: 0 16px 0 0;
+		flex-shrink: 0;
+		align-self: center;
+	}
+	.live-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--live-disconnected);
+		flex-shrink: 0;
+		transition: background 0.3s;
+	}
+	.live-dot-connected {
+		background: var(--live-connected);
+		animation: live-pulse 1.8s ease-in-out infinite;
+	}
+	@keyframes live-pulse {
+		0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--live-connected) 70%, transparent); }
+		60%  { box-shadow: 0 0 0 6px color-mix(in srgb, var(--live-connected) 0%, transparent); }
+		100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--live-connected) 0%, transparent); }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.live-dot-connected { animation: none; }
+	}
+
+	/* ── Metric Grid ─────────────────────────────────────────────────────────── */
+	.metric-grid {
+		display: grid;
+		grid-template-columns: repeat(4, 1fr);
+		gap: 10px;
+		margin-bottom: 12px;
+	}
+	.metric-card {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 12px 14px 10px;
+		min-height: 100px;
+		position: relative;
+		overflow: hidden;
+	}
+	.metric-card-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 6px;
+	}
+	.metric-card-label {
+		font-size: 10px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.09em;
+		color: var(--text-muted);
+	}
+	.metric-card-badge {
+		font-size: 10px;
+		font-family: var(--font-mono);
+		color: var(--text-secondary);
+		background: var(--bg-hover);
+		border-radius: 3px;
+		padding: 1px 5px;
+	}
+	.metric-card-value {
+		font-family: var(--font-mono);
+		font-size: 26px;
+		font-weight: 600;
+		color: var(--text-primary);
+		line-height: 1.1;
+		letter-spacing: -0.01em;
+	}
+	.metric-card-threshold-label {
+		font-size: 10px;
+		color: var(--text-muted);
+		font-family: var(--font-mono);
+	}
+	.metric-card-sparkline-wrap {
+		margin-top: auto;
+		padding-top: 8px;
+		position: relative;
+	}
+	.metric-sparkline {
+		display: block;
+		width: 100%;
+		height: 36px;
+		cursor: crosshair;
+	}
+	.sparkline-crosshair {
+		stroke: var(--text-muted);
+		stroke-width: 1;
+		stroke-dasharray: 2 2;
+		pointer-events: none;
+	}
+	.sparkline-tooltip {
+		position: absolute;
+		bottom: calc(100% + 4px);
+		transform: translateX(-50%);
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-bright);
+		border-radius: 5px;
+		padding: 4px 8px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 1px;
+		pointer-events: none;
+		white-space: nowrap;
+		z-index: 10;
+	}
+	.sparkline-tooltip-val {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+	.sparkline-tooltip-ts {
+		font-size: 10px;
+		color: var(--text-secondary);
+	}
+
+	/* ── Bandwidth row ───────────────────────────────────────────────────────── */
+	.stats-bandwidth-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px 0 4px;
+		border-top: 1px solid var(--border);
+		margin-top: 4px;
+	}
+	.stats-bandwidth-label {
+		font-size: 11px;
+		color: var(--text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+	}
+	.stats-bandwidth-value {
+		font-size: 13px;
+		color: var(--text-secondary);
+	}
+
+	/* ── Range Tabs ──────────────────────────────────────────────────────────── */
+	.stat-tabs {
+		display: flex;
+		gap: 2px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-bright);
+		border-radius: 6px;
+		padding: 3px;
+	}
+	.stat-tab {
+		background: transparent;
+		border: none;
+		border-radius: 4px;
+		color: var(--text-secondary);
+		font-size: 11px;
+		font-weight: 500;
+		font-family: var(--font-mono);
+		padding: 4px 10px;
+		min-height: 36px;
+		cursor: pointer;
+		transition: background 0.15s, color 0.15s;
+		line-height: 1;
+	}
+	.stat-tab:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+	.stat-tab-active {
+		background: var(--accent-teal);
+		color: #fff;
+	}
+	.stat-tab-active:hover {
+		background: var(--accent-teal-dim);
+		color: #fff;
+	}
+	.stat-tab:focus-visible {
+		outline: 2px solid var(--accent-teal);
+		outline-offset: 1px;
+	}
+
+	/* ── Mobile ──────────────────────────────────────────────────────────────── */
+	@media (max-width: 768px) {
+		.live-zone-metrics {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 8px;
+		}
+		.live-metric-divider {
+			width: 100%;
+			height: 1px;
+			margin: 0;
+		}
+		.live-zone-header {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 2px;
+		}
+		.metric-grid {
+			grid-template-columns: repeat(2, 1fr);
+		}
+		.metric-card-value {
+			font-size: 22px;
+		}
+		.stat-tabs {
+			flex-wrap: wrap;
+		}
+	}
+	@media (max-width: 480px) {
+		.metric-grid {
+			grid-template-columns: 1fr;
+		}
 	}
 </style>

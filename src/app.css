@@ -19,6 +19,12 @@
 	--border-bright: #2d3f5e;
 	--font-ui: 'Inter', system-ui, sans-serif;
 	--font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+	--live-connected: #4caf50;
+	--live-disconnected: var(--text-muted);
+	--latency-warn: var(--warning);
+	--latency-crit: var(--danger);
+	--error-warn: var(--warning);
+	--error-crit: var(--danger);
 }
 
 *, *::before, *::after {
