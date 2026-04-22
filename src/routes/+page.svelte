@@ -271,6 +271,7 @@
 				{#each sites as rawSite}
 					{@const site = effectiveSite(rawSite)}
 					{@const probing = probePending.has(rawSite.slug)}
+					{@const pulse = pulseData[rawSite.slug]}
 					<tr class="site-row" class:row-error={site.overallStatus === 'error'} class:row-warning={site.overallStatus === 'warning'}>
 						<td class="cell-site">
 							<div class="site-name-row">
@@ -304,7 +305,6 @@
 							<span class="{lastDeployClass(site)} mono">{lastDeployLabel(site)}{lastDeployStatus(site)}</span>
 						</td>
 						<td class="cell-pulse">
-							{@const pulse = pulseData[site.slug]}
 							{#if pulse && pulse.buckets.length > 0}
 								<div class="pulse-strip" title="Request volume — last 24h">
 									{#each pulse.buckets as bucket}

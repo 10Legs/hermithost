@@ -318,6 +318,7 @@
 
 	// ── Traffic stats ─────────────────────────────────────────────────────────
 	type StatRange = '24h' | '7d' | '30d';
+	const statRanges: StatRange[] = ['24h', '7d', '30d'];
 	let statsRange: StatRange = '24h';
 	let statsLoading = false;
 
@@ -618,7 +619,7 @@
 				<div class="stats-panel-header">
 					<h2 class="stats-panel-title">Traffic</h2>
 					<div class="range-toggle">
-						{#each (['24h', '7d', '30d'] as StatRange[]) as r}
+						{#each statRanges as r}
 							<button
 								class="range-btn"
 								class:range-btn-active={statsRange === r}
