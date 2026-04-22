@@ -74,9 +74,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build frontend image
-        run: docker build --tag hermithost-frontend:ci-${{ github.sha }} .
+        run: docker buildx build --tag hermithost-frontend:ci-${{ github.sha }} .
       - name: Build API image
-        run: docker build --tag hermithost-api:ci-${{ github.sha }} ./api
+        run: docker buildx build --tag hermithost-api:ci-${{ github.sha }} ./api
       - name: Clean up CI images
         if: always()
         run: |
