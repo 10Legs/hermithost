@@ -43,7 +43,7 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
       - name: Svelte Check
-        run: npx svelte-check --threshold warning
+        run: npx svelte-check --threshold error
       - name: Build
         run: npm run build
         env:

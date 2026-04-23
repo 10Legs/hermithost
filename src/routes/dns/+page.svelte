@@ -99,8 +99,8 @@
 				addZoneError = body.error ?? `Create failed (${res.status})`;
 				return;
 			}
-			const created: DnsZone = await res.json();
-			const fullZone: DnsZone = { disabled: false, internal: false, dnssecStatus: 'Unsigned', ...created };
+			const data = await res.json() as Partial<DnsZone>;
+			const fullZone: DnsZone = { name: data.name ?? '', type: data.type ?? '', disabled: data.disabled ?? false, internal: data.internal ?? false, dnssecStatus: data.dnssecStatus ?? 'Unsigned' };
 			zones = [...zones, fullZone];
 			newZoneName = '';
 			showAddZone = false;

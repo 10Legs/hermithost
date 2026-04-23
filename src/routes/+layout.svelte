@@ -1,7 +1,6 @@
 <script lang="ts">
 	import '../app.css';
 	import { page } from '$app/stores';
-	declare const __GIT_COMMIT__: string;
 </script>
 
 <div class="app-shell">
