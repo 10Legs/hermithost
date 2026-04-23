@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { readFileSync, writeFileSync, unlinkSync } from 'fs';
-import * as http from 'http';
 import * as path from 'path';
+import { dockerGet } from '../services/docker';
 import { DnsRecord } from '../types';
 import {
   createCoolifyClient,
@@ -276,24 +276,6 @@ export async function unlinkGithubKey(appUuid: string): Promise<void> {
 // then writes (or removes) a Traefik conf.d route file so the site domain
 // is proxied to the correct container. Non-fatal.
 const TRAEFIK_CONF_DIR = process.env.TRAEFIK_CONF_DIR ?? '/app/traefik-conf.d';
-
-function dockerGet(path: string): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const req = http.get(
-      { socketPath: '/var/run/docker.sock', path, headers: { Host: 'localhost' } },
-      (res) => {
-        let body = '';
-        res.on('data', (d: Buffer) => { body += d; });
-        res.on('end', () => {
-          try { resolve(JSON.parse(body)); }
-          catch { reject(new Error(`Docker API parse error: ${body.slice(0, 200)}`)); }
-        });
-      }
-    );
-    req.on('error', reject);
-    req.setTimeout(3000, () => { req.destroy(); reject(new Error('Docker API timeout')); });
-  });
-}
 
 export async function provisionTraefikRoute(
   slug: string,

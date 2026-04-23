@@ -205,6 +205,19 @@ psql -c "INSERT INTO private_keys (id, uuid, name, description, private_key, is_
 echo "[setup] PrivateKey id=0 ensured for Coolify localhost server validation."
 
 
+# ── 7b. Disable Coolify's built-in proxy and sentinel ────────────────────────
+# HermitHost uses Traefik — Coolify's Caddy proxy (coolify-proxy) conflicts.
+# Setting proxy_type=NONE prevents Coolify from spawning coolify-proxy.
+echo "[setup] Disabling Coolify built-in proxy (HermitHost uses Traefik)..."
+psql -c "UPDATE servers SET proxy_type='NONE' WHERE uuid='$SERVER_UUID';" > /dev/null
+echo "[setup] Proxy type set to NONE."
+
+# coolify-sentinel is spawned by ServerManagerJob every ~60s when is_metrics_enabled
+# or is_server_api_enabled is true. Disable both to stop sentinel from being recreated.
+echo "[setup] Disabling Coolify sentinel (metrics + server API not needed)..."
+psql -c "UPDATE server_settings SET is_metrics_enabled=false, is_server_api_enabled=false WHERE server_id=(SELECT id FROM servers WHERE uuid='$SERVER_UUID');" > /dev/null
+echo "[setup] Sentinel disabled."
+
 # ── 8. Validate server ────────────────────────────────────────────────────────
 echo "[setup] Validating server (may take a few seconds)..."
 sleep 3

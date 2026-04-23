@@ -2,6 +2,8 @@ import type { PageLoad } from './$types';
 import type { Site, DnsRecord, Deploy } from '$lib/types';
 import { error } from '@sveltejs/kit';
 
+export const ssr = false;
+
 export const load: PageLoad = async ({ fetch, params }) => {
 	const siteRes = await fetch(`/api/sites/${params.slug}`);
 	if (siteRes.status === 404) {

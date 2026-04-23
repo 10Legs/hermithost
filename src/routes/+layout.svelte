@@ -1,7 +1,6 @@
 <script lang="ts">
 	import '../app.css';
 	import { page } from '$app/stores';
-	declare const __GIT_COMMIT__: string;
 </script>
 
 <div class="app-shell">
@@ -41,11 +40,10 @@
 				Health
 				<span class="badge-soon">soon</span>
 			</span>
-			<span class="nav-item nav-disabled">
-				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
-				Servers
-				<span class="badge-soon">soon</span>
-			</span>
+			<a href="/services" class="nav-item" class:active={$page.url.pathname.startsWith('/services')}>
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="4" rx="1"/><rect x="2" y="10" width="20" height="4" rx="1"/><rect x="2" y="17" width="20" height="4" rx="1"/></svg>
+				Services
+			</a>
 		</div>
 
 		<div class="sidebar-footer">
