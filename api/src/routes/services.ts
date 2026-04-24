@@ -126,6 +126,9 @@ function groupBySite(containers: DockerContainer[], liveAppIds: Set<string> | nu
     // coolify.resourceName is a display hint only — its absence does not mean abandoned.
     // When Coolify is unreachable (liveAppIds=null), skip cross-check to avoid false positives.
     const abandoned = liveAppIds !== null && !liveAppIds.has(appId);
+    if (abandoned && process.env.DEBUG_SERVICES === 'true') {
+      console.log(`[services:debug] marking abandoned: ${name} (appId=${appId}, inLiveList=${liveAppIds?.has(appId) ?? 'n/a'})`);
+    }
     if (!groups.has(slug)) {
       groups.set(slug, { id: slug, name: siteName, domain: extractDomain(c.Labels), abandoned, containers: [] });
     }
@@ -166,6 +169,16 @@ router.get('/', async (_req: Request, res: Response) => {
 
     // null = Coolify unreachable; skip UUID cross-check to avoid false positives
     const liveAppIds: Set<string> | null = coolifyApps ? new Set(coolifyApps.map(a => a.uuid)) : null;
+
+    if (process.env.DEBUG_SERVICES === 'true') {
+      console.log('[services:debug] liveAppIds:', liveAppIds ? [...liveAppIds] : null);
+      console.log('[services:debug] sites containers:', sitesRaw.map(c => ({
+        name: (c.Names[0] ?? '').replace(/^\//, ''),
+        appId: c.Labels['coolify.applicationId'] ?? '(none)',
+        resourceName: c.Labels['coolify.resourceName'] ?? '(none)',
+        project: c.Labels['com.docker.compose.project'] ?? '(none)',
+      })));
+    }
 
     const response: ServicesResponse = {
       stackGroups: groupStackContainers(stackRaw),
