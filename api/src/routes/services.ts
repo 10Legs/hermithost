@@ -119,10 +119,13 @@ function groupBySite(containers: DockerContainer[], liveAppIds: Set<string> | nu
 
     const slug = c.Labels['coolify.name'] ?? c.Id.slice(0, 12);
     const resourceName = c.Labels['coolify.resourceName'];
-    const appId = c.Labels['coolify.applicationId'];
+    // appId is guaranteed non-null — Docker sitesFilter requires coolify.applicationId
+    const appId = c.Labels['coolify.applicationId']!;
     const siteName = resourceName ?? slug;
-    // Abandoned: missing labels, OR (if Coolify is reachable) app not in live app list
-    const abandoned = !resourceName || !appId || (liveAppIds !== null && !liveAppIds.has(appId));
+    // Abandoned: app no longer exists in live Coolify app list.
+    // coolify.resourceName is a display hint only — its absence does not mean abandoned.
+    // When Coolify is unreachable (liveAppIds=null), skip cross-check to avoid false positives.
+    const abandoned = liveAppIds !== null && !liveAppIds.has(appId);
     if (!groups.has(slug)) {
       groups.set(slug, { id: slug, name: siteName, domain: extractDomain(c.Labels), abandoned, containers: [] });
     }
