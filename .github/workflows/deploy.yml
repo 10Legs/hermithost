@@ -12,19 +12,39 @@ concurrency:
 jobs:
   deploy:
     name: Deploy to Production
-    runs-on: self-hosted
+    runs-on: [self-hosted, hammer]
     environment: production
 
     env:
       COMPOSE_PROJECT: hermithost
-      # Path to the live stack on this machine — contains secrets not in Actions
+      # Path to the live stack on hammer — contains .env with secrets not in Actions
       # Override via GitHub Actions variable STACK_DIR if the path changes
-      STACK_DIR: ${{ vars.STACK_DIR || '/Users/rdemeritt/projects/ai/hermithost' }}
+      STACK_DIR: ${{ vars.STACK_DIR || '/Users/rdemeritt/projects/hermithost' }}
+
+    # All run: steps execute from STACK_DIR so relative volume paths resolve correctly
+    defaults:
+      run:
+        working-directory: ${{ vars.STACK_DIR || '/Users/rdemeritt/projects/hermithost' }}
 
     steps:
-      - uses: actions/checkout@v4
+      # ── Preflight ─────────────────────────────────────────────────────────────
+      - name: Preflight — verify .env exists
+        run: |
+          if [ ! -f .env ]; then
+            echo "ERROR: .env not found at $STACK_DIR"
+            echo "Run: cp .env.template .env and fill in ACME_EMAIL + NS_HOSTNAME"
+            exit 1
+          fi
+          echo "✓ .env found"
 
-      # ── Record current image IDs for rollback ─────────────────────────────
+      # ── Sync live stack to latest commit ──────────────────────────────────────
+      - name: Sync live stack to latest
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+          echo "✓ Live stack at $(git rev-parse --short HEAD)"
+
+      # ── Record current image IDs for rollback ─────────────────────────────────
       - name: Snapshot current image IDs
         id: snapshot
         run: |
@@ -43,39 +63,23 @@ jobs:
           echo "Current API image:      $API_IMG"
           echo "Current Frontend image: $FE_IMG"
 
-      # ── Build new images from checked-out source ──────────────────────────
+      # ── Build new images ───────────────────────────────────────────────────────
       # docker compose build tags images as {project}-{service} automatically.
-      # Using --no-cache on deploy ensures we pick up dependency updates.
+      # --no-cache ensures dependency updates are picked up on every deploy.
       - name: Build API image
-        run: |
-          docker compose \
-            -p $COMPOSE_PROJECT \
-            --env-file $STACK_DIR/.env \
-            build --no-cache api
+        run: docker compose -p $COMPOSE_PROJECT --env-file .env build --no-cache api
 
       - name: Build Frontend image
-        run: |
-          docker compose \
-            -p $COMPOSE_PROJECT \
-            --env-file $STACK_DIR/.env \
-            build --no-cache frontend
+        run: docker compose -p $COMPOSE_PROJECT --env-file .env build --no-cache frontend
 
-      # ── Hot-swap containers — infra (DB, Redis, Coolify) untouched ────────
+      # ── Hot-swap containers — infra (DB, Redis, Coolify) untouched ────────────
       - name: Deploy API
-        run: |
-          docker compose \
-            -p $COMPOSE_PROJECT \
-            --env-file $STACK_DIR/.env \
-            up -d --no-deps --no-build api
+        run: docker compose -p $COMPOSE_PROJECT --env-file .env up -d --no-deps --no-build api
 
       - name: Deploy Frontend
-        run: |
-          docker compose \
-            -p $COMPOSE_PROJECT \
-            --env-file $STACK_DIR/.env \
-            up -d --no-deps --no-build frontend
+        run: docker compose -p $COMPOSE_PROJECT --env-file .env up -d --no-deps --no-build frontend
 
-      # ── Health checks (30s window, 2s interval) ───────────────────────────
+      # ── Health checks (30s window, 2s interval) ────────────────────────────────
       - name: Health check — API
         run: |
           for i in $(seq 1 15); do
@@ -89,7 +93,7 @@ jobs:
           echo "✗ API health check failed after 30s"
           exit 1
 
-      - name: Health check — Frontend
+      - name: Health check — Frontend container
         run: |
           for i in $(seq 1 15); do
             if curl -sf http://localhost:3000 > /dev/null; then
@@ -102,7 +106,20 @@ jobs:
           echo "✗ Frontend health check failed after 30s"
           exit 1
 
-      # ── Rollback: restore previous image IDs on any failure ──────────────
+      - name: Health check — Management UI (via Traefik :9080)
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:9080 > /dev/null; then
+              echo "✓ Management UI reachable via Traefik (attempt $i)"
+              exit 0
+            fi
+            echo "  waiting... ($i/15)"
+            sleep 2
+          done
+          echo "✗ Management UI health check failed after 30s"
+          exit 1
+
+      # ── Rollback: restore previous image IDs on any failure ───────────────────
       - name: Rollback
         if: failure() && steps.snapshot.outputs.api_image != ''
         run: |
@@ -112,21 +129,15 @@ jobs:
 
           if [ -n "$API_IMG" ]; then
             docker tag "$API_IMG" hermithost-api:rollback
-            docker compose \
-              -p $COMPOSE_PROJECT \
-              --env-file $STACK_DIR/.env \
-              up -d --no-deps --no-build api
+            docker compose -p $COMPOSE_PROJECT --env-file .env up -d --no-deps --no-build api
           fi
           if [ -n "$FE_IMG" ]; then
             docker tag "$FE_IMG" hermithost-frontend:rollback
-            docker compose \
-              -p $COMPOSE_PROJECT \
-              --env-file $STACK_DIR/.env \
-              up -d --no-deps --no-build frontend
+            docker compose -p $COMPOSE_PROJECT --env-file .env up -d --no-deps --no-build frontend
           fi
           echo "Rollback complete — verify stack manually"
 
-      # ── Prune dangling images left by old builds ──────────────────────────
+      # ── Prune dangling images left by old builds ──────────────────────────────
       - name: Prune dangling images
         if: success()
         run: docker image prune -f
