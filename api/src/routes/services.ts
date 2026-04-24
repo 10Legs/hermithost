@@ -168,7 +168,39 @@ router.get('/', async (_req: Request, res: Response) => {
     ]);
 
     // null = Coolify unreachable; skip UUID cross-check to avoid false positives
-    const liveAppIds: Set<string> | null = coolifyApps ? new Set(coolifyApps.map(a => a.uuid)) : null;
+    let liveAppIds: Set<string> | null = coolifyApps ? new Set(coolifyApps.map(a => a.uuid)) : null;
+
+    // listApplications() may miss apps due to API token scope or other listing issues.
+    // For any container UUID not found in the bulk list, individually verify via getApplication().
+    // Only a genuine 404 from Coolify confirms the app is truly gone.
+    if (liveAppIds !== null && coolify) {
+      const containerAppIds = [...new Set(
+        sitesRaw
+          .map(c => c.Labels['coolify.applicationId'])
+          .filter((id): id is string => Boolean(id))
+      )];
+      const unverified = containerAppIds.filter(id => !liveAppIds!.has(id));
+      if (unverified.length > 0) {
+        await Promise.all(unverified.map(async id => {
+          try {
+            await coolify.getApplication(id);
+            liveAppIds!.add(id); // confirmed live — not abandoned
+          } catch {
+            // 404 or error → stays absent, will be marked abandoned
+          }
+        }));
+      }
+    }
+
+    if (process.env.DEBUG_SERVICES === 'true') {
+      console.log('[services:debug] liveAppIds:', liveAppIds ? [...liveAppIds] : null);
+      console.log('[services:debug] sites containers:', sitesRaw.map(c => ({
+        name: (c.Names[0] ?? '').replace(/^\//, ''),
+        appId: c.Labels['coolify.applicationId'] ?? '(none)',
+        resourceName: c.Labels['coolify.resourceName'] ?? '(none)',
+        project: c.Labels['com.docker.compose.project'] ?? '(none)',
+      })));
+    }
 
     if (process.env.DEBUG_SERVICES === 'true') {
       console.log('[services:debug] liveAppIds:', liveAppIds ? [...liveAppIds] : null);
