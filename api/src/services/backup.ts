@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import { createCoolifyClient } from './coolify';
 import { createTechnitiumClient } from './technitium';
+import { createDnsProvider } from './dns';
 import { embedPatInRepoUrl, linkGithubKey } from '../routes/sites';
 import { readNsHostname, readNsServerIp, readNetworkMode } from '../routes/config';
 
@@ -18,7 +19,17 @@ export interface BackupSite {
   deploy_token?: string;
 }
 
+// v2 schema: provider-neutral normalized record
 export interface BackupDnsRecord {
+  name: string;
+  type: string;
+  ttl: number;
+  value: string;
+  priority?: number;
+}
+
+// v1 schema (legacy): Technitium-specific rData bag
+interface BackupDnsRecordV1 {
   name: string;
   type: string;
   ttl: number;
@@ -32,7 +43,7 @@ export interface BackupDnsZone {
 }
 
 export interface BackupFile {
-  version: 1;
+  version: 1 | 2;
   exported_at: string;
   sites: BackupSite[];
   dns_zones: BackupDnsZone[];
@@ -105,9 +116,61 @@ export interface ExportFilter {
   zones?: string[];   // same semantics
 }
 
+// ── v1 migration helpers ──────────────────────────────────────────────────────
+// Convert a Technitium-format v1 record (rData bag) to normalized v2 format.
+
+function normalizeV1Name(recordName: string, zoneName: string): string {
+  if (recordName === zoneName) return '@';
+  const suffix = `.${zoneName}`;
+  if (recordName.endsWith(suffix)) {
+    return recordName.slice(0, -suffix.length);
+  }
+  return recordName;
+}
+
+function extractV1Value(rData: Record<string, unknown>, type: string): string {
+  switch (type) {
+    case 'A':
+    case 'AAAA':   return String(rData.ipAddress ?? '');
+    case 'CNAME':  return String(rData.cname ?? '');
+    case 'MX':     return String(rData.exchange ?? '');
+    case 'TXT':    return String(rData.text ?? '');
+    case 'NS':     return String(rData.nameServer ?? '');
+    case 'SRV':    return String(rData.target ?? '');
+    case 'SOA':    return String(rData.primaryNameServer ?? '');
+    case 'CAA':    return rData.value !== undefined
+                     ? String(rData.value)
+                     : `${rData.flags ?? 0} ${rData.tag ?? ''} ""`;
+    case 'PTR':    return String(rData.ptrdname ?? '');
+    default:       return '';
+  }
+}
+
+function extractV1Priority(rData: Record<string, unknown>, type: string): number | undefined {
+  if (type === 'MX')  return rData.preference as number | undefined;
+  if (type === 'SRV') return rData.priority   as number | undefined;
+  return undefined;
+}
+
+function migrateV1Zone(zone: { name: string; type: string; records: BackupDnsRecordV1[] }): BackupDnsZone {
+  return {
+    name: zone.name,
+    type: zone.type,
+    records: zone.records.map(r => {
+      const name     = normalizeV1Name(r.name, zone.name);
+      const value    = extractV1Value(r.rData, r.type);
+      const priority = extractV1Priority(r.rData, r.type);
+      const out: BackupDnsRecord = { name, type: r.type, ttl: r.ttl, value };
+      if (priority !== undefined) out.priority = priority;
+      return out;
+    }),
+  };
+}
+
+// ── Export ────────────────────────────────────────────────────────────────────
+
 export async function exportBackup(filter?: ExportFilter): Promise<BackupFile> {
   const coolify = createCoolifyClient();
-  const technitium = createTechnitiumClient();
 
   let sites: BackupSite[] = [];
   if (coolify) {
@@ -147,34 +210,38 @@ export async function exportBackup(filter?: ExportFilter): Promise<BackupFile> {
   }
 
   const dns_zones: BackupDnsZone[] = [];
-  // Skip Technitium calls entirely when zones filter is an empty array
   const skipZones = Array.isArray(filter?.zones) && filter!.zones.length === 0;
-  if (technitium && !skipZones) {
-    const zones = await technitium.listZones();
-    const allowedZones = Array.isArray(filter?.zones) ? new Set(filter!.zones) : null;
-    for (const zone of zones.filter(z => !z.internal)) {
-      if (allowedZones && !allowedZones.has(zone.name)) continue;
-      const result = await technitium.getRecords(zone.name).catch(() => null);
-      dns_zones.push({
-        name: zone.name,
-        type: zone.type,
-        records: result?.records.map(r => ({
-          name: r.name,
-          type: r.type,
-          ttl: r.ttl,
-          rData: r.rData as Record<string, unknown>,
-        })) ?? [],
-      });
-    }
+  if (!skipZones) {
+    try {
+      const provider = createDnsProvider();
+      const zones = await provider.listZones();
+      const allowedZones = Array.isArray(filter?.zones) ? new Set(filter!.zones) : null;
+      for (const zone of zones) {
+        if (zone.internal) continue;
+        if (allowedZones && !allowedZones.has(zone.name)) continue;
+        const records = await provider.getRecords(zone.name).catch(() => []);
+        dns_zones.push({
+          name: zone.name,
+          type: 'Primary',
+          records: records.map(r => {
+            const out: BackupDnsRecord = { name: r.name, type: r.type, ttl: r.ttl, value: r.value };
+            if (r.priority !== undefined) out.priority = r.priority;
+            return out;
+          }),
+        });
+      }
+    } catch { /* provider not configured — export sites-only */ }
   }
 
   return {
-    version: 1,
+    version: 2,
     exported_at: new Date().toISOString(),
     sites,
     dns_zones,
   };
 }
+
+// ── Validate ──────────────────────────────────────────────────────────────────
 
 export async function validateBackup(data: unknown): Promise<ValidationResult> {
   const errors: string[] = [];
@@ -186,11 +253,12 @@ export async function validateBackup(data: unknown): Promise<ValidationResult> {
   }
 
   const b = data as Record<string, unknown>;
-  if (b.version !== 1) errors.push('version must be 1');
+  if (b.version !== 1 && b.version !== 2) errors.push('version must be 1 or 2');
   if (!Array.isArray(b.sites)) errors.push('sites must be an array');
   if (!Array.isArray(b.dns_zones)) errors.push('dns_zones must be an array');
   if (errors.length) return { valid: false, errors, warnings, summary: empty };
 
+  const isV1 = b.version === 1;
   const sites = b.sites as Record<string, unknown>[];
   const dns_zones = b.dns_zones as Record<string, unknown>[];
 
@@ -201,7 +269,6 @@ export async function validateBackup(data: unknown): Promise<ValidationResult> {
     if (!s.domain) {
       errors.push(`${p}: domain is required`);
     } else {
-      // Validate FQDN format — strip protocol first if present
       const bare = (s.domain as string).replace(/^https?:\/\//, '').replace(/\/.*$/, '');
       if (!FQDN_RE.test(bare)) {
         errors.push(`${p}: domain '${bare}' is not a valid FQDN`);
@@ -228,7 +295,11 @@ export async function validateBackup(data: unknown): Promise<ValidationResult> {
       if (!r.name) errors.push(`${rp}: name is required`);
       if (!r.type) errors.push(`${rp}: type is required`);
       if (r.ttl === undefined || r.ttl === null) errors.push(`${rp}: ttl is required`);
-      if (!r.rData) errors.push(`${rp}: rData is required`);
+      if (isV1) {
+        if (!r.rData) errors.push(`${rp}: rData is required`);
+      } else {
+        if (r.value === undefined || r.value === null) errors.push(`${rp}: value is required`);
+      }
       if (r.type && !KNOWN_RECORD_TYPES.has(r.type as string)) {
         warnings.push(`${rp}: unknown record type '${r.type}'`);
       }
@@ -240,7 +311,6 @@ export async function validateBackup(data: unknown): Promise<ValidationResult> {
 
   // Warn on live conflicts
   const coolify = createCoolifyClient();
-  const technitium = createTechnitiumClient();
 
   if (coolify) {
     try {
@@ -254,20 +324,21 @@ export async function validateBackup(data: unknown): Promise<ValidationResult> {
     } catch { /* non-fatal */ }
   }
 
-  if (technitium) {
-    try {
-      const liveZones = await technitium.listZones();
-      const liveNames = new Set(liveZones.map(z => z.name));
-      for (const z of dns_zones) {
-        if (liveNames.has(z.name as string)) {
-          warnings.push(`DNS zone '${z.name}' already exists — records will be merged`);
-        }
+  try {
+    const provider = createDnsProvider();
+    const liveZones = await provider.listZones();
+    const liveNames = new Set(liveZones.map(z => z.name));
+    for (const z of dns_zones) {
+      if (liveNames.has(z.name as string)) {
+        warnings.push(`DNS zone '${z.name}' already exists — records will be merged`);
       }
-    } catch { /* non-fatal */ }
-  }
+    }
+  } catch { /* provider not configured — skip DNS conflict check */ }
 
   return { valid: true, errors: [], warnings, summary };
 }
+
+// ── Import ────────────────────────────────────────────────────────────────────
 
 export async function importBackup(data: BackupFile): Promise<ImportResult> {
   const result: ImportResult = {
@@ -276,7 +347,6 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
   };
 
   const coolify = createCoolifyClient();
-  const technitium = createTechnitiumClient();
 
   if (coolify) {
     const liveSites = await coolify.listApplications().catch(() => []);
@@ -287,12 +357,10 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
     let destination_uuid = '';
     try { destination_uuid = readFileSync('/coolify-api-token/destination_uuid', 'utf8').trim(); } catch { /* ok */ }
 
-    // Resolve project_uuid — handle race where two imports both try to create the project
     const projects = await coolify.getProjects().catch(() => []);
     let project_uuid = projects[0]?.uuid ?? '';
     if (!project_uuid) {
       const p = await coolify.createProject('hermithost-sites').catch(async (err: Error) => {
-        // If creation raced, fetch again
         if (err.message.toLowerCase().includes('already exists')) {
           const retry = await coolify.getProjects().catch(() => []);
           return retry[0] ?? null;
@@ -315,9 +383,6 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
         const resolvedRepo = site.deploy_auth === 'pat' && site.deploy_token
           ? embedPatInRepoUrl(site.git_repository, site.deploy_token)
           : site.git_repository;
-        // Note: Coolify's type field refers to repo auth method, not visibility.
-        // 'public' = PAT/no-key auth, 'private' = SSH key auth. Both use the same
-        // /applications/public endpoint in our CoolifyClient.
         const app = await coolify.createApplication({
           type: site.deploy_auth === 'pat' ? 'public' : 'private',
           name: site.name,
@@ -340,7 +405,6 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
           await coolify.updateApplication(app.uuid, { domains: coolifyDomain, force_domain_override: true }).catch(() => {});
           const dnsErr = await provisionSiteDns(site.domain);
           if (dnsErr) {
-            // Site created but DNS failed — report with warning suffix so user knows
             result.sites.created.push(`${site.name} [DNS provision failed: ${dnsErr}]`);
             continue;
           }
@@ -352,56 +416,80 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
     }
   }
 
-  if (technitium) {
-    for (const zone of data.dns_zones) {
+  // Normalize zones: migrate v1 rData → v2 normalized records
+  const zones: BackupDnsZone[] = data.version === 1
+    ? (data.dns_zones as unknown as Array<{ name: string; type: string; records: BackupDnsRecordV1[] }>).map(migrateV1Zone)
+    : data.dns_zones;
+
+  try {
+    const provider = createDnsProvider();
+
+    for (const zone of zones) {
       try {
-        await technitium.createZone(zone.name, zone.type).catch((err: Error) => {
-          if (!err.message.toLowerCase().includes('already exists')) throw err;
-        });
-      } catch (err) {
-        result.dns.failed.push(`zone ${zone.name}: ${(err as Error).message}`);
-        continue;
+        await provider.createZone(zone.name);
+      } catch {
+        // Zone may already exist — provider error messages vary. Verify by listing.
+        const allZones = await provider.listZones().catch(() => []);
+        if (!allZones.some(z => z.name === zone.name)) {
+          result.dns.failed.push(`zone ${zone.name}: zone not found and could not be created`);
+          continue;
+        }
+        // Zone exists — proceed with record import
       }
 
+      // Fetch existing records once per zone — used for SOA check and duplicate detection
+      const existing = await provider.getRecords(zone.name).catch(() => []);
+      const existingSoa = existing.some(r => r.type === 'SOA');
+
       for (const record of zone.records) {
+        // SOA: skip if provider already auto-provisioned one
+        if (record.type === 'SOA' && existingSoa) {
+          result.dns.created.push(`${zone.name} SOA ${record.name} [skipped — auto-provisioned]`);
+          continue;
+        }
+
         try {
-          const params = new URLSearchParams();
-          params.set('type', record.type);
-          params.set('ttl', String(record.ttl));
-          for (const [key, value] of Object.entries(record.rData)) {
-            if (value !== undefined && value !== null) {
-              params.set(key, String(value));
-            }
-          }
-          if (record.type === 'SOA') {
-            await technitium.updateRecord(zone.name, params);
-            result.dns.created.push(`${zone.name} ${record.type} ${record.name}`);
-          } else {
-            let alreadyExists = false;
-            await technitium.addRecord(zone.name, params).catch((err: Error) => {
-              const msg = err.message.toLowerCase();
-              if (msg.includes('already exists') || msg.includes('duplicate')) {
-                alreadyExists = true;
-              } else {
-                throw err;
-              }
-            });
-            if (alreadyExists) {
-              try {
-                await technitium.deleteRecord(zone.name, params);
-                await technitium.addRecord(zone.name, params);
-                result.dns.created.push(`${zone.name} ${record.type} ${record.name} [replaced]`);
-              } catch (replaceErr) {
-                result.dns.failed.push(`${zone.name} ${record.type} ${record.name}: replace failed — ${(replaceErr as Error).message}`);
-              }
+          await provider.addRecord(zone.name, {
+            type: record.type as import('../types').DnsRecordType,
+            name: record.name,
+            value: record.value,
+            ttl: record.ttl,
+            ...(record.priority !== undefined ? { priority: record.priority } : {}),
+          });
+          result.dns.created.push(`${zone.name} ${record.type} ${record.name}`);
+        } catch {
+          // Duplicate detection: re-fetch and look for a matching record
+          try {
+            const current = await provider.getRecords(zone.name).catch(() => []);
+            const dup = current.find(r =>
+              r.type === record.type &&
+              r.name === record.name &&
+              r.value === record.value
+            );
+            if (dup) {
+              await provider.deleteRecord(zone.name, dup.id);
+              await provider.addRecord(zone.name, {
+                type: record.type as import('../types').DnsRecordType,
+                name: record.name,
+                value: record.value,
+                ttl: record.ttl,
+                ...(record.priority !== undefined ? { priority: record.priority } : {}),
+              });
+              result.dns.created.push(`${zone.name} ${record.type} ${record.name} [replaced]`);
             } else {
-              result.dns.created.push(`${zone.name} ${record.type} ${record.name}`);
+              result.dns.failed.push(`${zone.name} ${record.type} ${record.name}: add failed — no duplicate found`);
             }
+          } catch (replaceErr) {
+            result.dns.failed.push(`${zone.name} ${record.type} ${record.name}: ${(replaceErr as Error).message}`);
           }
-        } catch (err) {
-          result.dns.failed.push(`${zone.name} ${record.type} ${record.name}: ${(err as Error).message}`);
         }
       }
+    }
+  } catch (err) {
+    // Provider not configured — DNS import skipped
+    const msg = (err as Error).message;
+    for (const zone of zones) {
+      result.dns.failed.push(`zone ${zone.name}: DNS provider error — ${msg}`);
     }
   }
 
