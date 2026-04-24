@@ -10,7 +10,7 @@
 				<span class="logo-icon">⬡</span>
 				<span class="logo-text">HermitHost</span>
 			</div>
-			<div class="logo-sub">v0.1.0 <span class="logo-commit">· {__GIT_COMMIT__}</span></div>
+			<div class="logo-sub">v0.2.0 <span class="logo-commit">· {__GIT_COMMIT__}</span></div>
 		</div>
 
 		<div class="nav-section">
