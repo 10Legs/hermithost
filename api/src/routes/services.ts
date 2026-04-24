@@ -85,30 +85,46 @@ function groupStackContainers(containers: DockerContainer[]): ServiceGroup[] {
   return Array.from(groups.values()).filter(g => g.containers.length > 0);
 }
 
+// Known Coolify infrastructure container names — spawned by Coolify's management
+// process (not via docker compose) so they lack com.docker.compose.project=coolify.
+// They carry coolify.managed=true but are not user-deployed applications.
+const COOLIFY_INFRA_NAMES = new Set([
+  'coolify-proxy',
+  'coolify-sentinel',
+  'coolify-server-setup',
+]);
+
 // ── Site grouping ─────────────────────────────────────────────────────────────
 // A site group is "abandoned" if:
 //   - container has no coolify.applicationId label, OR
 //   - coolify.resourceName is absent, OR
 //   - the applicationId is not found in the live Coolify application list
 //     (i.e. the app was deleted in Coolify but the container was not cleaned up)
-// Containers that belong to the hermithost compose stack are excluded — they appear
-// in Stack Services already and are Coolify infrastructure, not deployed user sites.
+//
+// Filtering strategy:
+//   - Docker query uses coolify.applicationId label — only deployed app containers
+//     carry this label, excluding infra containers (proxy, sentinel) by default.
+//   - Belt-and-suspenders: also exclude by compose project and known infra names
+//     in case labels vary across Coolify versions.
 function groupBySite(containers: DockerContainer[], liveAppIds: Set<string> | null): ServiceGroup[] {
   const groups = new Map<string, ServiceGroup>();
   for (const c of containers) {
-    // Skip hermithost stack containers — they're Coolify infra, not user sites
+    // Skip hermithost stack containers — appear in Stack Services already
     if (c.Labels['com.docker.compose.project'] === 'hermithost') continue;
-    // Skip Coolify's own infrastructure containers (proxy, sentinel, etc.)
+    // Skip Coolify's own compose-managed infrastructure
     if (c.Labels['com.docker.compose.project'] === 'coolify') continue;
+    // Skip known Coolify infra containers spawned outside compose
+    const name = (c.Names[0] ?? '').replace(/^\//, '');
+    if (COOLIFY_INFRA_NAMES.has(name)) continue;
 
     const slug = c.Labels['coolify.name'] ?? c.Id.slice(0, 12);
     const resourceName = c.Labels['coolify.resourceName'];
     const appId = c.Labels['coolify.applicationId'];
-    const name = resourceName ?? slug;
+    const siteName = resourceName ?? slug;
     // Abandoned: missing labels, OR (if Coolify is reachable) app not in live app list
     const abandoned = !resourceName || !appId || (liveAppIds !== null && !liveAppIds.has(appId));
     if (!groups.has(slug)) {
-      groups.set(slug, { id: slug, name, domain: extractDomain(c.Labels), abandoned, containers: [] });
+      groups.set(slug, { id: slug, name: siteName, domain: extractDomain(c.Labels), abandoned, containers: [] });
     }
     groups.get(slug)!.containers.push(mapContainer(c, 'deployed-sites'));
   }
@@ -131,7 +147,10 @@ function readAndClearRestoreEvent(): RestoreEvent | null {
 router.get('/', async (_req: Request, res: Response) => {
   try {
     const stackFilter = encodeURIComponent(JSON.stringify({ label: ['com.docker.compose.project=hermithost'] }));
-    const sitesFilter = encodeURIComponent(JSON.stringify({ label: ['coolify.managed=true'] }));
+    // Filter by coolify.applicationId — only deployed app containers carry this label.
+    // Infrastructure containers (coolify-proxy, coolify-sentinel) do not, so they're
+    // excluded at the Docker API level before any application-level filtering.
+    const sitesFilter = encodeURIComponent(JSON.stringify({ label: ['coolify.applicationId'] }));
 
     // Fetch Docker containers and live Coolify app list in parallel.
     // If Coolify is unreachable, liveAppIds is null — fall back to label-only detection.
