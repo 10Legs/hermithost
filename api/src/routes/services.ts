@@ -123,11 +123,12 @@ function groupBySite(containers: DockerContainer[], liveAppIds: Set<string> | nu
     const appId = c.Labels['coolify.applicationId']!;
     const siteName = resourceName ?? slug;
     // Abandoned: app no longer exists in live Coolify app list.
-    // coolify.resourceName is a display hint only — its absence does not mean abandoned.
+    // Use coolify.name (UUID slug) for the check — same key as site URLs and getApplication().
+    // coolify.applicationId may contain a numeric DB id, not the UUID, causing false positives.
     // When Coolify is unreachable (liveAppIds=null), skip cross-check to avoid false positives.
-    const abandoned = liveAppIds !== null && !liveAppIds.has(appId);
+    const abandoned = liveAppIds !== null && !liveAppIds.has(slug);
     if (abandoned && process.env.DEBUG_SERVICES === 'true') {
-      console.log(`[services:debug] marking abandoned: ${name} (appId=${appId}, inLiveList=${liveAppIds?.has(appId) ?? 'n/a'})`);
+      console.log(`[services:debug] marking abandoned: ${name} (slug=${slug}, appId=${appId}, inLiveList=${liveAppIds?.has(slug) ?? 'n/a'})`);
     }
     if (!groups.has(slug)) {
       groups.set(slug, { id: slug, name: siteName, domain: extractDomain(c.Labels), abandoned, containers: [] });
@@ -172,14 +173,15 @@ router.get('/', async (_req: Request, res: Response) => {
 
     // listApplications() may miss apps due to API token scope or other listing issues.
     // For any container UUID not found in the bulk list, individually verify via getApplication().
+    // Use coolify.name (the UUID slug) — same key used in site URLs and getApplication() calls.
     // Only a genuine 404 from Coolify confirms the app is truly gone.
     if (liveAppIds !== null && coolify) {
-      const containerAppIds = [...new Set(
+      const containerUuids = [...new Set(
         sitesRaw
-          .map(c => c.Labels['coolify.applicationId'])
+          .map(c => c.Labels['coolify.name'])
           .filter((id): id is string => Boolean(id))
       )];
-      const unverified = containerAppIds.filter(id => !liveAppIds!.has(id));
+      const unverified = containerUuids.filter(id => !liveAppIds!.has(id));
       if (unverified.length > 0) {
         await Promise.all(unverified.map(async id => {
           try {
