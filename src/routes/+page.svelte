@@ -334,9 +334,10 @@
 <!-- Add Site Modal -->
 {#if showAddSite}
 	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-	<div class="modal-backdrop" on:click={closeAddSite} role="presentation">
-		<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-		<div class="modal" on:click|stopPropagation role="dialog" aria-modal="true" aria-labelledby="add-site-title">
+	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+	<div class="modal-backdrop" role="presentation">
+		<div class="modal-outside" on:click={closeAddSite} role="presentation"></div>
+		<div class="modal" role="dialog" aria-modal="true" aria-labelledby="add-site-title">
 			<div class="modal-header">
 				<h2 class="modal-title" id="add-site-title">Add Site</h2>
 				<button class="modal-close" on:click={closeAddSite} aria-label="Close">✕</button>
@@ -653,15 +654,26 @@
 	.modal-backdrop {
 		position: fixed;
 		inset: 0;
-		background: rgba(0, 0, 0, 0.7);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		z-index: 100;
 		padding: 24px;
+		pointer-events: none;
+	}
+
+	.modal-outside {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.7);
+		pointer-events: auto;
+		cursor: default;
 	}
 
 	.modal {
+		position: relative;
+		z-index: 1;
+		pointer-events: auto;
 		background: var(--bg-surface);
 		border: 1px solid var(--border-bright);
 		border-radius: 10px;
