@@ -97,6 +97,7 @@ export interface Site {
 	repository: string;
 	server: string;
 	deploy_auth: 'ssh_key' | 'pat';
+	branch: string;
 	build_pack: string;
 	http: HttpStatus;
 	ssl: SslStatus;

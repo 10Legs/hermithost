@@ -185,6 +185,7 @@ export function mapSite(
     description: app.description ?? '',
     repository: cleanUrl,
     deploy_auth: deployAuth,
+    branch: app.git_branch,
     build_pack: app.build_pack,
     server: serverName,
     overallStatus: mapAppStatus(app.status),
