@@ -88,7 +88,7 @@ Pull Request opened
             ↓ (all must pass before merge)
 
 Merge to main
-  → Deploy workflow (runs on runner labeled `hammer`)
+  → Deploy workflow (runs on runner labeled `production`)
        ├─ Preflight: verify .env exists on host
        ├─ Sync: git fetch + reset --hard origin/main
        ├─ Snapshot: record current image IDs for rollback
@@ -110,7 +110,7 @@ Merge to main
 
 **Automatic rollback.** Before building new images, the deploy snapshots the current image IDs. If any step after the snapshot fails, the previous images are tagged and re-deployed automatically.
 
-**Dedicated runner.** The deploy job requires a runner labeled `hammer` — the same host that runs the live stack. The CI job runs on any available self-hosted runner. Two runners in the pool keeps CI fast without serializing on the production host.
+**Dedicated runner.** The deploy job requires a runner labeled `production` — the same host that runs the live stack. The CI job runs on any available self-hosted runner. Two runners in the pool keeps CI fast without serializing on the production host.
 
 **Concurrency guard.** Only one deploy runs at a time (`cancel-in-progress: false`). If two merges land back-to-back, the second queues rather than cancels — no deploys are silently skipped.
 
@@ -121,9 +121,9 @@ Two self-hosted GitHub Actions runners are expected:
 | Runner | Label | Purpose |
 |--------|-------|---------|
 | Any host | `self-hosted` | CI checks on PRs |
-| Production host | `self-hosted, hammer` | Deploy to production |
+| Production host | `self-hosted, production` | Deploy to production |
 
-To add the `hammer` label: GitHub repo → Settings → Actions → Runners → click the production runner → edit labels → add `hammer`.
+To add the `production` label: GitHub repo → Settings → Actions → Runners → click the production runner → edit labels → add `production`.
 
 ### One-Time Bootstrap (Production Host)
 
@@ -131,7 +131,7 @@ These steps are done once on the production host and never need to be repeated:
 
 ```bash
 # 1. Clone the repo to the live stack directory
-git clone https://github.com/10Legs/hermithost.git /path/to/hermithost
+git clone https://github.com/your-org/hermithost.git /path/to/hermithost
 cd /path/to/hermithost
 
 # 2. Create .env from template and fill in secrets
@@ -172,7 +172,7 @@ Value: /your/custom/path/hermithost
 ### 1. Clone and setup
 
 ```bash
-git clone https://github.com/10Legs/hermithost.git
+git clone https://github.com/your-org/hermithost.git
 cd hermithost
 
 bash scripts/setup.sh
@@ -521,8 +521,8 @@ docker compose up
 
 ### Auto-deploy not triggering
 
-- Confirm the `hammer` runner is online: GitHub repo → Settings → Actions → Runners
-- Confirm the runner has the `hammer` label
+- Confirm the production runner is online: GitHub repo → Settings → Actions → Runners
+- Confirm the runner has the `production` label
 - Check deploy run logs: GitHub repo → Actions → Deploy
 
 ### Auto-deploy fails — .env not found
