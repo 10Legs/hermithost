@@ -72,6 +72,14 @@ const STACK_GROUP_MAP: { id: string; name: string; match: (svc: string) => boole
   { id: 'infrastructure', name: 'Infrastructure',   match: () => true }, // catch-all
 ];
 
+// One-shot init services — run at stack startup and exit normally.
+// Hide when exited so they don't appear in the UI or count toward degraded status.
+// Still visible while running (useful during startup diagnostics).
+const EPHEMERAL_STACK_SERVICES = new Set([
+  'coolify-server-setup',
+  'coolify-keys-init',
+]);
+
 function groupStackContainers(containers: DockerContainer[]): ServiceGroup[] {
   const groups = new Map<string, ServiceGroup>();
   for (const def of STACK_GROUP_MAP) {
@@ -79,6 +87,8 @@ function groupStackContainers(containers: DockerContainer[]): ServiceGroup[] {
   }
   for (const c of containers) {
     const svcName = c.Labels['com.docker.compose.service'] ?? '';
+    // Skip exited ephemeral init containers — normal exit, not a failure
+    if (EPHEMERAL_STACK_SERVICES.has(svcName) && c.State.toLowerCase() === 'exited') continue;
     const def = STACK_GROUP_MAP.find(d => d.match(svcName)) ?? STACK_GROUP_MAP[STACK_GROUP_MAP.length - 1];
     groups.get(def.id)!.containers.push(mapContainer(c, 'hermithost-stack'));
   }
