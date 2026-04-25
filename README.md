@@ -2,48 +2,55 @@
 
 A self-hosted web platform dashboard for managing deployed sites, DNS records, and deployments. HermitHost wraps Coolify (deployments), Technitium or Cloudflare (DNS), and Traefik (reverse proxy + SSL) into a single unified dashboard with zero-config setup.
 
-**Status Dashboard** • **DNS Management** • **Deploy History** • **Health Monitoring** • **Backup & Restore** • **Auto SSL**
+**Status Dashboard** • **DNS Management** • **Deploy History** • **Health Monitoring** • **Services Pane** • **Backup & Restore** • **Auto SSL** • **Auto-Deploy CD**
 
 ---
 
 ## What is HermitHost?
 
-HermitHost is a lightweight platform dashboard that gives you visibility and control over all your deployed web applications in one place. Instead of logging into Coolify, Technitium, and Traefik separately, HermitHost surfaces everything in a single UI.
+HermitHost is a lightweight platform dashboard that gives you full visibility and control over all your deployed web applications in one place. Coolify, Technitium, and Traefik are infrastructure — HermitHost is the only interface you interact with.
 
 - **Monitor everything:** HTTP status, SSL certificate health, DNS resolution — live probes, 60s cache
 - **Manage DNS:** Use Technitium (internal/LAN) or Cloudflare (public authoritative DNS) — switchable from Settings
 - **Track deployments:** See deployment history and stream logs per site
+- **Services pane:** Real-time view of all Docker containers — stack services and deployed sites — with start/stop/restart controls
 - **Backup & restore:** Export/import your full hermithost configuration
 - **Auto SSL:** Traefik + Let's Encrypt — HTTPS with no manual certificate management
+- **Auto-deploy CD:** Push to `main` → GitHub Actions builds new images and hot-swaps containers on the production host with automatic rollback on failure
 - **One-command setup:** `bash scripts/setup.sh` prompts for two values and handles the rest
 
 ---
 
 ## Architecture
 
+### Request Flow
+
 ```
 Browser
-  ├─ LAN: http://<server-ip>:9080 (internal, no DNS required)
-  │
+  ├─ LAN: http://<server-ip>:9080  (admin entrypoint — no DNS required)
   └─ Named domain: https://hermithost.<your-domain>
-       ↓
-  Traefik (reverse proxy) :8080 / :8443
-    ├─ /api/* → Express API :3001
-    └─ /*     → SvelteKit Frontend :3000
          ↓
-    ┌──────────────────────────────────┐
-    │  Express API                      │
-    │  ├─ DnsProvider (abstraction)     │
-    │  │   ├─ TechnitiumProvider        │
-    │  │   └─ CloudflareProvider        │
-    │  ├─ Coolify (deployments)         │
-    │  ├─ Health probes (HTTP/SSL/DNS) │
-    │  ├─ Config API                    │
-    │  └─ Backup / restore              │
-    └──────────────────────────────────┘
-         ↓                    ↓
-    Coolify :8000        DNS Server
-    (PostgreSQL + Redis)  (Technitium :5380 OR Cloudflare API)
+    Traefik :9080 (admin) / :80 / :443
+      ├─ /api/* → Express API :3001
+      └─ /*     → SvelteKit Frontend :3000
+```
+
+### API Layer
+
+```
+Express API
+  ├─ /api/sites        — Site CRUD, health probes, deploy triggers
+  │     └─ Coolify API client (GET/POST/PATCH/DELETE /v1/applications)
+  ├─ /api/services     — Docker container monitoring (stack + deployed sites)
+  │     └─ Docker socket (/var/run/docker.sock)
+  ├─ /api/dns          — DNS record management
+  │     └─ DnsProvider (abstraction)
+  │           ├─ TechnitiumProvider → Technitium REST API :5380
+  │           └─ CloudflareProvider → Cloudflare API v4
+  ├─ /api/config       — Settings read/write
+  ├─ /api/backup       — Export / import / validate
+  ├─ /api/stats        — Live request stats (ingested from Traefik access logs)
+  └─ /api/health       — Stack health check
 ```
 
 ### Services
@@ -51,12 +58,104 @@ Browser
 | Service | Tech | Purpose |
 |---------|------|---------|
 | **Frontend** | SvelteKit + TypeScript | Dashboard UI |
-| **API** | Express.js + TypeScript | Aggregation layer — Coolify, DNS providers, probes |
-| **Traefik** | Traefik v3 | Reverse proxy, Let's Encrypt SSL |
-| **Coolify** | Coolify (Docker) | Deployment and app lifecycle management |
-| **DNS Provider** | Technitium DNS or Cloudflare API | DNS server with REST management (switchable) |
+| **API** | Express.js + TypeScript | Aggregation layer — Coolify, DNS, Docker, health probes |
+| **Traefik** | Traefik v3 | Reverse proxy, Let's Encrypt SSL, admin entrypoint |
+| **Coolify** | Coolify (Docker) | Deployment engine — not user-facing; HermitHost is the interface |
+| **DNS Provider** | Technitium DNS or Cloudflare API | DNS management (switchable) |
 | **PostgreSQL** | Postgres 15 | Coolify database |
 | **Redis** | Redis | Coolify queue and cache |
+
+### Design Principles
+
+- **HermitHost is the authority.** Coolify is a deployment engine accessed only via API — the Coolify UI is an escape hatch, not part of the normal workflow.
+- **Docker socket for container reality.** The Services pane reads directly from the Docker API to show actual container state — not what Coolify thinks is running.
+- **Infra is invisible.** One-shot init containers (`coolify-server-setup`, `coolify-keys-init`) and infrastructure containers (`coolify-proxy`, `coolify-sentinel`) are automatically filtered from the Services pane once they exit.
+
+---
+
+## CI/CD & Auto-Deploy
+
+HermitHost ships with a full GitHub Actions pipeline. Every push to `main` triggers a zero-downtime deploy to the production host.
+
+### Pipeline Overview
+
+```
+Pull Request opened
+  → CI workflow (runs on any self-hosted runner)
+       ├─ API: TypeScript typecheck + build
+       ├─ Frontend: TypeScript typecheck + svelte-check + build
+       └─ Docker: both images build cleanly
+            ↓ (all must pass before merge)
+
+Merge to main
+  → Deploy workflow (runs on runner labeled `production`)
+       ├─ Preflight: verify .env exists on host
+       ├─ Sync: git fetch + reset --hard origin/main
+       ├─ Snapshot: record current image IDs for rollback
+       ├─ Build API image    (docker compose build --no-cache api)
+       ├─ Build Frontend image
+       ├─ Deploy API         (hot-swap: --no-deps --no-build)
+       ├─ Deploy Frontend    (hot-swap: --no-deps --no-build)
+       ├─ Health check: GET http://localhost:9080/api/health  (30s window)
+       ├─ Health check: GET http://localhost:9080             (30s window)
+       ├─ [on failure] Rollback: restore previous image IDs
+       └─ [on success] Prune dangling images
+```
+
+### Key Design Decisions
+
+**Hot-swap, not full restart.** `docker compose up -d --no-deps --no-build` replaces only the `api` and `frontend` containers. Coolify, PostgreSQL, Redis, Traefik, and Technitium are never touched during a deploy — zero disruption to running sites.
+
+**No workspace checkout.** The deploy job runs directly from `STACK_DIR` (the live stack on the host), not from a fresh `actions/checkout` workspace. This ensures relative volume mounts (`./data`, `./traefik/conf.d`) always resolve against the real live directory.
+
+**Automatic rollback.** Before building new images, the deploy snapshots the current image IDs. If any step after the snapshot fails, the previous images are tagged and re-deployed automatically.
+
+**Dedicated runner.** The deploy job requires a runner labeled `production` — the same host that runs the live stack. The CI job runs on any available self-hosted runner. Two runners in the pool keeps CI fast without serializing on the production host.
+
+**Concurrency guard.** Only one deploy runs at a time (`cancel-in-progress: false`). If two merges land back-to-back, the second queues rather than cancels — no deploys are silently skipped.
+
+### Runner Setup
+
+Two self-hosted GitHub Actions runners are expected:
+
+| Runner | Label | Purpose |
+|--------|-------|---------|
+| Any host | `self-hosted` | CI checks on PRs |
+| Production host | `self-hosted, production` | Deploy to production |
+
+To add the `production` label: GitHub repo → Settings → Actions → Runners → click the production runner → edit labels → add `production`.
+
+### One-Time Bootstrap (Production Host)
+
+These steps are done once on the production host and never need to be repeated:
+
+```bash
+# 1. Clone the repo to the live stack directory
+git clone https://github.com/your-org/hermithost.git /path/to/hermithost
+cd /path/to/hermithost
+
+# 2. Create .env from template and fill in secrets
+cp .env.template .env
+# Edit .env — fill in ACME_EMAIL and NS_HOSTNAME at minimum
+# All other secrets are auto-generated by setup.sh
+
+bash scripts/setup.sh
+
+# 3. Start the stack
+bash scripts/start.sh
+```
+
+After this, every `git push origin main` deploys automatically.
+
+### Overriding the Stack Directory
+
+If your stack lives somewhere other than the default path, set a GitHub Actions variable:
+
+```
+Repository → Settings → Variables → Actions → New variable
+Name: STACK_DIR
+Value: /your/custom/path/hermithost
+```
 
 ---
 
@@ -73,7 +172,7 @@ Browser
 ### 1. Clone and setup
 
 ```bash
-git clone https://github.com/rdemeritt/hermithost.git
+git clone https://github.com/your-org/hermithost.git
 cd hermithost
 
 bash scripts/setup.sh
@@ -169,6 +268,14 @@ Real-time per-site probes run in parallel, cached 60 seconds:
 ### Deployment Management
 Trigger deploys, view deployment history, stream live deployment logs — all via the Coolify integration.
 
+### Services Pane
+Real-time view of every Docker container on the host, sourced directly from the Docker socket:
+
+- **Stack Services** — hermithost infrastructure containers grouped by function (HermitHost, Coolify, Infrastructure). Exited one-shot init containers are hidden automatically.
+- **Deployed Sites** — all user-deployed application containers grouped by site. Containers belonging to sites that no longer exist in Coolify are flagged as abandoned and can be force-deleted.
+- **Actions** — start, stop, and restart any container directly from the UI
+- **Shutdown** — gracefully stop all deployed site containers with a checkpoint, then stop the hermithost stack
+
 ### DNS Management
 Create, update, and delete DNS records via Technitium (internal/LAN) or Cloudflare (public authoritative DNS). Switch providers anytime from Settings → DNS Provider.
 
@@ -254,6 +361,16 @@ All endpoints are under `/api`.
 | `PUT` | `/api/sites/:slug/dns/:id` | Update DNS record |
 | `DELETE` | `/api/sites/:slug/dns/:id` | Delete DNS record |
 
+### Services (Docker)
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/services` | All containers — stack groups + site groups + restore event |
+| `POST` | `/api/services/:id/start` | Start container |
+| `POST` | `/api/services/:id/stop` | Stop container |
+| `POST` | `/api/services/:id/restart` | Restart container |
+| `DELETE` | `/api/services/:id` | Force-remove abandoned container |
+| `POST` | `/api/services/shutdown` | Checkpoint + graceful stack shutdown |
+
 ### Config & Backup
 | Method | Path | Description |
 |--------|------|-------------|
@@ -274,45 +391,59 @@ All endpoints are under `/api`.
 
 ```
 hermithost/
-├── api/                          # Express API
+├── .github/
+│   └── workflows/
+│       ├── ci.yml            # PR checks — typecheck, build, Docker image validation
+│       └── deploy.yml        # CD — push to main → hot-swap deploy on production host
+├── api/                      # Express API
 │   ├── src/
-│   │   ├── index.ts              # App setup + route registration
+│   │   ├── index.ts          # App setup + route registration
 │   │   ├── routes/
-│   │   │   ├── sites.ts          # Site CRUD, health probes, deployments
-│   │   │   ├── backup.ts         # Export / import / validate
-│   │   │   ├── config.ts         # Config read/write
-│   │   │   └── health.ts         # Health check
+│   │   │   ├── sites.ts      # Site CRUD, health probes, DNS provisioning, deployments
+│   │   │   ├── services.ts   # Docker container monitoring + container actions
+│   │   │   ├── backup.ts     # Export / import / validate
+│   │   │   ├── config.ts     # Config read/write
+│   │   │   ├── stats.ts      # Live request stats
+│   │   │   └── health.ts     # Health check
 │   │   ├── services/
-│   │   │   ├── coolify.ts        # Coolify API client
+│   │   │   ├── coolify.ts        # Coolify API client (typed)
+│   │   │   ├── docker.ts         # Docker socket HTTP client
 │   │   │   ├── healthProbe.ts    # HTTP/SSL/DNS probes
 │   │   │   ├── backup.ts         # Backup/restore logic
 │   │   │   ├── mapper.ts         # Coolify → hermithost type mapper
+│   │   │   ├── liveStats.ts      # Real-time stats aggregation
+│   │   │   ├── statsIngester.ts  # Traefik log ingestion
 │   │   │   └── dns/
 │   │   │       ├── DnsProvider.ts        # Interface (abstract)
 │   │   │       ├── TechnitiumProvider.ts # Technitium implementation
 │   │   │       ├── CloudflareProvider.ts # Cloudflare API v4 implementation
 │   │   │       └── index.ts              # Factory (reads DNS_PROVIDER setting)
-│   │   └── types.ts              # Shared API types
+│   │   └── types.ts          # Shared API types
 │   ├── package.json
 │   └── Dockerfile
-├── src/                          # SvelteKit frontend
+├── src/                      # SvelteKit frontend
 │   ├── routes/
 │   │   ├── +page.svelte          # Sites dashboard
+│   │   ├── +layout.svelte        # App shell + sidebar navigation
 │   │   ├── sites/[slug]/
 │   │   │   └── +page.svelte      # Site detail
+│   │   ├── services/
+│   │   │   └── +page.svelte      # Container management pane
+│   │   ├── dns/
+│   │   │   └── +page.svelte      # DNS management
 │   │   └── settings/
 │   │       └── +page.svelte      # Settings + backup + DNS provider UI
 │   └── lib/
 │       └── types.ts              # Frontend types
-├── traefik/                      # Traefik config
-│   └── conf.d/routes.yml         # Route rules
-├── docker/                       # Container entrypoint scripts
-├── scripts/                      # Setup and management scripts
-├── docker-compose.yml            # Full stack
-├── docker-compose.prod.yml       # Production overrides (ACME volumes)
-├── Dockerfile                    # SvelteKit multi-stage build
-├── vite.config.ts                # Dev proxy config
-├── .env.template                 # Environment template
+├── traefik/                  # Traefik config
+│   └── conf.d/routes.yml     # Route rules (HermitHost stack + per-site dynamic routes)
+├── docker/                   # Container entrypoint scripts
+├── scripts/                  # Setup and management scripts
+├── docker-compose.yml        # Full stack
+├── docker-compose.prod.yml   # Production overrides (ACME volumes)
+├── Dockerfile                # SvelteKit multi-stage build
+├── vite.config.ts            # Dev proxy config
+├── .env.template             # Environment template
 └── README.md
 ```
 
@@ -387,6 +518,16 @@ docker compose up
 - Verify the site domain is publicly resolvable
 - Confirm outbound HTTPS from the container isn't blocked
 - Test: `curl -I https://yourdomain.com`
+
+### Auto-deploy not triggering
+
+- Confirm the production runner is online: GitHub repo → Settings → Actions → Runners
+- Confirm the runner has the `production` label
+- Check deploy run logs: GitHub repo → Actions → Deploy
+
+### Auto-deploy fails — .env not found
+
+The deploy expects `.env` at `STACK_DIR` on the production host. Run `bash scripts/setup.sh` once on the host to create it.
 
 ### ISP blocks port 53 (DNS queries fail)
 
