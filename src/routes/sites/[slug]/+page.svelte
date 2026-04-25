@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import type { PageData } from './$types';
 	import { formatRelativeTime, formatDuration } from '$lib/data';
-	import type { DnsRecord, Deploy, Site } from '$lib/types';
+	import type { DnsRecord, Deploy, Site, EnvVar } from '$lib/types';
 
 	export let data: PageData;
 
@@ -10,7 +10,14 @@
 	$: dns = data.dns;
 	let deploys = data.deploys;
 
-	let activeTab: 'overview' | 'dns' | 'deployments' | 'settings' = 'overview';
+	let activeTab: 'overview' | 'dns' | 'deployments' | 'environment' | 'settings' = 'overview';
+
+	function setTab(tab: typeof activeTab): void {
+		activeTab = tab;
+		if (tab === 'environment' && envVars.length === 0 && !envLoading) {
+			loadEnvVars();
+		}
+	}
 
 	// Deploy button state
 	type DeployState = 'idle' | 'loading' | 'success' | 'error' | 'unavailable';
@@ -278,6 +285,112 @@
 		}
 	}
 
+	// ── Environment variables ──────────────────────────────────────────────────
+	let envVars: EnvVar[] = [];
+	let envLoading = false;
+	let envLoadError = '';
+
+	let showAddEnv = false;
+	let editingEnv: EnvVar | null = null;
+	let newEnv = { key: '', value: '', is_runtime: true, is_buildtime: false, is_shown_once: false };
+	let envFormSaving = false;
+	let envFormError = '';
+	let showDeleteEnvConfirm: string | null = null;
+	let deletingEnvUuid: string | null = null;
+	let deleteEnvError: string | null = null;
+
+	async function loadEnvVars(): Promise<void> {
+		envLoading = true;
+		envLoadError = '';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/envs`);
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				envLoadError = body.error ?? `Failed to load env vars (${res.status})`;
+				return;
+			}
+			envVars = await res.json();
+		} catch {
+			envLoadError = 'Network error — could not load env vars';
+		} finally {
+			envLoading = false;
+		}
+	}
+
+	function resetEnvForm(): void {
+		newEnv = { key: '', value: '', is_runtime: true, is_buildtime: false, is_shown_once: false };
+		editingEnv = null;
+		envFormError = '';
+		showAddEnv = false;
+	}
+
+	function startEditEnv(env: EnvVar): void {
+		editingEnv = env;
+		newEnv = {
+			key: env.key,
+			value: '',
+			is_runtime: env.is_runtime,
+			is_buildtime: env.is_buildtime,
+			is_shown_once: env.is_shown_once
+		};
+		showAddEnv = true;
+	}
+
+	async function saveEnv(): Promise<void> {
+		envFormSaving = true;
+		envFormError = '';
+		const isEditing = editingEnv !== null;
+		const url = isEditing
+			? `/api/sites/${site.slug}/envs/${editingEnv!.uuid}`
+			: `/api/sites/${site.slug}/envs`;
+		const method = isEditing ? 'PATCH' : 'POST';
+		const payload: Record<string, string | boolean> = {
+			key: newEnv.key,
+			is_runtime: newEnv.is_runtime,
+			is_buildtime: newEnv.is_buildtime
+		};
+		if (newEnv.value) payload.value = newEnv.value;
+		if (!isEditing) payload.is_shown_once = newEnv.is_shown_once;
+		try {
+			const res = await fetch(url, {
+				method,
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				envFormError = body.error ?? `Failed to save env var (${res.status})`;
+				envFormSaving = false;
+				return;
+			}
+			await loadEnvVars();
+			resetEnvForm();
+		} catch {
+			envFormError = 'Network error — could not save env var';
+		} finally {
+			envFormSaving = false;
+		}
+	}
+
+	async function deleteEnv(uuid: string): Promise<void> {
+		deletingEnvUuid = uuid;
+		deleteEnvError = null;
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/envs/${uuid}`, { method: 'DELETE' });
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				deleteEnvError = body.error ?? `Delete failed (${res.status})`;
+				deletingEnvUuid = null;
+				return;
+			}
+			await loadEnvVars();
+			showDeleteEnvConfirm = null;
+		} catch {
+			deleteEnvError = 'Network error — delete failed';
+			deletingEnvUuid = null;
+		}
+	}
+
 	function openLog(deploy: Deploy) {
 		logModal = deploy;
 	}
@@ -313,6 +426,9 @@
 			showDeleteSiteConfirm = false;
 			showAddDns = false;
 			editingRecord = null;
+			showAddEnv = false;
+			editingEnv = null;
+			showDeleteEnvConfirm = null;
 		}
 	}
 
@@ -587,10 +703,11 @@
 
 	<!-- Tabs -->
 	<div class="tabs">
-		<button class="tab" class:tab-active={activeTab === 'overview'} on:click={() => activeTab = 'overview'}>Overview</button>
-		<button class="tab" class:tab-active={activeTab === 'dns'} on:click={() => activeTab = 'dns'}>DNS Records <span class="tab-count">{dns.length}</span></button>
-		<button class="tab" class:tab-active={activeTab === 'deployments'} on:click={() => activeTab = 'deployments'}>Deployments <span class="tab-count">{deploys.length}</span></button>
-		<button class="tab" class:tab-active={activeTab === 'settings'} on:click={() => activeTab = 'settings'}>Settings</button>
+		<button class="tab" class:tab-active={activeTab === 'overview'} on:click={() => setTab('overview')}>Overview</button>
+		<button class="tab" class:tab-active={activeTab === 'dns'} on:click={() => setTab('dns')}>DNS Records <span class="tab-count">{dns.length}</span></button>
+		<button class="tab" class:tab-active={activeTab === 'deployments'} on:click={() => setTab('deployments')}>Deployments <span class="tab-count">{deploys.length}</span></button>
+		<button class="tab" class:tab-active={activeTab === 'environment'} on:click={() => setTab('environment')}>Environment <span class="tab-count">{envVars.length}</span></button>
+		<button class="tab" class:tab-active={activeTab === 'settings'} on:click={() => setTab('settings')}>Settings</button>
 	</div>
 
 	<!-- Overview Tab -->
@@ -1111,6 +1228,132 @@
 		</div>
 	{/if}
 
+	<!-- Environment Tab -->
+	{#if activeTab === 'environment'}
+		<div class="tab-content">
+			<div class="section-header">
+				<div>
+					<h2 class="section-title">Environment Variables</h2>
+					<p class="section-sub mono">{site.domain}</p>
+				</div>
+				<button
+					class="btn btn-primary btn-sm"
+					on:click={() => { if (showAddEnv) { resetEnvForm(); } else { showAddEnv = true; editingEnv = null; } }}
+				>
+					{showAddEnv ? 'Cancel' : '+ Add Variable'}
+				</button>
+			</div>
+
+			{#if showAddEnv}
+				<div class="add-record-form">
+					<div class="form-title">{editingEnv ? 'Edit Variable' : 'New Environment Variable'}</div>
+					<div class="form-row">
+						<div class="form-field">
+							<label for="env-key">Key</label>
+							<input id="env-key" bind:value={newEnv.key} placeholder="VARIABLE_NAME" class="input mono" />
+						</div>
+						<div class="form-field form-field-wide">
+							<label for="env-value">{editingEnv ? 'Value (leave blank to keep existing)' : 'Value'}</label>
+							{#if newEnv.is_shown_once}
+								<input id="env-value" bind:value={newEnv.value} placeholder={editingEnv ? '(unchanged)' : 'value'} class="input mono" type="password" />
+							{:else}
+								<input id="env-value" bind:value={newEnv.value} placeholder={editingEnv ? '(unchanged)' : 'value'} class="input mono" type="text" />
+							{/if}
+						</div>
+					</div>
+					<div class="form-row env-toggles">
+						<label class="env-toggle-label">
+							<input type="checkbox" bind:checked={newEnv.is_runtime} />
+							Runtime
+						</label>
+						<label class="env-toggle-label">
+							<input type="checkbox" bind:checked={newEnv.is_buildtime} />
+							Build time
+						</label>
+						{#if !editingEnv}
+							<label class="env-toggle-label">
+								<input type="checkbox" bind:checked={newEnv.is_shown_once} />
+								Sensitive (mask value)
+							</label>
+						{/if}
+					</div>
+					<div class="form-actions">
+						<button class="btn btn-primary btn-sm" disabled={envFormSaving || !newEnv.key.trim()} on:click={saveEnv}>
+							{envFormSaving ? 'Saving…' : editingEnv ? 'Update Variable' : 'Save Variable'}
+						</button>
+						<button class="btn btn-ghost btn-sm" on:click={resetEnvForm}>Cancel</button>
+						{#if envFormError}
+							<span class="text-danger">{envFormError}</span>
+						{/if}
+					</div>
+				</div>
+			{/if}
+
+			{#if envLoading}
+				<div class="dns-empty">
+					<p class="text-secondary">Loading…</p>
+				</div>
+			{:else if envLoadError}
+				<div class="dns-empty">
+					<p class="text-danger">{envLoadError}</p>
+					<button class="btn btn-ghost btn-sm" on:click={loadEnvVars}>Retry</button>
+				</div>
+			{:else if envVars.length === 0 && !showAddEnv}
+				<div class="dns-empty">
+					<p class="text-secondary">No environment variables yet.</p>
+					<button class="btn btn-ghost btn-sm" on:click={() => showAddEnv = true}>+ Add first variable</button>
+				</div>
+			{:else if envVars.length > 0}
+				<div class="table-wrapper">
+					<table class="dns-table">
+						<thead>
+							<tr>
+								<th>Key</th>
+								<th>Value</th>
+								<th>Type</th>
+								<th></th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each envVars as env}
+								<tr style={deletingEnvUuid === env.uuid ? 'opacity: 0.4' : ''}>
+									<td class="mono">{env.key}</td>
+									<td class="mono dns-value">{env.is_shown_once ? '••••••••' : env.value}</td>
+									<td>
+										{#if env.is_runtime}
+											<span class="env-badge env-badge-runtime">Runtime</span>
+										{/if}
+										{#if env.is_buildtime}
+											<span class="env-badge env-badge-build">Build</span>
+										{/if}
+									</td>
+									<td class="cell-actions">
+										{#if deletingEnvUuid === env.uuid}
+											<span class="text-secondary">Deleting…</span>
+										{:else if deleteEnvError && showDeleteEnvConfirm === env.uuid}
+											<span class="text-danger">{deleteEnvError} <button class="btn btn-ghost btn-xs" on:click={() => deleteEnv(env.uuid)}>Retry?</button></span>
+										{:else if showDeleteEnvConfirm === env.uuid}
+											<div class="delete-confirm">
+												<span class="text-danger">Delete {env.key}?</span>
+												<button class="btn btn-danger btn-xs" on:click={() => deleteEnv(env.uuid)}>Confirm delete</button>
+												<button class="btn btn-ghost btn-xs" on:click={() => { showDeleteEnvConfirm = null; deleteEnvError = null; }}>Cancel</button>
+											</div>
+										{:else}
+											<div class="row-actions">
+												<button class="btn btn-ghost btn-xs" on:click={() => startEditEnv(env)}>Edit</button>
+												<button class="btn btn-ghost btn-xs text-danger" on:click={() => { showDeleteEnvConfirm = env.uuid; deleteEnvError = null; }}>Delete</button>
+											</div>
+										{/if}
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{/if}
+		</div>
+	{/if}
+
 	<!-- Settings Tab -->
 	{#if activeTab === 'settings'}
 		<div class="tab-content">
@@ -1603,6 +1846,53 @@
 	.dns-type-ns { color: var(--text-secondary); }
 	.dns-type-srv { color: #e87a9a; border-color: rgba(232,122,154,0.3); background: rgba(232,122,154,0.08); }
 	.dns-type-caa { color: var(--accent-amber); border-color: rgba(212,168,67,0.3); background: rgba(212,168,67,0.08); }
+
+	/* Environment variable badges */
+	.env-badge {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		font-weight: 500;
+		padding: 2px 6px;
+		border-radius: 3px;
+		border: 1px solid transparent;
+		display: inline-block;
+		margin-right: 4px;
+	}
+
+	.env-badge-runtime {
+		color: #a8e6a3;
+		border-color: rgba(168,230,163,0.3);
+		background: rgba(168,230,163,0.08);
+	}
+
+	.env-badge-build {
+		color: #e8c87a;
+		border-color: rgba(232,200,122,0.3);
+		background: rgba(232,200,122,0.08);
+	}
+
+	.env-toggles {
+		display: flex;
+		gap: 20px;
+		align-items: center;
+		flex-wrap: wrap;
+	}
+
+	.env-toggle-label {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 13px;
+		color: var(--text-secondary);
+		cursor: pointer;
+		user-select: none;
+	}
+
+	.env-toggle-label input[type='checkbox'] {
+		accent-color: var(--accent-primary, #7ab5e8);
+		width: 14px;
+		height: 14px;
+	}
 
 	.row-actions {
 		display: flex;

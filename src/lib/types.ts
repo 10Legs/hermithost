@@ -80,6 +80,15 @@ export interface Deploy {
 	logLines: string[];
 }
 
+export interface EnvVar {
+	uuid: string;
+	key: string;
+	value: string;
+	is_shown_once: boolean;
+	is_runtime: boolean;
+	is_buildtime: boolean;
+}
+
 export interface Site {
 	slug: string;
 	name: string;

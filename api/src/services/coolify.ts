@@ -88,6 +88,27 @@ export interface CoolifyUpdateApplicationPayload {
   build_pack?: string;
 }
 
+export interface CoolifyEnv {
+  uuid: string;
+  key: string;
+  value: string | null;
+  is_shown_once: boolean;
+  is_runtime: boolean;
+  is_buildtime: boolean;
+}
+
+export interface CreateEnvPayload {
+  key: string;
+  value: string;
+  is_runtime?: boolean;
+  is_buildtime?: boolean;
+  is_shown_once?: boolean;
+}
+
+export interface UpdateEnvPayload extends CreateEnvPayload {
+  uuid: string;
+}
+
 async function handleResponse<T>(res: Response, context: string): Promise<T> {
   if (!res.ok) {
     const body = await res.text().catch(() => '(unreadable)');
@@ -191,6 +212,40 @@ export class CoolifyClient {
       body: JSON.stringify(payload),
     });
     return handleResponse<CoolifyApplication>(res, `PATCH /applications/${uuid}`);
+  }
+
+  async listEnvs(appUuid: string): Promise<CoolifyEnv[]> {
+    const res = await fetch(`${this.baseUrl}/applications/${appUuid}/envs`, { headers: this.headers });
+    return handleResponse<CoolifyEnv[]>(res, `GET /applications/${appUuid}/envs`);
+  }
+
+  async createEnv(appUuid: string, payload: CreateEnvPayload): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/applications/${appUuid}/envs`, {
+      method: 'POST',
+      headers: this.headers,
+      body: JSON.stringify(payload),
+    });
+    await handleResponse<unknown>(res, `POST /applications/${appUuid}/envs`);
+  }
+
+  async updateEnv(appUuid: string, payload: UpdateEnvPayload): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/applications/${appUuid}/envs`, {
+      method: 'PATCH',
+      headers: this.headers,
+      body: JSON.stringify(payload),
+    });
+    await handleResponse<unknown>(res, `PATCH /applications/${appUuid}/envs`);
+  }
+
+  async deleteEnv(appUuid: string, envUuid: string): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/applications/${appUuid}/envs/${envUuid}`, {
+      method: 'DELETE',
+      headers: this.headers,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '(unreadable)');
+      throw new Error(`Coolify DELETE /applications/${appUuid}/envs/${envUuid} failed: HTTP ${res.status} — ${body}`);
+    }
   }
 }
 

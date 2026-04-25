@@ -7,6 +7,9 @@ import {
   createCoolifyClient,
   CoolifyCreateApplicationPayload,
   CoolifyUpdateApplicationPayload,
+  CoolifyEnv,
+  CreateEnvPayload,
+  UpdateEnvPayload,
 } from '../services/coolify';
 import { mapSite, mapDeploy } from '../services/mapper';
 import { probeSite } from '../services/healthProbe';
@@ -813,6 +816,87 @@ router.delete('/:slug/dns/:id', async (req: Request, res: Response) => {
       console.error(`[coolify] GET /applications/${req.params.slug} for DNS failed:`, (err as Error).message);
       res.status(502).json({ error: 'Failed to retrieve site from Coolify' });
     }
+  }
+});
+
+// ── GET /api/sites/:slug/envs — list environment variables ───────────────────
+// Values for is_shown_once=true are masked in the response — the real value
+// remains in Coolify and is never returned by this endpoint.
+router.get('/:slug/envs', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    const envs = await client.listEnvs(app.uuid);
+    const masked = envs.map((env: CoolifyEnv) => ({
+      ...env,
+      value: env.is_shown_once ? '••••••••' : env.value,
+    }));
+    res.status(200).json(masked);
+  } catch (err) {
+    console.error(`[coolify] GET /applications/${req.params.slug}/envs failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to retrieve environment variables from Coolify' });
+  }
+});
+
+// ── POST /api/sites/:slug/envs — create an environment variable ───────────────
+router.post('/:slug/envs', async (req: Request, res: Response) => {
+  const body = req.body as Partial<CreateEnvPayload>;
+  if (!body.key || body.value === undefined) {
+    res.status(400).json({ error: 'Missing required fields: key, value' });
+    return;
+  }
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    await client.createEnv(app.uuid, {
+      key: body.key,
+      value: body.value,
+      ...(body.is_runtime !== undefined ? { is_runtime: body.is_runtime } : {}),
+      ...(body.is_buildtime !== undefined ? { is_buildtime: body.is_buildtime } : {}),
+      ...(body.is_shown_once !== undefined ? { is_shown_once: body.is_shown_once } : {}),
+    });
+    res.status(201).json({ message: 'Environment variable created' });
+  } catch (err) {
+    console.error(`[coolify] POST /applications/${req.params.slug}/envs failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to create environment variable via Coolify' });
+  }
+});
+
+// ── PATCH /api/sites/:slug/envs/:envUuid — update an environment variable ─────
+router.patch('/:slug/envs/:envUuid', async (req: Request, res: Response) => {
+  const body = req.body as Partial<Omit<UpdateEnvPayload, 'uuid'>>;
+  if (!body.key || body.value === undefined) {
+    res.status(400).json({ error: 'Missing required fields: key, value' });
+    return;
+  }
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    await client.updateEnv(app.uuid, {
+      uuid: req.params.envUuid,
+      key: body.key,
+      value: body.value,
+      ...(body.is_runtime !== undefined ? { is_runtime: body.is_runtime } : {}),
+      ...(body.is_buildtime !== undefined ? { is_buildtime: body.is_buildtime } : {}),
+      ...(body.is_shown_once !== undefined ? { is_shown_once: body.is_shown_once } : {}),
+    });
+    res.status(200).json({ message: 'Environment variable updated' });
+  } catch (err) {
+    console.error(`[coolify] PATCH /applications/${req.params.slug}/envs/${req.params.envUuid} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to update environment variable via Coolify' });
+  }
+});
+
+// ── DELETE /api/sites/:slug/envs/:envUuid — delete an environment variable ────
+router.delete('/:slug/envs/:envUuid', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    await client.deleteEnv(app.uuid, req.params.envUuid);
+    res.status(204).send();
+  } catch (err) {
+    console.error(`[coolify] DELETE /applications/${req.params.slug}/envs/${req.params.envUuid} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to delete environment variable via Coolify' });
   }
 });
 
