@@ -45,6 +45,7 @@
 	// Settings form state
 	let settingsDomain = data.site.domain;
 	let settingsRepo = data.site.repository;
+	let settingsBranch = data.site.branch ?? 'main';
 	let settingsServer = data.site.server;
 	let settingsDesc = data.site.description;
 	let settingsDeployAuth: 'ssh_key' | 'pat' = data.site.deploy_auth;
@@ -57,6 +58,7 @@
 		// Keep settings fields in sync when site changes (e.g. after refresh)
 		settingsDomain = site.domain;
 		settingsRepo = site.repository;
+		settingsBranch = site.branch ?? 'main';
 		settingsServer = site.server;
 		settingsDesc = site.description;
 		// Note: settingsDeployAuth is NOT synced here — bind:value conflicts with $: assignment.
@@ -72,6 +74,7 @@
 		saveMessage = '';
 		const payload: Record<string, string> = {};
 		if (settingsRepo !== site.repository) payload.repository = settingsRepo;
+		if (settingsBranch !== (site.branch ?? 'main')) payload.git_branch = settingsBranch;
 		if (settingsServer !== site.server) payload.server = settingsServer;
 		if (settingsDesc !== site.description) payload.description = settingsDesc;
 
@@ -1368,6 +1371,10 @@
 						<div class="form-field">
 							<label for="cfg-repo">Repository</label>
 							<input id="cfg-repo" bind:value={settingsRepo} class="input mono" />
+						</div>
+						<div class="form-field">
+							<label for="cfg-branch">Branch</label>
+							<input id="cfg-branch" bind:value={settingsBranch} class="input mono" placeholder="main" />
 						</div>
 						<div class="form-field">
 							<label for="cfg-server">Server</label>
