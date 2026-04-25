@@ -110,24 +110,21 @@ export interface ProbeResult {
   dns: DnsStatus;
 }
 
-// ── Probe result cache (60s TTL) ──────────────────────────────────────────────
+// ── Probe result cache (5 min TTL, stale-while-revalidate) ───────────────────
 
 interface CacheEntry {
   result: ProbeResult;
   expiresAt: number;
 }
 
-const PROBE_CACHE_TTL_MS = 60_000;
+const PROBE_CACHE_TTL_MS = 300_000; // 5 minutes
 const probeCache = new Map<string, CacheEntry>();
+const refreshing = new Set<string>();
 
-function getCached(domain: string): ProbeResult | null {
+function getCached(domain: string): { result: ProbeResult; stale: boolean } | null {
   const entry = probeCache.get(domain);
   if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    probeCache.delete(domain);
-    return null;
-  }
-  return entry.result;
+  return { result: entry.result, stale: Date.now() > entry.expiresAt };
 }
 
 function setCached(domain: string, result: ProbeResult): void {
@@ -136,12 +133,31 @@ function setCached(domain: string, result: ProbeResult): void {
 
 export function clearProbeCache(domain: string): void {
   probeCache.delete(domain);
+  refreshing.delete(domain);
 }
 
 export async function probeSite(domain: string): Promise<ProbeResult> {
   const cached = getCached(domain);
-  if (cached) return cached;
 
+  if (cached) {
+    if (cached.stale && !refreshing.has(domain)) {
+      // Stale: return immediately, refresh in background
+      refreshing.add(domain);
+      runProbes(domain).then(result => {
+        setCached(domain, result);
+        refreshing.delete(domain);
+      }).catch(() => refreshing.delete(domain));
+    }
+    return cached.result;
+  }
+
+  // No cache entry — blocking first load
+  const result = await runProbes(domain);
+  setCached(domain, result);
+  return result;
+}
+
+async function runProbes(domain: string): Promise<ProbeResult> {
   const [httpResult, sslResult, dnsResult] = await Promise.allSettled([
     probeHttp(domain),
     probeSsl(domain),
@@ -165,7 +181,5 @@ export async function probeSite(domain: string): Promise<ProbeResult> {
       ? dnsResult.value
       : { resolving: false, propagated: false, checkedAt: now };
 
-  const result: ProbeResult = { http, ssl, dns };
-  setCached(domain, result);
-  return result;
+  return { http, ssl, dns };
 }
