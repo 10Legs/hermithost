@@ -48,6 +48,7 @@
 	let settingsBranch = data.site.branch ?? 'main';
 	let settingsServer = data.site.server;
 	let settingsDesc = data.site.description;
+	let settingsBuildPack = data.site.build_pack ?? 'nixpacks';
 	let settingsDeployAuth: 'ssh_key' | 'pat' = data.site.deploy_auth;
 	let settingsDeployToken = '';
 	type AuthSaveState = 'idle' | 'saving' | 'saved' | 'error';
@@ -74,6 +75,7 @@
 		if (settingsBranch !== (site.branch ?? 'main')) payload.git_branch = settingsBranch;
 		if (settingsServer !== site.server) payload.server = settingsServer;
 		if (settingsDesc !== site.description) payload.description = settingsDesc;
+		if (settingsBuildPack !== (site.build_pack ?? 'nixpacks')) payload.build_pack = settingsBuildPack;
 
 		try {
 			const res = await fetch(`/api/sites/${site.slug}`, {
@@ -1377,6 +1379,15 @@
 						<div class="form-field">
 							<label for="cfg-branch">Branch</label>
 							<input id="cfg-branch" bind:value={settingsBranch} class="input mono" placeholder="main" />
+						</div>
+						<div class="form-field">
+							<label for="cfg-build-pack">Build Pack</label>
+							<select id="cfg-build-pack" bind:value={settingsBuildPack} class="input">
+								<option value="nixpacks">nixpacks</option>
+								<option value="dockerfile">dockerfile</option>
+								<option value="dockercompose">dockercompose</option>
+								<option value="static">static</option>
+							</select>
 						</div>
 						<div class="form-field">
 							<label for="cfg-server">Server</label>

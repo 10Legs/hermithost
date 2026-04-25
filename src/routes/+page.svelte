@@ -14,6 +14,7 @@
 	let addDomain = '';
 	let addGitRepo = '';
 	let addGitBranch = 'main';
+	let addBuildPack = 'nixpacks';
 	let addDeployAuth: 'ssh_key' | 'pat' = 'ssh_key';
 	let addDeployToken = '';
 	type AddState = 'idle' | 'loading' | 'error';
@@ -28,6 +29,7 @@
 		addDomain = '';
 		addGitRepo = '';
 		addGitBranch = 'main';
+		addBuildPack = 'nixpacks';
 		addDeployAuth = 'ssh_key';
 		addDeployToken = '';
 		addState = 'idle';
@@ -68,6 +70,7 @@
 				domain: addDomain.trim(),
 				git_repository: addGitRepo.trim(),
 				git_branch: addGitBranch.trim() || 'main',
+				build_pack: addBuildPack,
 				deploy_auth: addDeployAuth,
 			};
 			if (addDeployAuth === 'pat') {
@@ -389,6 +392,20 @@
 						placeholder="main"
 						disabled={addState === 'loading'}
 					/>
+				</div>
+				<div class="form-field">
+					<label for="add-build-pack">Build Pack</label>
+					<select
+						id="add-build-pack"
+						bind:value={addBuildPack}
+						class="input"
+						disabled={addState === 'loading'}
+					>
+						<option value="nixpacks">nixpacks</option>
+						<option value="dockerfile">dockerfile</option>
+						<option value="dockercompose">dockercompose</option>
+						<option value="static">static</option>
+					</select>
 				</div>
 				<div class="form-field">
 					<label>Deploy Auth</label>
