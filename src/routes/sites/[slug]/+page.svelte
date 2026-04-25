@@ -1397,12 +1397,12 @@
 							<div class="form-field">
 								<label for="cfg-compose-loc">Docker Compose File</label>
 								<input id="cfg-compose-loc" bind:value={settingsDockerComposeLoc} class="input mono" placeholder="/docker-compose.yml" />
-								<span class="field-hint">Path to compose file relative to repo root</span>
+								<span class="field-hint">Path within the repo, appended to Base Directory. Use <code>/docker-compose.yml</code> or <code>/docker-compose.yaml</code> for files at repo root.</span>
 							</div>
 							<div class="form-field">
 								<label for="cfg-base-dir">Base Directory</label>
 								<input id="cfg-base-dir" bind:value={settingsBaseDir} class="input mono" placeholder="/" />
-								<span class="field-hint">Subdirectory to use as build context (for monorepos)</span>
+								<span class="field-hint">Repo subdirectory to use as working directory. <code>/</code> = repo root. For monorepos use e.g. <code>/services/web</code>.</span>
 							</div>
 						{/if}
 						<div class="form-field">
