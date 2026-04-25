@@ -55,14 +55,11 @@
 	let authSaveMessage = '';
 
 	$: {
-		// Keep settings fields in sync when site changes (e.g. after refresh)
+		// Only sync read-only domain field reactively.
+		// Editable fields (repo, branch, server, desc) are NOT synced here —
+		// reactive reassignment overwrites user input mid-edit.
+		// They are updated explicitly in saveSettings() after a successful save.
 		settingsDomain = site.domain;
-		settingsRepo = site.repository;
-		settingsBranch = site.branch ?? 'main';
-		settingsServer = site.server;
-		settingsDesc = site.description;
-		// Note: settingsDeployAuth is NOT synced here — bind:value conflicts with $: assignment.
-		// It is updated explicitly in saveDeployAuth() after a successful response.
 	}
 
 	type SaveState = 'idle' | 'saving' | 'saved' | 'error';
@@ -93,6 +90,11 @@
 			}
 			const updated: Site = await res.json();
 			data = { ...data, site: updated };
+			// Explicitly sync editable fields to saved values
+			settingsRepo = updated.repository;
+			settingsBranch = updated.branch ?? 'main';
+			settingsServer = updated.server;
+			settingsDesc = updated.description;
 			saveState = 'saved';
 			saveMessage = 'Saved';
 			setTimeout(() => { saveState = 'idle'; saveMessage = ''; }, 3000);
