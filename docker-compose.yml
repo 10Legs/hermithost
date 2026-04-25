@@ -99,9 +99,11 @@ services:
   # ── step-ca Init (one-shot) ───────────────────────────────────
   # Generates the HermitHost root CA and ACME provisioner on first boot.
   # Idempotent: skips if /home/step/config/ca.json already exists.
+  # Only runs in internal mode: docker compose --profile internal up
   step-ca-init:
     image: smallstep/step-ca:latest
     user: root
+    profiles: [internal]
     entrypoint: ["/bin/sh", "/scripts/step-ca-init.sh"]
     volumes:
       - step-ca-data:/home/step
@@ -113,8 +115,10 @@ services:
   # ── step-ca (Local Certificate Authority) ─────────────────────
   # Issues TLS certificates for .hh domains in internal mode.
   # Traefik uses this as the ACME CA instead of Let's Encrypt.
+  # Only runs in internal mode: docker compose --profile internal up
   step-ca:
     image: smallstep/step-ca:latest
+    profiles: [internal]
     volumes:
       - step-ca-data:/home/step
     networks:
