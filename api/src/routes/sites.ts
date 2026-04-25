@@ -451,6 +451,8 @@ router.post('/', async (req: Request, res: Response) => {
     domain?: string;       // alias for fqdn
     deploy_auth?: 'ssh_key' | 'pat';
     deploy_token?: string; // PAT value — only used when deploy_auth === 'pat'
+    docker_compose_location?: string;
+    base_directory?: string;
   };
   if (!body.name || !body.git_repository || !body.git_branch) {
     res.status(400).json({
@@ -515,6 +517,8 @@ router.post('/', async (req: Request, res: Response) => {
       environment_name: 'production',
       instant_deploy: false,
       ...(body.description !== undefined ? { description: body.description } : {}),
+      ...(body.docker_compose_location !== undefined ? { docker_compose_location: body.docker_compose_location } : (body.build_pack === 'dockercompose' ? { docker_compose_location: '/docker-compose.yml' } : {})),
+      ...(body.base_directory !== undefined ? { base_directory: body.base_directory } : {}),
     };
     let app = await client.createApplication(payload);
 
@@ -604,6 +608,8 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     server?: string;
     deploy_auth?: 'ssh_key' | 'pat';
     deploy_token?: string;  // required when deploy_auth === 'pat'
+    docker_compose_location?: string;
+    base_directory?: string;
   }>;
   if (Object.keys(body).length === 0) {
     res.status(400).json({ error: 'Request body must include at least one field to update' });
@@ -626,6 +632,8 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     }
     if (body.git_branch !== undefined) payload.git_branch = body.git_branch;
     if (body.build_pack !== undefined) payload.build_pack = body.build_pack;
+    if (body.docker_compose_location !== undefined) payload.docker_compose_location = body.docker_compose_location;
+    if (body.base_directory !== undefined) payload.base_directory = body.base_directory;
 
     // Auth-aware repository URL handling:
     // - Always stores clean base URL in the frontend-facing Site response

@@ -99,6 +99,8 @@ export interface Site {
 	deploy_auth: 'ssh_key' | 'pat';
 	branch: string;
 	build_pack: string;
+	docker_compose_location: string;
+	base_directory: string;
 	http: HttpStatus;
 	ssl: SslStatus;
 	dns: DnsStatus;

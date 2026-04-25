@@ -10,6 +10,8 @@ export interface CoolifyApplication {
   git_branch: string;
   git_commit_sha: string;
   build_pack: string;
+  docker_compose_location?: string;
+  base_directory?: string;
   created_at: string;
   updated_at: string;
   private_key_uuid?: string;
@@ -55,6 +57,8 @@ export interface CoolifyCreateApplicationPayload {
   git_repository: string;
   git_branch: string;
   build_pack: string;
+  docker_compose_location?: string;
+  base_directory?: string;
   ports_exposes: string;
   server_uuid: string;
   destination_uuid: string;
@@ -86,6 +90,8 @@ export interface CoolifyUpdateApplicationPayload {
   git_repository?: string;
   git_branch?: string;
   build_pack?: string;
+  docker_compose_location?: string;
+  base_directory?: string;
 }
 
 export interface CoolifyEnv {
