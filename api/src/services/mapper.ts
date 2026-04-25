@@ -187,6 +187,8 @@ export function mapSite(
     deploy_auth: deployAuth,
     branch: app.git_branch,
     build_pack: app.build_pack,
+    docker_compose_location: app.docker_compose_location ?? '/docker-compose.yml',
+    base_directory: app.base_directory ?? '/',
     server: serverName,
     overallStatus: mapAppStatus(app.status),
     http,

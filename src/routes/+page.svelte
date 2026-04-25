@@ -15,6 +15,8 @@
 	let addGitRepo = '';
 	let addGitBranch = 'main';
 	let addBuildPack = 'nixpacks';
+	let addDockerComposeLoc = '/docker-compose.yml';
+	let addBaseDir = '/';
 	let addDeployAuth: 'ssh_key' | 'pat' = 'ssh_key';
 	let addDeployToken = '';
 	type AddState = 'idle' | 'loading' | 'error';
@@ -30,6 +32,8 @@
 		addGitRepo = '';
 		addGitBranch = 'main';
 		addBuildPack = 'nixpacks';
+		addDockerComposeLoc = '/docker-compose.yml';
+		addBaseDir = '/';
 		addDeployAuth = 'ssh_key';
 		addDeployToken = '';
 		addState = 'idle';
@@ -72,6 +76,7 @@
 				git_branch: addGitBranch.trim() || 'main',
 				build_pack: addBuildPack,
 				deploy_auth: addDeployAuth,
+				...(addBuildPack === 'dockercompose' ? { docker_compose_location: addDockerComposeLoc, base_directory: addBaseDir } : {}),
 			};
 			if (addDeployAuth === 'pat') {
 				payload.deploy_token = addDeployToken.trim();
@@ -407,6 +412,30 @@
 						<option value="static">static</option>
 					</select>
 				</div>
+				{#if addBuildPack === 'dockercompose'}
+					<div class="form-field">
+						<label for="add-compose-loc">Docker Compose File</label>
+						<input
+							id="add-compose-loc"
+							bind:value={addDockerComposeLoc}
+							class="input mono"
+							placeholder="/docker-compose.yml"
+							disabled={addState === 'loading'}
+						/>
+						<span class="field-hint">Path to compose file relative to repo root</span>
+					</div>
+					<div class="form-field">
+						<label for="add-base-dir">Base Directory</label>
+						<input
+							id="add-base-dir"
+							bind:value={addBaseDir}
+							class="input mono"
+							placeholder="/"
+							disabled={addState === 'loading'}
+						/>
+						<span class="field-hint">Subdirectory for monorepos (usually /)</span>
+					</div>
+				{/if}
 				<div class="form-field">
 					<label>Deploy Auth</label>
 					<div class="auth-toggle">

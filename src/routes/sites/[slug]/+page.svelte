@@ -49,6 +49,8 @@
 	let settingsServer = data.site.server;
 	let settingsDesc = data.site.description;
 	let settingsBuildPack = data.site.build_pack ?? 'nixpacks';
+	let settingsDockerComposeLoc = data.site.docker_compose_location ?? '/docker-compose.yml';
+	let settingsBaseDir = data.site.base_directory ?? '/';
 	let settingsDeployAuth: 'ssh_key' | 'pat' = data.site.deploy_auth;
 	let settingsDeployToken = '';
 	type AuthSaveState = 'idle' | 'saving' | 'saved' | 'error';
@@ -76,6 +78,8 @@
 		if (settingsServer !== site.server) payload.server = settingsServer;
 		if (settingsDesc !== site.description) payload.description = settingsDesc;
 		if (settingsBuildPack !== (site.build_pack ?? 'nixpacks')) payload.build_pack = settingsBuildPack;
+		if (settingsDockerComposeLoc !== (site.docker_compose_location ?? '/docker-compose.yml')) payload.docker_compose_location = settingsDockerComposeLoc;
+		if (settingsBaseDir !== (site.base_directory ?? '/')) payload.base_directory = settingsBaseDir;
 
 		try {
 			const res = await fetch(`/api/sites/${site.slug}`, {
@@ -1389,6 +1393,18 @@
 								<option value="static">static</option>
 							</select>
 						</div>
+						{#if settingsBuildPack === 'dockercompose'}
+							<div class="form-field">
+								<label for="cfg-compose-loc">Docker Compose File</label>
+								<input id="cfg-compose-loc" bind:value={settingsDockerComposeLoc} class="input mono" placeholder="/docker-compose.yml" />
+								<span class="field-hint">Path to compose file relative to repo root</span>
+							</div>
+							<div class="form-field">
+								<label for="cfg-base-dir">Base Directory</label>
+								<input id="cfg-base-dir" bind:value={settingsBaseDir} class="input mono" placeholder="/" />
+								<span class="field-hint">Subdirectory to use as build context (for monorepos)</span>
+							</div>
+						{/if}
 						<div class="form-field">
 							<label for="cfg-server">Server</label>
 							<input id="cfg-server" bind:value={settingsServer} class="input mono" />
@@ -2054,6 +2070,12 @@
 	.form-field-wide {
 		flex: 1;
 		min-width: 200px;
+	}
+
+	.field-hint {
+		font-size: 11px;
+		color: var(--text-secondary);
+		margin-top: 2px;
 	}
 
 	.form-field-narrow {
