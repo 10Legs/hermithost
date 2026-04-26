@@ -886,14 +886,22 @@ router.post('/:slug/envs', async (req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
     const app = await client.getApplication(req.params.slug);
-    await client.createEnv(app.uuid, {
+    const existing = await client.listEnvs(app.uuid);
+    const match = existing.find((e) => e.key === body.key);
+    const payload = {
       key: body.key,
       value: body.value,
       ...(body.is_runtime !== undefined ? { is_runtime: body.is_runtime } : {}),
       ...(body.is_buildtime !== undefined ? { is_buildtime: body.is_buildtime } : {}),
       ...(body.is_shown_once !== undefined ? { is_shown_once: body.is_shown_once } : {}),
-    });
-    res.status(201).json({ message: 'Environment variable created' });
+    };
+    if (match) {
+      await client.updateEnv(app.uuid, { uuid: match.uuid, ...payload });
+      res.status(200).json({ message: 'Environment variable updated (key already existed)' });
+    } else {
+      await client.createEnv(app.uuid, payload);
+      res.status(201).json({ message: 'Environment variable created' });
+    }
   } catch (err) {
     console.error(`[coolify] POST /applications/${req.params.slug}/envs failed:`, (err as Error).message);
     res.status(502).json({ error: 'Failed to create environment variable via Coolify' });
