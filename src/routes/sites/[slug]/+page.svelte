@@ -78,8 +78,11 @@
 		if (settingsServer !== site.server) payload.server = settingsServer;
 		if (settingsDesc !== site.description) payload.description = settingsDesc;
 		if (settingsBuildPack !== (site.build_pack ?? 'nixpacks')) payload.build_pack = settingsBuildPack;
-		if (settingsDockerComposeLoc !== (site.docker_compose_location ?? '/docker-compose.yml')) payload.docker_compose_location = settingsDockerComposeLoc;
-		if (settingsBaseDir !== (site.base_directory ?? '/')) payload.base_directory = settingsBaseDir;
+		// Always include path fields when build_pack is dockercompose — change-detection is unreliable
+		// because the mapper applies defaults (?? '/docker-compose.yml', ?? '/') that mask NULL values
+		// in Coolify's DB, making the comparison always appear equal and the fields never get persisted.
+		if (settingsBuildPack === 'dockercompose' || settingsDockerComposeLoc !== (site.docker_compose_location ?? '/docker-compose.yml')) payload.docker_compose_location = settingsDockerComposeLoc;
+		if (settingsBuildPack === 'dockercompose' || settingsBaseDir !== (site.base_directory ?? '/')) payload.base_directory = settingsBaseDir;
 
 		try {
 			const res = await fetch(`/api/sites/${site.slug}`, {
@@ -1397,12 +1400,12 @@
 							<div class="form-field">
 								<label for="cfg-compose-loc">Docker Compose File</label>
 								<input id="cfg-compose-loc" bind:value={settingsDockerComposeLoc} class="input mono" placeholder="/docker-compose.yml" />
-								<span class="field-hint">Path to compose file relative to repo root</span>
+								<span class="field-hint">Path within the repo, appended to Base Directory. Use <code>/docker-compose.yml</code> or <code>/docker-compose.yaml</code> for files at repo root.</span>
 							</div>
 							<div class="form-field">
 								<label for="cfg-base-dir">Base Directory</label>
 								<input id="cfg-base-dir" bind:value={settingsBaseDir} class="input mono" placeholder="/" />
-								<span class="field-hint">Subdirectory to use as build context (for monorepos)</span>
+								<span class="field-hint">Repo subdirectory to use as working directory. <code>/</code> = repo root. For monorepos use e.g. <code>/services/web</code>.</span>
 							</div>
 						{/if}
 						<div class="form-field">

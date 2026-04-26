@@ -422,7 +422,7 @@
 							placeholder="/docker-compose.yml"
 							disabled={addState === 'loading'}
 						/>
-						<span class="field-hint">Path to compose file relative to repo root</span>
+						<span class="field-hint">Path within the repo, appended to Base Directory. Use <code>/docker-compose.yml</code> or <code>/docker-compose.yaml</code> for files at repo root.</span>
 					</div>
 					<div class="form-field">
 						<label for="add-base-dir">Base Directory</label>
@@ -433,7 +433,7 @@
 							placeholder="/"
 							disabled={addState === 'loading'}
 						/>
-						<span class="field-hint">Subdirectory for monorepos (usually /)</span>
+						<span class="field-hint">Repo subdirectory used as working directory. <code>/</code> = repo root. Monorepos: e.g. <code>/services/web</code>.</span>
 					</div>
 				{/if}
 				<div class="form-field">
