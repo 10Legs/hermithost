@@ -191,6 +191,7 @@ export function mapSite(
     base_directory: app.base_directory ?? '/',
     server: serverName,
     overallStatus: mapAppStatus(app.status),
+    disabled: false,
     http,
     ssl,
     dns,

@@ -615,8 +615,12 @@
 		try {
 			const res = await fetch(`/api/sites/${site.slug}/${action}`, { method: 'POST' });
 			if (res.ok) {
-				const fresh: Site = await res.json();
-				data = { ...data, site: fresh };
+				// Re-fetch full site data (toggle endpoints return summary, not full Site)
+				const siteRes = await fetch(`/api/sites/${site.slug}`);
+				if (siteRes.ok) {
+					const fresh: Site = await siteRes.json();
+					data = { ...data, site: fresh };
+				}
 			}
 		} catch {
 			// silently fail — state stays as-is
