@@ -95,7 +95,12 @@ function probeSsl(domain: string): Promise<SslStatus> {
 async function probeDns(domain: string): Promise<DnsStatus> {
   const checkedAt = new Date().toISOString();
   try {
-    await dns.promises.resolve4(domain);
+    await Promise.race([
+      dns.promises.resolve4(domain),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('DNS timeout')), 5000)
+      ),
+    ]);
     return { resolving: true, propagated: true, checkedAt };
   } catch {
     return { resolving: false, propagated: false, checkedAt };
