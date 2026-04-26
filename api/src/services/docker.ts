@@ -68,7 +68,7 @@ export function dockerPost(path: string, body?: object): Promise<{ statusCode: n
       });
     });
     req.on('error', reject);
-    req.setTimeout(5000, () => { req.destroy(); reject(new Error('Docker API timeout')); });
+    req.setTimeout(30000, () => { req.destroy(); reject(new Error('Docker API timeout')); });
     if (payload) req.write(payload);
     req.end();
   });
