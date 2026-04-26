@@ -9,10 +9,17 @@ while [ ! -f "$KEY_FILE" ]; do
   if [ $WAIT -gt 60 ]; then echo "ERROR: key never appeared"; exit 1; fi
 done
 
+# Install key for root (Coolify connects as root to avoid sudo-wrapper bugs)
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+cat "$KEY_FILE" > /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+echo "[ssh-bridge] Public key installed for root."
+
+# Keep deploy user key for backwards compatibility
 cat "$KEY_FILE" > /home/deploy/.ssh/authorized_keys
 chmod 600 /home/deploy/.ssh/authorized_keys
 chown deploy:deploy /home/deploy/.ssh/authorized_keys
-echo "[ssh-bridge] Public key installed."
+echo "[ssh-bridge] Public key installed for deploy."
 
 # Align Docker GID to host socket (critical on macOS Docker Desktop)
 SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo "")
