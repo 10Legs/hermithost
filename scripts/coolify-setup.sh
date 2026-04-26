@@ -156,7 +156,7 @@ fi
 echo "[setup] Updating server IP to ssh-bridge..."
 curl -sf -X PATCH "$COOLIFY_URL/servers/$SERVER_UUID" \
   -H "$(auth_header)" -H "Content-Type: application/json" \
-  -d '{"ip":"ssh-bridge","port":22,"user":"deploy"}' > /dev/null || true
+  -d '{"ip":"ssh-bridge","port":22,"user":"root"}' > /dev/null || true
 echo "[setup] Server IP updated."
 
 # ── 4. Register private key with Coolify ─────────────────────────────────────
