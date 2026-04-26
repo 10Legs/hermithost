@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { readFileSync, writeFileSync, unlinkSync } from 'fs';
 import * as path from 'path';
-import { dockerGet } from '../services/docker';
+import { dockerGet, dockerPost } from '../services/docker';
 import { DnsRecord } from '../types';
 import {
   createCoolifyClient,
@@ -69,6 +69,31 @@ function writeStoredVisibility(uuid: string, visibility: 'internal' | 'external'
   }
 }
 
+// ── Disabled state sidecar ────────────────────────────────────────────────────
+// Persists per-site disabled flag as a presence file: {uuid}.disabled exists → site is disabled.
+function readDisabledState(uuid: string): boolean {
+  try {
+    const { mkdirSync: _mkdir, existsSync } = require('fs') as typeof import('fs');
+    _mkdir(SITES_DIR, { recursive: true });
+    return existsSync(path.join(SITES_DIR, `${uuid}.disabled`));
+  } catch { return false; }
+}
+
+function writeDisabledState(uuid: string, disabled: boolean): void {
+  try {
+    const { mkdirSync: _mkdir, unlinkSync: _unlink } = require('fs') as typeof import('fs');
+    _mkdir(SITES_DIR, { recursive: true });
+    const filePath = path.join(SITES_DIR, `${uuid}.disabled`);
+    if (disabled) {
+      writeFileSync(filePath, 'true', 'utf8');
+    } else {
+      try { _unlink(filePath); } catch { /* already gone */ }
+    }
+  } catch (err) {
+    console.warn(`[disabled-state] Could not write disabled sidecar for ${uuid}:`, (err as Error).message);
+  }
+}
+
 function mapSiteWithStoredAuth(
   app: Parameters<typeof mapSite>[0],
   deployments: Parameters<typeof mapSite>[1],
@@ -77,6 +102,11 @@ function mapSiteWithStoredAuth(
   const site = mapSite(app, deployments, probe ?? null);
   const stored = readStoredDeployAuth(app.uuid);
   if (stored) site.deploy_auth = stored;
+  const disabled = readDisabledState(app.uuid);
+  if (disabled) {
+    site.disabled = true;
+    site.overallStatus = 'disabled';
+  }
   return site;
 }
 
@@ -922,9 +952,73 @@ router.get('/:slug/deployments', async (req: Request, res: Response) => {
   }
 });
 
+// ── POST /api/sites/:slug/disable — stop containers and persist disabled flag ─
+router.post('/:slug/disable', async (req: Request, res: Response) => {
+  const slug = req.params.slug;
+  try {
+    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
+    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<{ Id: string }>;
+    let count = 0;
+    for (const container of containers) {
+      try {
+        await dockerPost(`/containers/${container.Id}/stop?t=10`);
+      } catch (err) {
+        console.error(`[docker] disable: stop ${container.Id} failed (may already be stopped):`, (err as Error).message);
+      }
+      try {
+        await dockerPost(`/containers/${container.Id}/update`, { RestartPolicy: { Name: 'no' } });
+      } catch (err) {
+        console.error(`[docker] disable: update restart policy ${container.Id} failed:`, (err as Error).message);
+      }
+      count++;
+    }
+    writeDisabledState(slug, true);
+    res.status(200).json({ disabled: true, containersStop: count });
+  } catch (err) {
+    console.error(`[docker] POST /disable for ${slug} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to disable site via Docker' });
+  }
+});
+
+// ── POST /api/sites/:slug/enable — restore containers and clear disabled flag ─
+router.post('/:slug/enable', async (req: Request, res: Response) => {
+  const slug = req.params.slug;
+  try {
+    if (!readDisabledState(slug)) {
+      res.status(200).json({ disabled: false });
+      return;
+    }
+    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
+    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<{ Id: string }>;
+    let count = 0;
+    for (const container of containers) {
+      try {
+        await dockerPost(`/containers/${container.Id}/update`, { RestartPolicy: { Name: 'unless-stopped' } });
+      } catch (err) {
+        console.error(`[docker] enable: update restart policy ${container.Id} failed:`, (err as Error).message);
+      }
+      try {
+        await dockerPost(`/containers/${container.Id}/start`);
+      } catch (err) {
+        console.error(`[docker] enable: start ${container.Id} failed (may already be running):`, (err as Error).message);
+      }
+      count++;
+    }
+    writeDisabledState(slug, false);
+    res.status(200).json({ disabled: false, containersStarted: count });
+  } catch (err) {
+    console.error(`[docker] POST /enable for ${slug} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to enable site via Docker' });
+  }
+});
+
 // ── POST /api/sites/:slug/deploy — trigger a deploy ──────────────────────────
 router.post('/:slug/deploy', async (req: Request, res: Response) => {
   try {
+    if (readDisabledState(req.params.slug)) {
+      res.status(409).json({ error: 'Site is disabled. Enable it before deploying.' });
+      return;
+    }
     const client = createCoolifyClient()!;
     const app = await client.getApplication(req.params.slug);
     const result = await client.triggerDeploy(req.params.slug);

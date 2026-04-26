@@ -143,7 +143,8 @@
 			healthy: 'Healthy',
 			warning: 'Warning',
 			error: 'Error',
-			pending: 'Pending'
+			pending: 'Pending',
+			disabled: 'Disabled'
 		};
 		return labels[site.overallStatus] ?? site.overallStatus;
 	}
@@ -280,7 +281,7 @@
 					{@const site = effectiveSite(rawSite)}
 					{@const probing = probePending.has(rawSite.slug)}
 					{@const pulse = pulseData[rawSite.slug]}
-					<tr class="site-row" class:row-error={site.overallStatus === 'error'} class:row-warning={site.overallStatus === 'warning'}>
+					<tr class="site-row" class:row-error={site.overallStatus === 'error'} class:row-warning={site.overallStatus === 'warning'} class:row-disabled={site.disabled}>
 						<td class="cell-site">
 							<div class="site-name-row">
 								{#if probing}
@@ -627,6 +628,10 @@
 		border-left: 2px solid var(--warning);
 	}
 
+	.row-disabled {
+		opacity: 0.5;
+	}
+
 	.cell-site {
 		min-width: 260px;
 	}
@@ -649,6 +654,7 @@
 	.status-warning { background: var(--warning); box-shadow: 0 0 6px rgba(212,168,67,0.4); }
 	.status-error { background: var(--danger); box-shadow: 0 0 6px rgba(207,92,92,0.4); }
 	.status-pending { background: var(--pending); animation: pulse 2s infinite; }
+	.status-disabled { background: #4a5568; }
 
 	@keyframes pulse {
 		0%, 100% { opacity: 1; }

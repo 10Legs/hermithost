@@ -605,6 +605,30 @@
 		window.open(`https://github.com/${ownerRepo}/settings/keys/new`, '_blank');
 	}
 
+	// ── Disable / Enable toggle ───────────────────────────────────────────────
+	let toggleDisabledState: 'idle' | 'loading' = 'idle';
+
+	async function toggleDisabled(): Promise<void> {
+		if (toggleDisabledState === 'loading') return;
+		toggleDisabledState = 'loading';
+		const action = site.disabled ? 'enable' : 'disable';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/${action}`, { method: 'POST' });
+			if (res.ok) {
+				// Re-fetch full site data (toggle endpoints return summary, not full Site)
+				const siteRes = await fetch(`/api/sites/${site.slug}`);
+				if (siteRes.ok) {
+					const fresh: Site = await siteRes.json();
+					data = { ...data, site: fresh };
+				}
+			}
+		} catch {
+			// silently fail — state stays as-is
+		} finally {
+			toggleDisabledState = 'idle';
+		}
+	}
+
 	// ── Live stats (SSE) ──────────────────────────────────────────────────────
 	let liveConnected = false;
 	let liveReqPerSec = 0;
@@ -682,6 +706,26 @@
 			</div>
 		</div>
 		<div class="header-actions">
+			<!-- Enabled / Disabled toggle -->
+			<button
+				class="toggle-btn"
+				class:toggle-btn-loading={toggleDisabledState === 'loading'}
+				disabled={toggleDisabledState === 'loading'}
+				on:click={toggleDisabled}
+				title={site.disabled ? 'Click to enable site' : 'Click to disable site'}
+				aria-label={site.disabled ? 'Enable site' : 'Disable site'}
+			>
+				<span class="toggle-track" class:toggle-track-off={site.disabled}>
+					<span class="toggle-thumb" class:toggle-thumb-off={site.disabled}></span>
+				</span>
+				<span class="toggle-label">
+					{#if toggleDisabledState === 'loading'}
+						<span class="spinner spinner-sm" aria-hidden="true"></span>{site.disabled ? 'Enabling…' : 'Disabling…'}
+					{:else}
+						{site.disabled ? 'Disabled' : 'Enabled'}
+					{/if}
+				</span>
+			</button>
 			<button
 				class="btn btn-ghost"
 				class:btn-loading={refreshState === 'loading'}
@@ -698,7 +742,9 @@
 				<button
 					class="btn btn-primary"
 					class:btn-loading={deployState === 'loading'}
-					disabled={deployState === 'loading'}
+					class:btn-disabled={site.disabled}
+					disabled={deployState === 'loading' || !!site.disabled}
+					title={site.disabled ? 'Site is disabled' : undefined}
 					on:click={triggerDeploy}
 				>
 					{deployState === 'loading' ? 'Deploying…' : 'Deploy'}
@@ -714,6 +760,13 @@
 			</div>
 		</div>
 	</header>
+
+	<!-- Disabled banner -->
+	{#if site.disabled}
+		<div class="disabled-banner" role="status">
+			This site is disabled. Containers are stopped.
+		</div>
+	{/if}
 
 	<!-- Tabs -->
 	<div class="tabs">
@@ -2774,5 +2827,87 @@
 		.metric-grid {
 			grid-template-columns: 1fr;
 		}
+	}
+
+	/* ── Status dot: disabled ────────────────────────────────────────────────── */
+	.status-disabled { background: #4a5568; }
+
+	/* ── Disabled / Enabled toggle ───────────────────────────────────────────── */
+	.toggle-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		background: transparent;
+		border: 1px solid var(--border-bright);
+		border-radius: 5px;
+		padding: 5px 10px;
+		cursor: pointer;
+		font-size: 12px;
+		font-weight: 500;
+		color: var(--text-secondary);
+		transition: border-color 0.15s, color 0.15s, opacity 0.15s;
+		white-space: nowrap;
+	}
+	.toggle-btn:hover:not(:disabled) {
+		border-color: var(--accent-teal);
+		color: var(--text-primary);
+	}
+	.toggle-btn:disabled,
+	.toggle-btn-loading {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+	.toggle-track {
+		position: relative;
+		display: inline-block;
+		width: 28px;
+		height: 16px;
+		border-radius: 8px;
+		background: var(--accent-teal);
+		transition: background 0.2s;
+		flex-shrink: 0;
+	}
+	.toggle-track-off {
+		background: #4a5568;
+	}
+	.toggle-thumb {
+		position: absolute;
+		top: 2px;
+		left: 14px;
+		width: 12px;
+		height: 12px;
+		border-radius: 50%;
+		background: #fff;
+		transition: left 0.2s;
+	}
+	.toggle-thumb-off {
+		left: 2px;
+	}
+	.toggle-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+	}
+	.spinner-sm {
+		width: 10px;
+		height: 10px;
+		border-width: 1.5px;
+	}
+
+	/* ── Disabled deploy button ──────────────────────────────────────────────── */
+	.btn-disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	/* ── Disabled site banner ────────────────────────────────────────────────── */
+	.disabled-banner {
+		margin-bottom: 16px;
+		padding: 10px 16px;
+		background: rgba(74, 85, 104, 0.15);
+		border: 1px solid rgba(74, 85, 104, 0.35);
+		border-radius: 6px;
+		font-size: 13px;
+		color: var(--text-secondary);
 	}
 </style>

@@ -36,7 +36,7 @@ export interface ServicesResponse {
   restoreEvent: RestoreEvent | null;
 }
 
-export type SiteStatus = 'healthy' | 'warning' | 'error' | 'pending';
+export type SiteStatus = 'healthy' | 'warning' | 'error' | 'pending' | 'disabled';
 export type DeployStatus = 'success' | 'failed' | 'running' | 'pending';
 export type DnsRecordType = 'A' | 'AAAA' | 'CNAME' | 'MX' | 'TXT' | 'NS' | 'SRV' | 'CAA' | 'SOA' | 'PTR';
 
@@ -99,6 +99,7 @@ export interface Site {
   ssl: SslStatus;
   dns: DnsStatus;
   overallStatus: SiteStatus;
+  disabled: boolean;
   dnsRecords: DnsRecord[];
   deploys: Deploy[];
 }
