@@ -78,8 +78,11 @@
 		if (settingsServer !== site.server) payload.server = settingsServer;
 		if (settingsDesc !== site.description) payload.description = settingsDesc;
 		if (settingsBuildPack !== (site.build_pack ?? 'nixpacks')) payload.build_pack = settingsBuildPack;
-		if (settingsDockerComposeLoc !== (site.docker_compose_location ?? '/docker-compose.yml')) payload.docker_compose_location = settingsDockerComposeLoc;
-		if (settingsBaseDir !== (site.base_directory ?? '/')) payload.base_directory = settingsBaseDir;
+		// Always include path fields when build_pack is dockercompose — change-detection is unreliable
+		// because the mapper applies defaults (?? '/docker-compose.yml', ?? '/') that mask NULL values
+		// in Coolify's DB, making the comparison always appear equal and the fields never get persisted.
+		if (settingsBuildPack === 'dockercompose' || settingsDockerComposeLoc !== (site.docker_compose_location ?? '/docker-compose.yml')) payload.docker_compose_location = settingsDockerComposeLoc;
+		if (settingsBuildPack === 'dockercompose' || settingsBaseDir !== (site.base_directory ?? '/')) payload.base_directory = settingsBaseDir;
 
 		try {
 			const res = await fetch(`/api/sites/${site.slug}`, {
