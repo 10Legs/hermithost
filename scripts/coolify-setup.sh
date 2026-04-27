@@ -207,10 +207,16 @@ echo "[setup] PrivateKey id=0 ensured for Coolify localhost server validation."
 
 # ── 7b. Disable Coolify's built-in proxy and sentinel ────────────────────────
 # HermitHost uses Traefik — Coolify's Caddy proxy (coolify-proxy) conflicts.
-# Setting proxy_type=NONE prevents Coolify from spawning coolify-proxy.
+# proxy_type column was removed in a Coolify schema migration; proxy config now
+# lives in the servers.proxy JSON column. Use the API (PATCH /servers/{uuid})
+# with proxy_type=none — Coolify calls changeProxy() internally which writes
+# the correct JSON structure.
 echo "[setup] Disabling Coolify built-in proxy (HermitHost uses Traefik)..."
-psql -c "UPDATE servers SET proxy_type='NONE' WHERE uuid='$SERVER_UUID';" > /dev/null
-echo "[setup] Proxy type set to NONE."
+PROXY_RESP=$(curl -sf -X PATCH "$COOLIFY_URL/servers/$SERVER_UUID" \
+  -H "$(auth_header)" -H "Content-Type: application/json" \
+  -d '{"proxy_type":"none"}' || echo "")
+echo "[setup] Proxy disable response: $PROXY_RESP"
+echo "[setup] Proxy type set to NONE via API."
 
 # coolify-sentinel is spawned by ServerManagerJob every ~60s when is_metrics_enabled
 # or is_server_api_enabled is true. Disable both to stop sentinel from being recreated.
