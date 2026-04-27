@@ -85,7 +85,7 @@ Pull Request opened
             ↓ (all must pass before merge)
 ```
 
-Deployment is left to the operator — run `docker compose up -d --build` on the host after pulling the latest code.
+Deployment is left to the operator — run `bash scripts/start.sh -d --build` on the host after pulling latest code.
 
 ### Setup
 
@@ -102,7 +102,7 @@ cp .env.template .env
 bash scripts/setup.sh
 
 # 3. Start the stack
-docker compose up -d
+bash scripts/start.sh -d
 ```
 
 ---
@@ -135,10 +135,10 @@ bash scripts/setup.sh
 ### 2. Start the stack
 
 ```bash
-docker compose up -d
+bash scripts/start.sh -d
 ```
 
-The `network-init` container automatically creates the `coolify` Docker network if it doesn't exist (required for inter-container communication).
+`start.sh` ensures the external `coolify` Docker network exists before starting the stack (required for inter-container communication).
 
 ### 3. Open the dashboard
 
@@ -273,7 +273,7 @@ Traefik + Let's Encrypt automatically issues and renews SSL certificates for all
 | Script | Purpose |
 |--------|---------|
 | `bash scripts/setup.sh` | First-time config — generates secrets, prompts for email + hostname |
-| `docker compose up -d` | Start the full stack (network-init auto-creates `coolify` network) |
+| `bash scripts/start.sh -d` | Start the full stack (auto-creates `coolify` network if needed) |
 | `bash scripts/stop.sh` | Stop all containers |
 | `bash scripts/restart.sh` | Restart the stack |
 | `bash scripts/status.sh` | Show container status |
@@ -441,10 +441,10 @@ Run `bash scripts/setup.sh` — it will prompt for anything missing and generate
 
 ### Stack won't start — Docker network missing
 
-The `network-init` container automatically creates the `coolify` network on startup. If you still see this error, check that the `network-init` service ran successfully:
+`scripts/start.sh` automatically creates the `coolify` network before starting the stack. If you ran `docker compose up` directly instead, create the network manually:
 
 ```bash
-docker compose logs network-init
+docker network create coolify
 ```
 
 ### Coolify login fails
