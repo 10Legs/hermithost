@@ -232,8 +232,10 @@ services:
       timeout: 5s
       retries: 3
     environment:
-      # Trust step-ca root CA so Lego can negotiate with it
-      LEGO_CA_CERTIFICATES: "/home/step/certs/root_ca.crt"
+      # Trust step-ca root CA so Lego can negotiate with it.
+      # Only set when running with --profile internal; empty value is
+      # ignored by Traefik so the letsencrypt resolver works unimpaired.
+      LEGO_CA_CERTIFICATES: "${LEGO_CA_CERTIFICATES:-}"
     ports:
       - "${TRAEFIK_HTTP_PORT:-8080}:80"
       - "${TRAEFIK_HTTPS_PORT:-8443}:443"

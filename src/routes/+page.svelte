@@ -290,8 +290,8 @@
 									<span class="status-dot status-{site.overallStatus}"></span>
 								{/if}
 								<div>
-									<a href="/sites/{site.slug}" class="site-domain">{site.domain}</a>
-									<div class="site-desc">{site.description}</div>
+									<a href="/sites/{site.slug}" class="site-name">{site.name}</a>
+									<div class="site-domain-sub mono">{site.domain}</div>
 								</div>
 							</div>
 						</td>
@@ -661,8 +661,7 @@
 		50% { opacity: 0.4; }
 	}
 
-	.site-domain {
-		font-family: var(--font-mono);
+	.site-name {
 		font-size: 13px;
 		color: var(--accent-teal);
 		font-weight: 500;
@@ -670,12 +669,12 @@
 		transition: color 0.1s;
 	}
 
-	.site-domain:hover {
+	.site-name:hover {
 		color: #5ab5b7;
 	}
 
-	.site-desc {
-		font-size: 12px;
+	.site-domain-sub {
+		font-size: 11px;
 		color: var(--text-secondary);
 		margin-top: 1px;
 	}
