@@ -92,4 +92,4 @@ fi
 
 echo ""
 echo "[setup] Configuration complete. Ready to start:"
-echo "        bash scripts/start.sh"
+echo "        docker compose up -d"

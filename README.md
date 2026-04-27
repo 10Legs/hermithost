@@ -2,7 +2,7 @@
 
 A self-hosted web platform dashboard for managing deployed sites, DNS records, and deployments. HermitHost wraps Coolify (deployments), Technitium or Cloudflare (DNS), and Traefik (reverse proxy + SSL) into a single unified dashboard with zero-config setup.
 
-**Status Dashboard** • **DNS Management** • **Deploy History** • **Health Monitoring** • **Services Pane** • **Backup & Restore** • **Auto SSL** • **Auto-Deploy CD**
+**Status Dashboard** • **DNS Management** • **Deploy History** • **Health Monitoring** • **Services Pane** • **Backup & Restore** • **Auto SSL**
 
 ---
 
@@ -16,7 +16,6 @@ HermitHost is a lightweight platform dashboard that gives you full visibility an
 - **Services pane:** Real-time view of all Docker containers — stack services and deployed sites — with start/stop/restart controls
 - **Backup & restore:** Export/import your full hermithost configuration
 - **Auto SSL:** Traefik + Let's Encrypt — HTTPS with no manual certificate management
-- **Auto-deploy CD:** Push to `main` → GitHub Actions builds new images and hot-swaps containers on the production host with automatic rollback on failure
 - **One-command setup:** `bash scripts/setup.sh` prompts for two values and handles the rest
 
 ---
@@ -73,61 +72,22 @@ Express API
 
 ---
 
-## CI/CD & Auto-Deploy
+## CI
 
-HermitHost ships with a full GitHub Actions pipeline. Every push to `main` triggers a zero-downtime deploy to the production host.
-
-### Pipeline Overview
+GitHub Actions runs CI on every pull request to `main`:
 
 ```
 Pull Request opened
-  → CI workflow (runs on any self-hosted runner)
+  → CI workflow (runs on self-hosted runner)
        ├─ API: TypeScript typecheck + build
        ├─ Frontend: TypeScript typecheck + svelte-check + build
        └─ Docker: both images build cleanly
             ↓ (all must pass before merge)
-
-Merge to main
-  → Deploy workflow (runs on runner labeled `production`)
-       ├─ Preflight: verify .env exists on host
-       ├─ Sync: git fetch + reset --hard origin/main
-       ├─ Snapshot: record current image IDs for rollback
-       ├─ Build API image    (docker compose build --no-cache api)
-       ├─ Build Frontend image
-       ├─ Deploy API         (hot-swap: --no-deps --no-build)
-       ├─ Deploy Frontend    (hot-swap: --no-deps --no-build)
-       ├─ Health check: GET http://localhost:9080/api/health  (30s window)
-       ├─ Health check: GET http://localhost:9080             (30s window)
-       ├─ [on failure] Rollback: restore previous image IDs
-       └─ [on success] Prune dangling images
 ```
 
-### Key Design Decisions
+Deployment is left to the operator — run `docker compose up -d --build` on the host after pulling the latest code.
 
-**Hot-swap, not full restart.** `docker compose up -d --no-deps --no-build` replaces only the `api` and `frontend` containers. Coolify, PostgreSQL, Redis, Traefik, and Technitium are never touched during a deploy — zero disruption to running sites.
-
-**No workspace checkout.** The deploy job runs directly from `STACK_DIR` (the live stack on the host), not from a fresh `actions/checkout` workspace. This ensures relative volume mounts (`./data`, `./traefik/conf.d`) always resolve against the real live directory.
-
-**Automatic rollback.** Before building new images, the deploy snapshots the current image IDs. If any step after the snapshot fails, the previous images are tagged and re-deployed automatically.
-
-**Dedicated runner.** The deploy job requires a runner labeled `production` — the same host that runs the live stack. The CI job runs on any available self-hosted runner. Two runners in the pool keeps CI fast without serializing on the production host.
-
-**Concurrency guard.** Only one deploy runs at a time (`cancel-in-progress: false`). If two merges land back-to-back, the second queues rather than cancels — no deploys are silently skipped.
-
-### Runner Setup
-
-Two self-hosted GitHub Actions runners are expected:
-
-| Runner | Label | Purpose |
-|--------|-------|---------|
-| Any host | `self-hosted` | CI checks on PRs |
-| Production host | `self-hosted, production` | Deploy to production |
-
-To add the `production` label: GitHub repo → Settings → Actions → Runners → click the production runner → edit labels → add `production`.
-
-### One-Time Bootstrap (Production Host)
-
-These steps are done once on the production host and never need to be repeated:
+### Setup
 
 ```bash
 # 1. Clone the repo to the live stack directory
@@ -142,19 +102,7 @@ cp .env.template .env
 bash scripts/setup.sh
 
 # 3. Start the stack
-bash scripts/start.sh
-```
-
-After this, every `git push origin main` deploys automatically.
-
-### Overriding the Stack Directory
-
-If your stack lives somewhere other than the default path, set a GitHub Actions variable:
-
-```
-Repository → Settings → Variables → Actions → New variable
-Name: STACK_DIR
-Value: /your/custom/path/hermithost
+docker compose up -d
 ```
 
 ---
@@ -187,10 +135,10 @@ bash scripts/setup.sh
 ### 2. Start the stack
 
 ```bash
-bash scripts/start.sh
+docker compose up -d
 ```
 
-This script automatically creates the `coolify` Docker network if it doesn't exist (required for inter-container communication).
+The `network-init` container automatically creates the `coolify` Docker network if it doesn't exist (required for inter-container communication).
 
 ### 3. Open the dashboard
 
@@ -325,7 +273,7 @@ Traefik + Let's Encrypt automatically issues and renews SSL certificates for all
 | Script | Purpose |
 |--------|---------|
 | `bash scripts/setup.sh` | First-time config — generates secrets, prompts for email + hostname |
-| `bash scripts/start.sh` | Start the full stack (auto-creates Docker `coolify` network) |
+| `docker compose up -d` | Start the full stack (network-init auto-creates `coolify` network) |
 | `bash scripts/stop.sh` | Stop all containers |
 | `bash scripts/restart.sh` | Restart the stack |
 | `bash scripts/status.sh` | Show container status |
@@ -393,8 +341,7 @@ All endpoints are under `/api`.
 hermithost/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml            # PR checks — typecheck, build, Docker image validation
-│       └── deploy.yml        # CD — push to main → hot-swap deploy on production host
+│       └── ci.yml            # PR checks — typecheck, build, Docker image validation
 ├── api/                      # Express API
 │   ├── src/
 │   │   ├── index.ts          # App setup + route registration
@@ -494,11 +441,10 @@ Run `bash scripts/setup.sh` — it will prompt for anything missing and generate
 
 ### Stack won't start — Docker network missing
 
-`scripts/start.sh` automatically creates the `coolify` network. If manually running `docker compose up`, ensure the network exists:
+The `network-init` container automatically creates the `coolify` network on startup. If you still see this error, check that the `network-init` service ran successfully:
 
 ```bash
-docker network create coolify
-docker compose up
+docker compose logs network-init
 ```
 
 ### Coolify login fails
@@ -518,16 +464,6 @@ docker compose up
 - Verify the site domain is publicly resolvable
 - Confirm outbound HTTPS from the container isn't blocked
 - Test: `curl -I https://yourdomain.com`
-
-### Auto-deploy not triggering
-
-- Confirm the production runner is online: GitHub repo → Settings → Actions → Runners
-- Confirm the runner has the `production` label
-- Check deploy run logs: GitHub repo → Actions → Deploy
-
-### Auto-deploy fails — .env not found
-
-The deploy expects `.env` at `STACK_DIR` on the production host. Run `bash scripts/setup.sh` once on the host to create it.
 
 ### ISP blocks port 53 (DNS queries fail)
 

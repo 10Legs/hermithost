@@ -1,4 +1,14 @@
 services:
+  # ── Network Init (one-shot) ────────────────────────────────────
+  # Creates the external 'coolify' network if it doesn't exist yet.
+  # Makes docker compose up self-sufficient on fresh machines.
+  network-init:
+    image: docker:cli
+    restart: "no"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: ["sh", "-c", "docker network inspect coolify >/dev/null 2>&1 || docker network create coolify"]
+
   # ── Coolify — Deployment Engine ────────────────────────────────
   coolify:
     image: "ghcr.io/coollabsio/coolify:latest"
@@ -247,6 +257,9 @@ services:
     networks:
       - hermithost-net
       - coolify
+    depends_on:
+      network-init:
+        condition: service_completed_successfully
 
   # ── SvelteKit Dashboard ────────────────────────────────────────
   frontend:
@@ -301,6 +314,8 @@ services:
       - coolify
     restart: unless-stopped
     depends_on:
+      network-init:
+        condition: service_completed_successfully
       coolify:
         condition: service_healthy
       coolify-server-setup:
