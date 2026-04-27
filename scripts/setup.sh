@@ -8,6 +8,15 @@ ROOT="$SCRIPT_DIR/.."
 ENV_FILE="$ROOT/.env"
 TEMPLATE_FILE="$ROOT/.env.template"
 
+# Portable in-place sed (macOS requires -i '', Linux requires -i)
+sed_i() {
+  if [[ "$OSTYPE" == darwin* ]]; then
+    sed -i '' "$@"
+  else
+    sed -i "$@"
+  fi
+}
+
 # ── Create .env from template if it doesn't exist ────────────────────────────
 if [ ! -f "$ENV_FILE" ]; then
   cp "$TEMPLATE_FILE" "$ENV_FILE"
@@ -19,7 +28,7 @@ set_if_empty() {
   local key="$1"
   local value="$2"
   if grep -qE "^${key}=\s*$" "$ENV_FILE" 2>/dev/null; then
-    sed -i '' "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+    sed_i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
     echo "[setup] Set ${key}."
   else
     echo "[setup] ${key} already set — skipping."
@@ -38,7 +47,7 @@ prompt_if_empty() {
         echo "[setup] ${key} is required. Please enter a value."
       fi
     done
-    sed -i '' "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+    sed_i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
     echo "[setup] Set ${key}."
   else
     echo "[setup] ${key} already set — skipping."
@@ -64,7 +73,7 @@ prompt_if_empty "NS_HOSTNAME"  "Public IP or hostname of this server (e.g. 192.1
 if grep -qE "^NS_SERVER_IP=\s*$" "$ENV_FILE" 2>/dev/null; then
   AUTO_IP=$(curl -sf --max-time 5 https://ifconfig.me 2>/dev/null || echo "")
   if [ -n "$AUTO_IP" ]; then
-    sed -i '' "s|^NS_SERVER_IP=.*|NS_SERVER_IP=${AUTO_IP}|" "$ENV_FILE"
+    sed_i "s|^NS_SERVER_IP=.*|NS_SERVER_IP=${AUTO_IP}|" "$ENV_FILE"
     echo "[setup] Auto-detected NS_SERVER_IP: ${AUTO_IP}"
   else
     prompt_if_empty "NS_SERVER_IP" "Public IPv4 of this server for DNS glue records (e.g. 203.0.113.1)"
@@ -80,7 +89,7 @@ ACME_EMAIL_VALUE="$(grep -E '^ACME_EMAIL=' "$ENV_FILE" | cut -d'=' -f2-)"
 set_if_empty "COOLIFY_ADMIN_EMAIL" "${ACME_EMAIL_VALUE}"
 if grep -qE "^COOLIFY_ADMIN_PASSWORD=\s*$" "$ENV_FILE" 2>/dev/null; then
   GENERATED_PASSWORD="A$(openssl rand -hex 10)1!"
-  sed -i '' "s|^COOLIFY_ADMIN_PASSWORD=.*|COOLIFY_ADMIN_PASSWORD=${GENERATED_PASSWORD}|" "$ENV_FILE"
+  sed_i "s|^COOLIFY_ADMIN_PASSWORD=.*|COOLIFY_ADMIN_PASSWORD=${GENERATED_PASSWORD}|" "$ENV_FILE"
   echo "[setup] Set COOLIFY_ADMIN_PASSWORD."
   echo ""
   echo "[setup] *** SAVE THIS PASSWORD — it will not be shown again ***"
