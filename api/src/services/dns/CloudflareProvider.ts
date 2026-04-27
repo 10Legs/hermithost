@@ -132,15 +132,36 @@ export class CloudflareProvider implements DnsProvider {
   }
 
   async createZone(name: string): Promise<void> {
-    try {
-      const zone = await this.cfFetch<CfZone>('/zones', {
-        method: 'POST',
-        body: JSON.stringify({ name, type: 'full', jump_start: false }),
-      });
-      this.zoneCache.set(name, zone.id);
-    } catch (err) {
-      throw new DnsOperationError('Failed to create Cloudflare zone', err);
+    // Use raw fetch here so we can inspect Cloudflare error codes before
+    // deciding whether to throw. cfFetch collapses errors into a string and
+    // discards the code, making idempotency checks impossible.
+    const res = await fetch(`${CF_BASE}/zones`, {
+      method: 'POST',
+      headers: this.headers,
+      body: JSON.stringify({ name, type: 'full', jump_start: false }),
+    });
+    const data = await res.json() as CfResponse<CfZone>;
+    if (!data.success) {
+      // 1061 = "already exists" — treat as success (idempotent).
+      if (data.errors.some((e) => e.code === 1061)) {
+        // Zone already exists; populate the cache so subsequent calls avoid
+        // an extra lookup, but only if we don't already have it cached.
+        if (!this.zoneCache.has(name)) {
+          try {
+            const zones = await this.cfFetch<CfZone[]>(
+              `/zones?name=${encodeURIComponent(name)}`
+            );
+            if (zones.length > 0) this.zoneCache.set(name, zones[0].id);
+          } catch {
+            // Cache miss is non-fatal; getZoneId will fetch on demand.
+          }
+        }
+        return;
+      }
+      const msg = data.errors[0]?.message ?? `Cloudflare API error (HTTP ${res.status})`;
+      throw new DnsOperationError('Failed to create Cloudflare zone', new Error(msg));
     }
+    this.zoneCache.set(name, data.result.id);
   }
 
   async deleteZone(name: string): Promise<void> {
