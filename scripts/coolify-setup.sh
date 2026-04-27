@@ -218,10 +218,12 @@ PROXY_RESP=$(curl -sf -X PATCH "$COOLIFY_URL/servers/$SERVER_UUID" \
 echo "[setup] Proxy disable response: $PROXY_RESP"
 echo "[setup] Proxy type set to NONE via API."
 
-# coolify-sentinel is spawned by ServerManagerJob every ~60s when is_metrics_enabled
-# or is_server_api_enabled is true. Disable both to stop sentinel from being recreated.
-echo "[setup] Disabling Coolify sentinel (metrics + server API not needed)..."
-psql -c "UPDATE server_settings SET is_metrics_enabled=false, is_server_api_enabled=false WHERE server_id=(SELECT id FROM servers WHERE uuid='$SERVER_UUID');" > /dev/null
+# coolify-sentinel is spawned by ServerManagerJob when is_metrics_enabled or
+# is_sentinel_enabled is true. is_server_api_enabled was removed in a newer Coolify
+# schema migration; the sentinel gate is now is_sentinel_enabled. Disable both to
+# stop sentinel from being recreated.
+echo "[setup] Disabling Coolify sentinel (metrics + sentinel not needed)..."
+psql -c "UPDATE server_settings SET is_metrics_enabled=false, is_sentinel_enabled=false WHERE server_id=(SELECT id FROM servers WHERE uuid='$SERVER_UUID');" > /dev/null
 echo "[setup] Sentinel disabled."
 
 # ── 8. Validate server ────────────────────────────────────────────────────────
