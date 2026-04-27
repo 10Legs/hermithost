@@ -142,7 +142,7 @@ cp .env.template .env
 bash scripts/setup.sh
 
 # 3. Start the stack
-bash scripts/start.sh
+docker compose up -d
 ```
 
 After this, every `git push origin main` deploys automatically.
@@ -187,10 +187,10 @@ bash scripts/setup.sh
 ### 2. Start the stack
 
 ```bash
-bash scripts/start.sh
+docker compose up -d
 ```
 
-This script automatically creates the `coolify` Docker network if it doesn't exist (required for inter-container communication).
+The `network-init` container automatically creates the `coolify` Docker network if it doesn't exist (required for inter-container communication).
 
 ### 3. Open the dashboard
 
@@ -325,7 +325,7 @@ Traefik + Let's Encrypt automatically issues and renews SSL certificates for all
 | Script | Purpose |
 |--------|---------|
 | `bash scripts/setup.sh` | First-time config — generates secrets, prompts for email + hostname |
-| `bash scripts/start.sh` | Start the full stack (auto-creates Docker `coolify` network) |
+| `docker compose up -d` | Start the full stack (network-init auto-creates `coolify` network) |
 | `bash scripts/stop.sh` | Stop all containers |
 | `bash scripts/restart.sh` | Restart the stack |
 | `bash scripts/status.sh` | Show container status |
@@ -494,11 +494,10 @@ Run `bash scripts/setup.sh` — it will prompt for anything missing and generate
 
 ### Stack won't start — Docker network missing
 
-`scripts/start.sh` automatically creates the `coolify` network. If manually running `docker compose up`, ensure the network exists:
+The `network-init` container automatically creates the `coolify` network on startup. If you still see this error, check that the `network-init` service ran successfully:
 
 ```bash
-docker network create coolify
-docker compose up
+docker compose logs network-init
 ```
 
 ### Coolify login fails

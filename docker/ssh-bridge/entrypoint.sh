@@ -35,12 +35,5 @@ else
   adduser deploy root
 fi
 
-# Ensure the 'coolify' Docker network exists (required for app deployments)
-if ! docker network inspect coolify > /dev/null 2>&1; then
-  docker network create coolify > /dev/null 2>&1 && echo "[ssh-bridge] Created 'coolify' Docker network." || echo "[ssh-bridge] WARNING: could not create 'coolify' network."
-else
-  echo "[ssh-bridge] 'coolify' Docker network already exists."
-fi
-
 echo "[ssh-bridge] Starting sshd..."
 exec /usr/sbin/sshd -D -e
