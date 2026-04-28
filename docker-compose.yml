@@ -196,7 +196,6 @@ services:
     image: traefik:v3.2
     restart: unless-stopped
     command:
-      - "--api.insecure=true"
       - "--providers.file.directory=/etc/traefik/conf.d"
       - "--providers.file.watch=true"
       - "--entrypoints.http.address=:80"
@@ -239,7 +238,6 @@ services:
     ports:
       - "${TRAEFIK_HTTP_PORT:-8080}:80"
       - "${TRAEFIK_HTTPS_PORT:-8443}:443"
-      - "8081:8080"
       - "9080:9080"
     volumes:
       - ./traefik/conf.d:/etc/traefik/conf.d
@@ -382,7 +380,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "5380:5380"                           # Technitium web UI / API
+      - "127.0.0.1:5380:5380"                 # Technitium web UI / API (localhost only)
       - "${DNS_PORT:-53053}:53/udp"          # DNS queries (UDP)
       - "${DNS_PORT:-53053}:53/tcp"          # DNS queries (TCP)
     volumes:
