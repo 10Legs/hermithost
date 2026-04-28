@@ -383,6 +383,11 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
         const resolvedRepo = site.deploy_auth === 'pat' && site.deploy_token
           ? embedPatInRepoUrl(site.git_repository, site.deploy_token)
           : site.git_repository;
+        // Resolve fqdn before creation — Coolify v4.3.5 PATCH silently ignores 'domains',
+        // but POST /applications/public accepts fqdn at creation time.
+        const coolifyFqdn = site.domain
+          ? (/^https?:\/\//i.test(site.domain) ? site.domain : `https://${site.domain}`)
+          : undefined;
         const app = await coolify.createApplication({
           type: site.deploy_auth === 'pat' ? 'public' : 'private',
           name: site.name,
@@ -396,16 +401,13 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
           environment_name: 'production',
           instant_deploy: false,
           ...(site.description ? { description: site.description } : {}),
+          ...(coolifyFqdn ? { fqdn: coolifyFqdn } : {}),
         });
         if (site.deploy_auth !== 'pat') {
           await linkGithubKey(app.uuid);
         }
         if (site.domain) {
-          const coolifyDomain = /^https?:\/\//i.test(site.domain) ? site.domain : `https://${site.domain}`;
-          await coolify.updateApplication(app.uuid, { domains: coolifyDomain }).catch((e: Error) => {
-            console.warn(`[backup-restore] domains patch failed for ${app.uuid} (${site.name}): ${e.message}`);
-          });
-          // Verify domain was actually set — Coolify may silently ignore the patch
+          // Verify domain was actually set by Coolify at creation time
           const refreshed = await coolify.getApplication(app.uuid).catch(() => null);
           if (refreshed && !refreshed.fqdn?.includes(site.domain)) {
             console.warn(`[backup-restore] domain verification failed for ${app.uuid} (${site.name}): expected ${site.domain}, got ${refreshed.fqdn}`);

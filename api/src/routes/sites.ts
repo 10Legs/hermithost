@@ -534,6 +534,17 @@ router.post('/', async (req: Request, res: Response) => {
       ? embedPatInRepoUrl(body.git_repository, body.deploy_token!.trim())
       : httpsToSshUrl(body.git_repository);
 
+    // Resolve fqdn BEFORE creating the app — Coolify v4.3.5 PATCH /applications/{uuid}
+    // silently ignores the 'domains' field, but POST /applications/public accepts fqdn at creation time.
+    // In internal mode, override domain to ${slug}.hh regardless of user input.
+    const nameSlug = body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const internalDomain = readNetworkMode() === 'internal' ? `${nameSlug}.hh` : null;
+    const resolvedFqdn = internalDomain ?? (body.fqdn ?? body.domain);
+    // Coolify requires full URL format — add https:// if no protocol present
+    const coolifyFqdn = resolvedFqdn
+      ? (/^https?:\/\//i.test(resolvedFqdn) ? resolvedFqdn : `https://${resolvedFqdn}`)
+      : undefined;
+
     const payload: CoolifyCreateApplicationPayload = {
       type: deployAuth === 'pat' ? 'public' : 'private',
       name: body.name,
@@ -549,6 +560,7 @@ router.post('/', async (req: Request, res: Response) => {
       ...(body.description !== undefined ? { description: body.description } : {}),
       ...(body.docker_compose_location !== undefined ? { docker_compose_location: body.docker_compose_location } : (body.build_pack === 'dockercompose' ? { docker_compose_location: '/docker-compose.yml' } : {})),
       ...(body.base_directory !== undefined ? { base_directory: body.base_directory } : {}),
+      ...(coolifyFqdn ? { fqdn: coolifyFqdn } : {}),
     };
     let app = await client.createApplication(payload);
 
@@ -565,18 +577,8 @@ router.post('/', async (req: Request, res: Response) => {
       });
     }
 
-    // fqdn is not accepted at creation time — patch it immediately after using 'domains' field
-    // In internal mode, override domain to ${slug}.hh regardless of user input
-    const nameSlug = body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const internalDomain = readNetworkMode() === 'internal' ? `${nameSlug}.hh` : null;
-    const resolvedFqdn = internalDomain ?? (body.fqdn ?? body.domain);
     if (resolvedFqdn) {
-      // Coolify requires full URL format — add https:// if no protocol present
-      const coolifyDomain = /^https?:\/\//i.test(resolvedFqdn) ? resolvedFqdn : `https://${resolvedFqdn}`;
-      await client.updateApplication(app.uuid, { domains: coolifyDomain }).catch((e: Error) => {
-        console.warn(`[coolify] domains patch failed for ${app.uuid}:`, e.message);
-      });
-      // Verify domain was actually set — Coolify may silently ignore the patch
+      // Verify domain was actually set by Coolify at creation time
       const refreshed = await client.getApplication(app.uuid).catch(() => null);
       if (refreshed) {
         app = refreshed;
