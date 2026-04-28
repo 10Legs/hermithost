@@ -402,7 +402,15 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
         }
         if (site.domain) {
           const coolifyDomain = /^https?:\/\//i.test(site.domain) ? site.domain : `https://${site.domain}`;
-          await coolify.updateApplication(app.uuid, { domains: coolifyDomain, force_domain_override: true }).catch(() => {});
+          await coolify.updateApplication(app.uuid, { domains: coolifyDomain, force_domain_override: true }).catch((e: Error) => {
+            console.warn(`[backup-restore] domains patch failed for ${app.uuid} (${site.name}): ${e.message}`);
+          });
+          // Verify domain was actually set — Coolify may silently ignore the patch
+          const refreshed = await coolify.getApplication(app.uuid).catch(() => null);
+          if (refreshed && !refreshed.fqdn?.includes(site.domain)) {
+            console.warn(`[backup-restore] domain verification failed for ${app.uuid} (${site.name}): expected ${site.domain}, got ${refreshed.fqdn}`);
+            result.sites.created.push(`${site.name} [domain not set: expected ${site.domain}]`);
+          }
           const dnsErr = await provisionSiteDns(site.domain);
           if (dnsErr) {
             result.sites.created.push(`${site.name} [DNS provision failed: ${dnsErr}]`);
