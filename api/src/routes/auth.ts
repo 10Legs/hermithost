@@ -8,7 +8,6 @@ const MAX_AGE_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
 function buildCookieHeader(value: string, req: Request, clear = false): string {
   const isSecure =
-    process.env.NODE_ENV === 'production' ||
     req.secure ||
     (req.headers['x-forwarded-proto'] ?? '').includes('https');
 
