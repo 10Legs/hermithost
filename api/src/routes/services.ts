@@ -242,8 +242,18 @@ router.post('/:id/start', async (req: Request, res: Response) => {
     await dockerPost(`/containers/${req.params.id}/start`);
     res.status(204).send();
   } catch (err) {
-    console.error(`[services] start ${req.params.id} failed:`, (err as Error).message);
-    res.status(502).json({ error: 'Failed to start container' });
+    const msg = (err as Error).message;
+    // Check for proxy auth/deny errors
+    if (msg.includes('403') || msg.includes('not managed')) {
+      console.warn(`[services] start ${req.params.id} denied:`, msg);
+      res.status(403).json({ error: 'Container is not managed by hermithost' });
+    } else if (msg.includes('404') || msg.includes('no such container')) {
+      console.warn(`[services] start ${req.params.id} not found:`, msg);
+      res.status(404).json({ error: 'Container not found' });
+    } else {
+      console.error(`[services] start ${req.params.id} failed:`, msg);
+      res.status(502).json({ error: 'Failed to start container' });
+    }
   }
 });
 
@@ -253,8 +263,18 @@ router.post('/:id/stop', async (req: Request, res: Response) => {
     await dockerPost(`/containers/${req.params.id}/stop?t=10`);
     res.status(204).send();
   } catch (err) {
-    console.error(`[services] stop ${req.params.id} failed:`, (err as Error).message);
-    res.status(502).json({ error: 'Failed to stop container' });
+    const msg = (err as Error).message;
+    // Check for proxy auth/deny errors
+    if (msg.includes('403') || msg.includes('not managed')) {
+      console.warn(`[services] stop ${req.params.id} denied:`, msg);
+      res.status(403).json({ error: 'Container is not managed by hermithost' });
+    } else if (msg.includes('404') || msg.includes('no such container')) {
+      console.warn(`[services] stop ${req.params.id} not found:`, msg);
+      res.status(404).json({ error: 'Container not found' });
+    } else {
+      console.error(`[services] stop ${req.params.id} failed:`, msg);
+      res.status(502).json({ error: 'Failed to stop container' });
+    }
   }
 });
 
@@ -264,8 +284,18 @@ router.post('/:id/restart', async (req: Request, res: Response) => {
     await dockerPost(`/containers/${req.params.id}/restart?t=10`);
     res.status(204).send();
   } catch (err) {
-    console.error(`[services] restart ${req.params.id} failed:`, (err as Error).message);
-    res.status(502).json({ error: 'Failed to restart container' });
+    const msg = (err as Error).message;
+    // Check for proxy auth/deny errors
+    if (msg.includes('403') || msg.includes('not managed')) {
+      console.warn(`[services] restart ${req.params.id} denied:`, msg);
+      res.status(403).json({ error: 'Container is not managed by hermithost' });
+    } else if (msg.includes('404') || msg.includes('no such container')) {
+      console.warn(`[services] restart ${req.params.id} not found:`, msg);
+      res.status(404).json({ error: 'Container not found' });
+    } else {
+      console.error(`[services] restart ${req.params.id} failed:`, msg);
+      res.status(502).json({ error: 'Failed to restart container' });
+    }
   }
 });
 

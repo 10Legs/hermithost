@@ -1,5 +1,6 @@
 {
 	"extends": "./.svelte-kit/tsconfig.json",
+	"exclude": ["tests", "sidecar"],
 	"compilerOptions": {
 		"allowJs": true,
 		"checkJs": true,

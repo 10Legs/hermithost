@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -57,15 +57,22 @@ function injectToken(githubUrl: string): string {
   return githubUrl.replace(/^https:\/\//, `https://${token}@`);
 }
 
+const GITHUB_URL_RE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(\.git)?$/;
+
+function validateGitUrl(url: string): void {
+  if (!GITHUB_URL_RE.test(url)) {
+    throw new Error(`Invalid GitHub URL: ${url}`);
+  }
+}
+
 function cloneOrPull(githubUrl: string, repoDir: string): void {
   const cloneUrl = injectToken(githubUrl);
   if (fs.existsSync(path.join(repoDir, '.git'))) {
-    // For pull on private repos, use the authenticated URL
-    execSync(`git remote set-url origin "${cloneUrl}"`, { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['remote', 'set-url', 'origin', cloneUrl], { cwd: repoDir, stdio: 'pipe' });
     execSync('git pull', { cwd: repoDir, stdio: 'pipe' });
     return;
   }
-  execSync(`git clone --depth 1 "${cloneUrl}" "${repoDir}"`, { stdio: 'pipe' });
+  execFileSync('git', ['clone', '--depth', '1', cloneUrl, repoDir], { stdio: 'pipe' });
 }
 
 function runBuild(repoDir: string): void {
@@ -76,6 +83,7 @@ function runBuild(repoDir: string): void {
 }
 
 export function deployFromGitHub(githubUrl: string): DeployedSite {
+  validateGitUrl(githubUrl);
   fs.mkdirSync(SITES_DIR, { recursive: true });
 
   const slug = slugFromUrl(githubUrl);

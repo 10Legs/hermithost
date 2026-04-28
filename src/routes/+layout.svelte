@@ -1,8 +1,18 @@
 <script lang="ts">
 	import '../app.css';
 	import { page } from '$app/stores';
+	import { goto } from '$app/navigation';
+
+	async function handleLogout() {
+		try {
+			await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+		} finally {
+			await goto('/login');
+		}
+	}
 </script>
 
+{#if $page.url.pathname !== '/login'}
 <div class="app-shell">
 	<nav class="sidebar">
 		<div class="sidebar-header">
@@ -55,6 +65,10 @@
 				<span class="dot dot-success"></span>
 				<span>vps-02</span>
 			</div>
+			<button class="logout-btn" on:click={handleLogout} aria-label="Sign out">
+				<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+				Sign Out
+			</button>
 		</div>
 	</nav>
 
@@ -62,6 +76,9 @@
 		<slot />
 	</main>
 </div>
+{:else}
+	<slot />
+{/if}
 
 <style>
 	.app-shell {
@@ -202,6 +219,27 @@
 	}
 
 	.dot-success { background: var(--success); }
+
+	.logout-btn {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		background: none;
+		border: none;
+		color: var(--text-muted);
+		font-size: 11px;
+		font-family: var(--font-ui);
+		padding: 4px 0;
+		margin-top: 4px;
+		cursor: pointer;
+		transition: color 0.15s;
+		width: 100%;
+		text-align: left;
+	}
+
+	.logout-btn:hover {
+		color: var(--danger);
+	}
 
 	.main-content {
 		margin-left: 220px;
