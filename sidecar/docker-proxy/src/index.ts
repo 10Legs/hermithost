@@ -60,19 +60,21 @@ async function assertManaged(req: Request, res: Response, next: NextFunction): P
   next();
 }
 
-// ── GET /containers — list containers, pass through filters from query ────────
+// ── GET /containers* — list containers, pass through filters from query ────────
 
-app.get('/containers', async (req: Request, res: Response): Promise<void> => {
+app.get('/containers*', async (req: Request, res: Response): Promise<void> => {
   try {
+    // If path is exactly /containers (no trailing /json), add it for Docker API compatibility
+    const dockerPath = req.path === '/containers' ? '/containers/json' : req.path;
     const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
     const result = await dockerRequest({
-      path: `/containers/json${qs}`,
+      path: `${dockerPath}${qs}`,
       method: 'GET',
       headers: { Host: 'localhost' },
     });
     res.status(result.statusCode).set('Content-Type', 'application/json').send(result.body);
   } catch (err) {
-    console.error('[docker-proxy] GET /containers failed:', (err as Error).message);
+    console.error('[docker-proxy] GET /containers* failed:', (err as Error).message);
     res.status(502).json({ error: 'Docker socket error' });
   }
 });

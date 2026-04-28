@@ -30,6 +30,13 @@ export function dockerGet(path: string): Promise<unknown> {
         let body = '';
         res.on('data', (d: Buffer) => { body += d; });
         res.on('end', () => {
+          const statusCode = res.statusCode ?? 0;
+          if (statusCode < 200 || statusCode >= 300) {
+            let message = `Docker proxy error ${statusCode}`;
+            try { message = (JSON.parse(body) as { error?: string; message?: string }).error ?? message; } catch {}
+            reject(new Error(message));
+            return;
+          }
           try { resolve(JSON.parse(body)); }
           catch { reject(new Error(`Docker proxy parse error: ${body.slice(0, 200)}`)); }
         });
@@ -89,8 +96,16 @@ export function dockerPost(path: string, body?: object): Promise<{ statusCode: n
       let responseBody = '';
       res.on('data', (d: Buffer) => { responseBody += d; });
       res.on('end', () => {
-        // Docker returns 204 No Content for start/stop/restart
-        resolve({ statusCode: res.statusCode });
+        const statusCode = res.statusCode ?? 0;
+        // Docker returns 204 No Content for successful start/stop/restart
+        // Proxy returns 403 for unauthorized, 404 for not found, etc.
+        if (statusCode >= 200 && statusCode < 300) {
+          resolve({ statusCode });
+        } else {
+          let message = `Docker proxy error ${statusCode}`;
+          try { message = (JSON.parse(responseBody) as { error?: string; message?: string }).error ?? message; } catch {}
+          reject(new Error(message));
+        }
       });
     });
     req.on('error', reject);
