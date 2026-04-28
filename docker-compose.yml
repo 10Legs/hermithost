@@ -283,6 +283,8 @@ services:
       TRAEFIK_LOG_PATH: "/traefik-logs/traefik-access.log"
       STATS_INGEST_INTERVAL_MS: "${STATS_INGEST_INTERVAL_MS:-60000}"
       DATA_DIR: "/app/data/lifecycle"
+      HERMITHOST_PASSWORD: "${HERMITHOST_PASSWORD}"
+      COOKIE_SECRET: "${COOKIE_SECRET}"
       PGHOST: "coolify-db"
       PGPORT: "5432"
       PGDATABASE: "coolify"

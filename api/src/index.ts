@@ -8,6 +8,8 @@ import backupRouter from './routes/backup';
 import configRouter from './routes/config';
 import statsRouter from './routes/stats';
 import servicesRouter from './routes/services';
+import authRouter from './routes/auth';
+import { requireAuth } from './middleware/auth';
 import { getDeployedSite } from './services/githubDeploy';
 import { startStatsIngester } from './services/statsIngester';
 import { startLiveStats } from './services/liveStats';
@@ -22,8 +24,16 @@ const PORT = process.env.PORT ?? 3001;
 app.use(cors({ origin: process.env.CORS_ORIGIN ?? 'http://localhost:3000' }));
 app.use(express.json());
 
-// Routes
+// ── Auth routes — mounted BEFORE requireAuth so login/logout/check are public ──
+app.use('/api/auth', authRouter);
+
+// ── Public routes — no auth required ──
 app.use('/api/health', healthRouter);
+
+// ── requireAuth guards all remaining /api/* routes ──
+app.use('/api', requireAuth);
+
+// Protected API routes
 app.use('/api/sites', sitesRouter);
 app.use('/api/hosted', hostedRouter);
 app.use('/api/dns', dnsRouter);
