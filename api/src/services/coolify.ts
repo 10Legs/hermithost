@@ -86,7 +86,6 @@ export interface CoolifyUpdateApplicationPayload {
   name?: string;
   description?: string;
   domains?: string;  // sets fqdn — Coolify PATCH uses 'domains', not 'fqdn'
-  force_domain_override?: boolean;
   git_repository?: string;
   git_branch?: string;
   build_pack?: string;

@@ -573,12 +573,17 @@ router.post('/', async (req: Request, res: Response) => {
     if (resolvedFqdn) {
       // Coolify requires full URL format — add https:// if no protocol present
       const coolifyDomain = /^https?:\/\//i.test(resolvedFqdn) ? resolvedFqdn : `https://${resolvedFqdn}`;
-      await client.updateApplication(app.uuid, { domains: coolifyDomain, force_domain_override: true }).catch((e: Error) => {
+      await client.updateApplication(app.uuid, { domains: coolifyDomain }).catch((e: Error) => {
         console.warn(`[coolify] domains patch failed for ${app.uuid}:`, e.message);
       });
-      // Re-fetch to get full app with updated fqdn
+      // Verify domain was actually set — Coolify may silently ignore the patch
       const refreshed = await client.getApplication(app.uuid).catch(() => null);
-      if (refreshed) app = refreshed;
+      if (refreshed) {
+        app = refreshed;
+        if (!refreshed.fqdn?.includes(resolvedFqdn)) {
+          console.warn(`[coolify] domain verification failed for ${app.uuid}: expected ${resolvedFqdn}, got ${refreshed.fqdn}`);
+        }
+      }
       await provisionDns(resolvedFqdn);
       // Route file written after first deploy (container doesn't exist yet at creation time)
     }
