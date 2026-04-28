@@ -383,8 +383,7 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
         const resolvedRepo = site.deploy_auth === 'pat' && site.deploy_token
           ? embedPatInRepoUrl(site.git_repository, site.deploy_token)
           : site.git_repository;
-        // Resolve fqdn before creation — Coolify v4.3.5 PATCH silently ignores 'domains',
-        // but POST /applications/public accepts fqdn at creation time.
+        // Resolve domain before creation — Coolify POST /applications/public uses 'domains' field.
         const coolifyFqdn = site.domain
           ? (/^https?:\/\//i.test(site.domain) ? site.domain : `https://${site.domain}`)
           : undefined;
@@ -401,7 +400,7 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
           environment_name: 'production',
           instant_deploy: false,
           ...(site.description ? { description: site.description } : {}),
-          ...(coolifyFqdn ? { fqdn: coolifyFqdn } : {}),
+          ...(coolifyFqdn ? { domains: coolifyFqdn } : {}),
         });
         if (site.deploy_auth !== 'pat') {
           await linkGithubKey(app.uuid);
