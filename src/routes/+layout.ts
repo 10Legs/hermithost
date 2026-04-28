@@ -7,7 +7,7 @@ export const ssr = false;
 export const load: LayoutLoad = async ({ url, fetch }) => {
 	if (!browser) return {};
 
-	const isLoginPage = url.pathname === '/login';
+	const isLoginPage = url.pathname.startsWith('/login');
 
 	try {
 		const res = await fetch('/api/auth/check', { credentials: 'same-origin' });
