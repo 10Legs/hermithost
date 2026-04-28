@@ -687,7 +687,7 @@
 	<div class="breadcrumb">
 		<a href="/" class="breadcrumb-link">Sites</a>
 		<span class="breadcrumb-sep">/</span>
-		<span class="breadcrumb-current mono">{site.domain}</span>
+		<span class="breadcrumb-current">{site.name}</span>
 	</div>
 
 	<!-- Page header -->
@@ -695,10 +695,10 @@
 		<div class="header-left">
 			<div class="site-title-row">
 				<span class="status-dot status-{site.overallStatus}"></span>
-				<h1 class="page-title mono">{site.domain}</h1>
+				<h1 class="page-title">{site.name}</h1>
 			</div>
 			<div class="site-meta">
-				<span>{site.description}</span>
+				<span class="mono">{site.domain}</span>
 				<span class="sep">·</span>
 				<span class="mono">{site.repository}</span>
 				<span class="sep">·</span>
