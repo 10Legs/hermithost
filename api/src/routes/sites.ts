@@ -181,7 +181,7 @@ export async function provisionDns(fqdn: string): Promise<void> {
   }
 
   try {
-    await provider.addRecord(domain, { type: 'A', name: domain, value: serverIp, ttl: 3600 });
+    await provider.addRecord(domain, { type: 'A', name: '@', value: serverIp, ttl: 3600 });
     console.log(`[dns-provision] A record created: ${domain} @ → ${serverIp}`);
   } catch (err) {
     console.warn(`[dns-provision] A record create warning for ${domain}:`, (err as Error).message);
