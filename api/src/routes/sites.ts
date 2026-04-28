@@ -1,16 +1,21 @@
 import { Router, Request, Response } from 'express';
 import { readFileSync, writeFileSync, unlinkSync } from 'fs';
 import * as path from 'path';
+import * as yaml from 'js-yaml';
 import { dockerGet, dockerPost } from '../services/docker';
 import { DnsRecord } from '../types';
 import {
   createCoolifyClient,
+  CoolifyClient,
+  CoolifyApplication,
   CoolifyCreateApplicationPayload,
   CoolifyUpdateApplicationPayload,
   CoolifyEnv,
+  CoolifyEnvVar,
   CreateEnvPayload,
   UpdateEnvPayload,
 } from '../services/coolify';
+import { extractEnvVars, generateSecretValue } from '../lib/composeEnv';
 import { mapSite, mapDeploy } from '../services/mapper';
 import { probeSite } from '../services/healthProbe';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
@@ -18,6 +23,82 @@ import { createTechnitiumClient, TechnitiumClient } from '../services/technitium
 import { readNsHostname, readNsServerIp, readNetworkMode } from './config';
 
 const router = Router();
+
+// ── Docker Compose domain helper ──────────────────────────────────────────────
+// After creating a dockercompose app, Coolify parses the compose file async.
+// We poll getApplication() until docker_compose_raw is populated, then PATCH
+// docker_compose_domains to wire the primary service to the requested FQDN.
+
+const COMPOSE_POLL_INTERVAL_MS = 200;
+const COMPOSE_POLL_MAX_ATTEMPTS = 300; // ~60s total
+const COMPOSE_PRIMARY_SERVICE_NAMES = ['web', 'app', 'frontend', 'api', 'nginx'];
+
+async function setDockerComposeDomain(
+  client: CoolifyClient,
+  app: CoolifyApplication,
+  fqdn: string,
+): Promise<CoolifyApplication> {
+  console.log(`[coolify] dockercompose flow: waiting for compose parse (uuid=${app.uuid})...`);
+
+  let composedApp: CoolifyApplication | null = null;
+  for (let attempt = 0; attempt < COMPOSE_POLL_MAX_ATTEMPTS; attempt++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, COMPOSE_POLL_INTERVAL_MS));
+    const polled = await client.getApplication(app.uuid).catch(() => null);
+    if (polled?.docker_compose_raw) {
+      composedApp = polled;
+      break;
+    }
+  }
+
+  if (!composedApp?.docker_compose_raw) {
+    console.warn(
+      `[coolify] dockercompose flow: timed out waiting for docker_compose_raw (uuid=${app.uuid}). ` +
+      'Domain assignment skipped — retry by updating the application manually.',
+    );
+    return composedApp ?? app;
+  }
+
+  // Parse service names from compose YAML
+  let serviceNames: string[] = [];
+  try {
+    const parsed = yaml.load(composedApp.docker_compose_raw) as Record<string, unknown>;
+    const services = (parsed?.services ?? {}) as Record<string, unknown>;
+    serviceNames = Object.keys(services);
+  } catch (parseErr) {
+    console.warn(`[coolify] dockercompose flow: failed to parse docker_compose_raw:`, (parseErr as Error).message);
+    return composedApp;
+  }
+
+  // Pick primary service: prefer well-known names, else first in iteration order
+  const primaryService =
+    COMPOSE_PRIMARY_SERVICE_NAMES.find((name) => serviceNames.includes(name)) ?? serviceNames[0];
+
+  if (!primaryService) {
+    console.warn(`[coolify] dockercompose flow: no services found in compose YAML — domain assignment skipped`);
+    return composedApp;
+  }
+
+  console.log(
+    `[coolify] discovered services: [${serviceNames.join(', ')}]; using primary: ${primaryService}`,
+  );
+
+  const domainEntry = { name: primaryService, domain: fqdn };
+  try {
+    const patched = await client.updateApplication(app.uuid, {
+      docker_compose_domains: [domainEntry],
+    });
+    console.log(
+      `[coolify] PATCH docker_compose_domains success: service=${primaryService} domain=${fqdn} uuid=${app.uuid}`,
+    );
+    return patched;
+  } catch (patchErr) {
+    console.warn(
+      `[coolify] PATCH docker_compose_domains failed: service=${primaryService} domain=${fqdn} uuid=${app.uuid}:`,
+      (patchErr as Error).message,
+    );
+    return composedApp;
+  }
+}
 
 // ── Deploy auth sidecar ───────────────────────────────────────────────────────
 // Coolify may strip embedded PAT credentials from stored git_repository URLs,
@@ -560,7 +641,9 @@ router.post('/', async (req: Request, res: Response) => {
       ...(body.description !== undefined ? { description: body.description } : {}),
       ...(body.docker_compose_location !== undefined ? { docker_compose_location: body.docker_compose_location } : (body.build_pack === 'dockercompose' ? { docker_compose_location: '/docker-compose.yml' } : {})),
       ...(body.base_directory !== undefined ? { base_directory: body.base_directory } : {}),
-      ...(coolifyFqdn ? { domains: coolifyFqdn } : {}),
+      // For dockercompose, do NOT set domains at creation — Coolify requires docker_compose_domains PATCH
+      // after it has parsed the compose file. Non-dockercompose path sets domains here as before.
+      ...(coolifyFqdn && body.build_pack !== 'dockercompose' ? { domains: coolifyFqdn } : {}),
     };
     let app = await client.createApplication(payload);
 
@@ -578,12 +661,48 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     if (resolvedFqdn) {
-      // Verify domain was actually set by Coolify at creation time
-      const refreshed = await client.getApplication(app.uuid).catch(() => null);
-      if (refreshed) {
-        app = refreshed;
-        if (!refreshed.fqdn?.includes(resolvedFqdn)) {
-          console.warn(`[coolify] domain verification failed for ${app.uuid}: expected ${resolvedFqdn}, got ${refreshed.fqdn}`);
+      if (body.build_pack === 'dockercompose') {
+        // Async-poll for docker_compose_raw then PATCH docker_compose_domains
+        app = await setDockerComposeDomain(client, app, coolifyFqdn!);
+        // Prefill env vars extracted from compose YAML — non-fatal.
+        // Re-fetch to ensure docker_compose_raw is present (PATCH response may omit it).
+        const rawYaml = app.docker_compose_raw
+          ?? (await client.getApplication(app.uuid).catch(() => null))?.docker_compose_raw;
+        if (rawYaml) {
+          try {
+            const extracted = extractEnvVars(rawYaml);
+            const envs: CoolifyEnvVar[] = extracted.map((v) => {
+              if (v.required && v.isSecret) {
+                return { key: v.name, value: generateSecretValue(32) };
+              }
+              if (v.required && !v.isSecret) {
+                return { key: v.name, value: '' };
+              }
+              // optional — use defaultValue (may be undefined → empty string)
+              return { key: v.name, value: v.defaultValue ?? '' };
+            });
+            const required = extracted.filter((v) => v.required).length;
+            const optional = extracted.filter((v) => !v.required).length;
+            const secrets = extracted.filter((v) => v.isSecret).length;
+            await client.setApplicationEnvs(app.uuid, envs);
+            console.log(
+              `[coolify] populated ${envs.length} env vars for ${app.uuid}: required=${required}, optional=${optional}, secrets=${secrets}`,
+            );
+          } catch (envErr) {
+            console.warn(
+              `[coolify] env prefill failed for ${app.uuid} — continuing:`,
+              (envErr as Error).message,
+            );
+          }
+        }
+      } else {
+        // Non-dockercompose: verify domain was actually set by Coolify at creation time
+        const refreshed = await client.getApplication(app.uuid).catch(() => null);
+        if (refreshed) {
+          app = refreshed;
+          if (!refreshed.fqdn?.includes(resolvedFqdn)) {
+            console.warn(`[coolify] domain verification failed for ${app.uuid}: expected ${resolvedFqdn}, got ${refreshed.fqdn}`);
+          }
         }
       }
       await provisionDns(resolvedFqdn);
@@ -953,6 +1072,191 @@ router.delete('/:slug/envs/:envUuid', async (req: Request, res: Response) => {
   }
 });
 
+// ── Shared env enrichment helper ─────────────────────────────────────────────
+// Returns enriched env var list cross-referenced against compose-extracted vars.
+// isRequired = var was required-no-default in compose AND current value is empty.
+const SECRET_PATTERN = /PASSWORD|SECRET|KEY|TOKEN/i;
+
+interface EnrichedEnv {
+  key: string;
+  value: string;
+  isRequired: boolean;
+  isSecret: boolean;
+  hasDefault: boolean;
+}
+
+async function buildEnvList(client: CoolifyClient, app: CoolifyApplication): Promise<EnrichedEnv[]> {
+  const rawYaml = app.docker_compose_raw
+    ?? (await client.getApplication(app.uuid).catch(() => null))?.docker_compose_raw
+    ?? null;
+
+  // Build a map of compose-extracted metadata, keyed by var name
+  const composeMap = new Map<string, { required: boolean; hasDefault: boolean }>();
+  if (rawYaml) {
+    try {
+      const extracted = extractEnvVars(rawYaml);
+      for (const v of extracted) {
+        composeMap.set(v.name, {
+          required: v.required,
+          hasDefault: v.defaultValue !== undefined,
+        });
+      }
+    } catch { /* malformed YAML — leave composeMap empty */ }
+  }
+
+  const coolifyEnvs = await client.listEnvs(app.uuid);
+
+  // Coolify may return the same key multiple times (once per compose service).
+  // Deduplicate: prefer the non-empty value if one exists.
+  const deduped = new Map<string, CoolifyEnv>();
+  for (const env of coolifyEnvs) {
+    const existing = deduped.get(env.key);
+    if (!existing || (existing.value === '' || existing.value === null)) {
+      deduped.set(env.key, env);
+    }
+  }
+
+  return Array.from(deduped.values()).map((env: CoolifyEnv): EnrichedEnv => {
+    const meta = composeMap.get(env.key);
+    const currentValue = env.value ?? '';
+    const wasRequiredNoDefault = meta ? (meta.required && !meta.hasDefault) : false;
+    return {
+      key: env.key,
+      value: currentValue,
+      isRequired: wasRequiredNoDefault && currentValue === '',
+      isSecret: SECRET_PATTERN.test(env.key),
+      hasDefault: meta?.hasDefault ?? false,
+    };
+  });
+}
+
+// ── GET /api/sites/:slug/env — enriched env var list ─────────────────────────
+// Lazy backfill: if site is dockercompose, Coolify returns zero envs, AND
+// docker_compose_raw is now populated — seed env vars from the compose file
+// before returning. Idempotent: only seeds when Coolify has zero existing envs.
+router.get('/:slug/env', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+
+    let app: CoolifyApplication;
+    try {
+      app = await client.getApplication(req.params.slug);
+    } catch (fetchErr) {
+      const msg = (fetchErr as Error).message ?? '';
+      if (msg.includes('429') || msg.toLowerCase().includes('too many requests')) {
+        console.warn(`[coolify] GET /env: rate limited for ${req.params.slug} — returning 503`);
+        res.status(503).json({ error: 'Coolify rate limit reached — please retry in a moment' });
+        return;
+      }
+      throw fetchErr;
+    }
+
+    // Lazy backfill for dockercompose sites where env seeding was skipped at create time
+    if (app.build_pack === 'dockercompose') {
+      let coolifyEnvCount = 0;
+      try {
+        const existingEnvs = await client.listEnvs(app.uuid);
+        coolifyEnvCount = existingEnvs.length;
+      } catch (listErr) {
+        const msg = (listErr as Error).message ?? '';
+        if (msg.includes('429') || msg.toLowerCase().includes('too many requests')) {
+          console.warn(`[coolify] GET /env: rate limited listing envs for ${req.params.slug} — returning 503`);
+          res.status(503).json({ error: 'Coolify rate limit reached — please retry in a moment' });
+          return;
+        }
+        // non-fatal — fall through to buildEnvList
+      }
+
+      if (coolifyEnvCount === 0) {
+        // Re-fetch to get latest docker_compose_raw (may have populated after create-time timeout)
+        const refreshed = await client.getApplication(app.uuid).catch(() => null);
+        const rawYaml = refreshed?.docker_compose_raw ?? app.docker_compose_raw ?? null;
+
+        if (rawYaml) {
+          try {
+            const extracted = extractEnvVars(rawYaml);
+            if (extracted.length > 0) {
+              const envs: CoolifyEnvVar[] = extracted.map((v) => {
+                if (v.required && v.isSecret) return { key: v.name, value: generateSecretValue(32) };
+                if (v.required && !v.isSecret) return { key: v.name, value: '' };
+                return { key: v.name, value: v.defaultValue ?? '' };
+              });
+              await client.setApplicationEnvs(app.uuid, envs);
+              const required = extracted.filter((v) => v.required).length;
+              const secrets = extracted.filter((v) => v.isSecret).length;
+              console.log(
+                `[coolify] lazy backfill: seeded ${envs.length} env vars for ${app.uuid} ` +
+                `(required=${required}, secrets=${secrets})`,
+              );
+              if (refreshed) app = refreshed;
+            }
+          } catch (seedErr) {
+            const msg = (seedErr as Error).message ?? '';
+            if (msg.includes('429') || msg.toLowerCase().includes('too many requests')) {
+              console.warn(`[coolify] GET /env: rate limited during backfill seed for ${app.uuid} — returning 503`);
+              res.status(503).json({ error: 'Coolify rate limit reached — please retry in a moment' });
+              return;
+            }
+            console.warn(`[coolify] lazy backfill: seed failed for ${app.uuid} — continuing:`, msg);
+          }
+        }
+      }
+    }
+
+    const envs = await buildEnvList(client, app);
+    res.status(200).json({ envs });
+  } catch (err) {
+    const msg = (err as Error).message ?? '';
+    if (msg.includes('429') || msg.toLowerCase().includes('too many requests')) {
+      console.warn(`[coolify] GET /env: rate limited for ${req.params.slug}`);
+      res.status(503).json({ error: 'Coolify rate limit reached — please retry in a moment' });
+      return;
+    }
+    console.error(`[coolify] GET /${req.params.slug}/env failed:`, msg);
+    res.status(502).json({ error: 'Failed to retrieve environment variables' });
+  }
+});
+
+// ── PUT /api/sites/:slug/env — bulk update env vars ──────────────────────────
+// Accepts { envs: Array<{ key, value }> }. Upserts each: updates if uuid found, creates if not.
+router.put('/:slug/env', async (req: Request, res: Response) => {
+  const body = req.body as { envs?: Array<{ key: string; value: string }> };
+  if (!Array.isArray(body.envs) || body.envs.length === 0) {
+    res.status(400).json({ error: 'Request body must include a non-empty envs array' });
+    return;
+  }
+  for (const item of body.envs) {
+    if (!item.key || item.value === undefined) {
+      res.status(400).json({ error: 'Each env entry must have key and value' });
+      return;
+    }
+  }
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    const existing = await client.listEnvs(app.uuid);
+    const existingByKey = new Map(existing.map((e: CoolifyEnv) => [e.key, e]));
+
+    for (const item of body.envs) {
+      const match = existingByKey.get(item.key);
+      if (match) {
+        // Coolify PATCH /applications/{uuid}/envs identifies by key — uuid must NOT be in the body
+        await client.patchEnvByKey(app.uuid, { key: item.key, value: item.value });
+      } else {
+        await client.createEnv(app.uuid, { key: item.key, value: item.value });
+      }
+    }
+
+    // Return updated enriched list
+    const refreshedApp = await client.getApplication(app.uuid).catch(() => app);
+    const envs = await buildEnvList(client, refreshedApp);
+    res.status(200).json({ envs });
+  } catch (err) {
+    console.error(`[coolify] PUT /${req.params.slug}/env failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to update environment variables' });
+  }
+});
+
 // ── GET /api/sites/:slug/deployments — deployment history ────────────────────
 router.get('/:slug/deployments', async (req: Request, res: Response) => {
   try {
@@ -1036,6 +1340,26 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
     }
     const client = createCoolifyClient()!;
     const app = await client.getApplication(req.params.slug);
+
+    // ── Deploy preflight: block if any required env vars are empty ────────────
+    // Only applies to dockercompose sites — other build packs have no compose manifest.
+    if (app.build_pack === 'dockercompose') {
+      try {
+        const envList = await buildEnvList(client, app);
+        const missing = envList.filter((e) => e.isRequired).map((e) => e.key);
+        if (missing.length > 0) {
+          res.status(400).json({
+            error: 'Missing required environment variables',
+            missing,
+          });
+          return;
+        }
+      } catch (preflightErr) {
+        // Non-fatal: log and continue — don't block deploy on preflight failure
+        console.warn(`[deploy-preflight] env check failed for ${req.params.slug}:`, (preflightErr as Error).message);
+      }
+    }
+
     const result = await client.triggerDeploy(req.params.slug);
     const dep = result.deployments?.[0];
     res.status(202).json({ jobId: dep?.deployment_uuid, message: dep?.message });

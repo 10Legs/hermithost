@@ -90,6 +90,14 @@ export interface EnvVar {
 	is_preview: boolean;
 }
 
+export interface ComposeEnvVar {
+	key: string;
+	value: string;
+	isRequired: boolean;
+	isSecret: boolean;
+	hasDefault: boolean;
+}
+
 export interface Site {
 	slug: string;
 	name: string;
