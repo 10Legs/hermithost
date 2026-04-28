@@ -21,7 +21,11 @@ const app = express();
 const PORT = process.env.PORT ?? 3001;
 
 // Middleware
-app.use(cors({ origin: process.env.CORS_ORIGIN ?? 'http://localhost:3000' }));
+const _corsRaw = process.env.CORS_ORIGIN ?? 'http://localhost:3000';
+const _corsOrigins = _corsRaw.includes(',')
+  ? _corsRaw.split(',').map(s => s.trim())
+  : _corsRaw;
+app.use(cors({ origin: _corsOrigins, credentials: true }));
 app.use(express.json());
 
 // ── Auth routes — mounted BEFORE requireAuth so login/logout/check are public ──

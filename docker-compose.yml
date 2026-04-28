@@ -261,6 +261,17 @@ services:
       - hermithost-net
     restart: unless-stopped
 
+  # ── Docker Socket Proxy (label-gated sidecar) ─────────────────
+  docker-proxy:
+    build:
+      context: ./sidecar/docker-proxy
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - hermithost-net
+
   # ── Node.js API ────────────────────────────────────────────────
   api:
     build:
@@ -268,7 +279,7 @@ services:
       dockerfile: Dockerfile
     environment:
       PORT: "3001"
-      CORS_ORIGIN: "*"
+      CORS_ORIGIN: "${CORS_ORIGIN:-http://localhost:3000}"
       SITES_DIR: "/app/sites"
       COOLIFY_API_URL: "http://coolify:8080/api/v1"
       COOLIFY_API_TOKEN: "${COOLIFY_API_TOKEN}"
@@ -290,12 +301,12 @@ services:
       PGDATABASE: "coolify"
       PGUSER: "coolify"
       PGPASSWORD: "${COOLIFY_DB_PASSWORD}"
+      DOCKER_PROXY_URL: "http://docker-proxy:2375"
     volumes:
       - hermithost-sites:/app/sites
       - coolify-api-token:/coolify-api-token
       - coolify-keys:/coolify-keys:ro
       - ./traefik/conf.d:/app/traefik-conf.d
-      - /var/run/docker.sock:/var/run/docker.sock
       - step-ca-data:/home/step:ro
       - traefik-logs:/traefik-logs:ro
       - hermithost-stats:/app/data
@@ -309,6 +320,8 @@ services:
         condition: service_healthy
       coolify-server-setup:
         condition: service_completed_successfully
+      docker-proxy:
+        condition: service_started
 
   # ── Sites Restore (one-shot) ───────────────────────────────────
   # Restores coolify-managed containers checkpointed by stack-down.sh.
