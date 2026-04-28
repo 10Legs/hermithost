@@ -1393,6 +1393,9 @@
 										{#if env.is_buildtime}
 											<span class="env-badge env-badge-build">Build</span>
 										{/if}
+										{#if env.is_preview}
+											<span class="env-badge env-badge-preview">Preview</span>
+										{/if}
 									</td>
 									<td class="cell-actions">
 										{#if deletingEnvUuid === env.uuid}
@@ -1961,6 +1964,12 @@
 		color: #e8c87a;
 		border-color: rgba(232,200,122,0.3);
 		background: rgba(232,200,122,0.08);
+	}
+
+	.env-badge-preview {
+		color: #a8c8e6;
+		border-color: rgba(168,200,230,0.3);
+		background: rgba(168,200,230,0.08);
 	}
 
 	.env-toggles {

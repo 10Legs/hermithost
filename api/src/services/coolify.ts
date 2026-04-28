@@ -101,6 +101,7 @@ export interface CoolifyEnv {
   is_shown_once: boolean;
   is_runtime: boolean;
   is_buildtime: boolean;
+  is_preview: boolean;
 }
 
 export interface CreateEnvPayload {
