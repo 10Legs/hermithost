@@ -560,7 +560,7 @@ router.post('/', async (req: Request, res: Response) => {
       ...(body.description !== undefined ? { description: body.description } : {}),
       ...(body.docker_compose_location !== undefined ? { docker_compose_location: body.docker_compose_location } : (body.build_pack === 'dockercompose' ? { docker_compose_location: '/docker-compose.yml' } : {})),
       ...(body.base_directory !== undefined ? { base_directory: body.base_directory } : {}),
-      ...(coolifyFqdn ? { fqdn: coolifyFqdn } : {}),
+      ...(coolifyFqdn ? { domains: coolifyFqdn } : {}),
     };
     let app = await client.createApplication(payload);
 

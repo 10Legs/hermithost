@@ -53,7 +53,7 @@ export interface CoolifyCreateApplicationPayload {
   type: 'public' | 'private';
   name: string;
   description?: string;
-  fqdn?: string;
+  domains?: string;
   git_repository: string;
   git_branch: string;
   build_pack: string;
