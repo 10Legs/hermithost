@@ -402,7 +402,7 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
         }
         if (site.domain) {
           const coolifyDomain = /^https?:\/\//i.test(site.domain) ? site.domain : `https://${site.domain}`;
-          await coolify.updateApplication(app.uuid, { domains: coolifyDomain, force_domain_override: true }).catch((e: Error) => {
+          await coolify.updateApplication(app.uuid, { domains: coolifyDomain }).catch((e: Error) => {
             console.warn(`[backup-restore] domains patch failed for ${app.uuid} (${site.name}): ${e.message}`);
           });
           // Verify domain was actually set — Coolify may silently ignore the patch
