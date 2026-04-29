@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-const BASE_URL = 'http://192.168.2.56:9080';
+const BASE_URL = 'http://localhost:9080';
 
 test.describe.configure({ timeout: 60000 });
 test.slow();
