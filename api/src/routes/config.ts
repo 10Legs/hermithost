@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { createCoolifyClient } from '../services/coolify';
-import { createTechnitiumClient, RecursionMode } from '../services/technitium';
+import { createTechnitiumClient, RecursionMode, isValidBareIp } from '../services/technitium';
+import { isIPv6 } from 'net';
 
 const router = Router();
 
@@ -280,6 +281,62 @@ router.put('/', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[config] PUT failed:', (err as Error).message);
     res.status(500).json({ error: 'Failed to write config' });
+  }
+});
+
+// GET /api/config/dns-recursion-diagnose
+router.get('/dns-recursion-diagnose', async (_req: Request, res: Response) => {
+  const client = createTechnitiumClient();
+  if (!client) {
+    res.status(503).json({ error: 'Technitium not configured' });
+    return;
+  }
+  try {
+    const result = await client.diagnoseRecursion();
+    res.status(200).json(result);
+  } catch (err) {
+    console.error('[config] dns-recursion-diagnose failed:', (err as Error).message);
+    res.status(500).json({ error: 'Failed to diagnose DNS recursion' });
+  }
+});
+
+// POST /api/config/dns-recursion-trust
+router.post('/dns-recursion-trust', async (req: Request, res: Response) => {
+  const body = req.body as { ip?: unknown };
+  // S5: length cap before any further processing (45 = max IPv6 string length)
+  if (typeof body.ip !== 'string' || body.ip.length === 0 || body.ip.length > 45) {
+    res.status(400).json({ error: 'Invalid IP address — must be a bare IPv4 or IPv6 address with no CIDR suffix' });
+    return;
+  }
+  const ip = body.ip.trim();
+
+  if (!ip || !isValidBareIp(ip)) {
+    res.status(400).json({ error: 'Invalid IP address — must be a bare IPv4 or IPv6 address with no CIDR suffix' });
+    return;
+  }
+
+  const client = createTechnitiumClient();
+  if (!client) {
+    res.status(503).json({ error: 'Technitium not configured' });
+    return;
+  }
+
+  try {
+    // S6: snapshot ACL before mutation for audit log
+    const acl_before = await client.getRecursionAcl();
+    const result = await client.trustClient(ip);
+    console.info(JSON.stringify({
+      event: 'dns_acl_extend',
+      ip,
+      acl_before,
+      acl_after: result.acl,
+      actor: 'admin',
+      ts: new Date().toISOString(),
+    }));
+    res.status(200).json(result);
+  } catch (err) {
+    console.error('[config] dns-recursion-trust failed:', (err as Error).message);
+    res.status(500).json({ error: 'Failed to trust client IP' });
   }
 });
 
