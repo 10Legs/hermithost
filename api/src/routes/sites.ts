@@ -84,13 +84,12 @@ async function setDockerComposeDomain(
 
   const domainEntry = { name: primaryService, domain: fqdn };
   try {
-    const patched = await client.updateApplication(app.uuid, {
+    await client.updateApplication(app.uuid, {
       docker_compose_domains: [domainEntry],
     });
     console.log(
       `[coolify] PATCH docker_compose_domains success: service=${primaryService} domain=${fqdn} uuid=${app.uuid}`,
     );
-    return patched;
   } catch (patchErr) {
     console.warn(
       `[coolify] PATCH docker_compose_domains failed: service=${primaryService} domain=${fqdn} uuid=${app.uuid}:`,
@@ -98,6 +97,14 @@ async function setDockerComposeDomain(
     );
     return composedApp;
   }
+
+  // Fix 1: Coolify v4.3.5 rejects PATCH { domains } for dockercompose apps with HTTP 422:
+  // "The domains field cannot be used for dockercompose applications."
+  // The fqdn column will remain the sslip.io placeholder — this is a Coolify API constraint.
+  // Domain display is derived from docker_compose_domains in the GET handler (see displayDomain below).
+  // Re-fetch to return the updated application state (docker_compose_domains now populated).
+  const refreshed = await client.getApplication(app.uuid).catch(() => null);
+  return refreshed ?? composedApp;
 }
 
 // ── Deploy auth sidecar ───────────────────────────────────────────────────────
@@ -684,9 +691,12 @@ router.post('/', async (req: Request, res: Response) => {
             const required = extracted.filter((v) => v.required).length;
             const optional = extracted.filter((v) => !v.required).length;
             const secrets = extracted.filter((v) => v.isSecret).length;
-            await client.setApplicationEnvs(app.uuid, envs);
+            const requiredKeys = new Set(extracted.filter((v) => v.required).map((v) => v.name));
+            // Use syncApplicationEnvs: waits for Coolify's async auto-extraction, then patches
+            // values into Coolify's own rows rather than creating duplicates.
+            await client.syncApplicationEnvs(app.uuid, envs, requiredKeys);
             console.log(
-              `[coolify] populated ${envs.length} env vars for ${app.uuid}: required=${required}, optional=${optional}, secrets=${secrets}`,
+              `[coolify] synced ${envs.length} env vars for ${app.uuid}: required=${required}, optional=${optional}, secrets=${secrets}`,
             );
           } catch (envErr) {
             console.warn(
@@ -1074,7 +1084,8 @@ router.delete('/:slug/envs/:envUuid', async (req: Request, res: Response) => {
 
 // ── Shared env enrichment helper ─────────────────────────────────────────────
 // Returns enriched env var list cross-referenced against compose-extracted vars.
-// isRequired = var was required-no-default in compose AND current value is empty.
+// isRequired = compose says var is required with no default (authoritative, not value-dependent).
+// Deploy preflight uses isRequired && value==='' to identify unset required vars.
 const SECRET_PATTERN = /PASSWORD|SECRET|KEY|TOKEN/i;
 
 interface EnrichedEnv {
@@ -1090,8 +1101,10 @@ async function buildEnvList(client: CoolifyClient, app: CoolifyApplication): Pro
     ?? (await client.getApplication(app.uuid).catch(() => null))?.docker_compose_raw
     ?? null;
 
-  // Build a map of compose-extracted metadata, keyed by var name
-  const composeMap = new Map<string, { required: boolean; hasDefault: boolean }>();
+  // Build a map of compose-extracted metadata, keyed by var name.
+  // For dockercompose sites this is the authoritative source for isRequired/isSecret/hasDefault —
+  // Coolify v4.3.5 silently rejects is_required PATCH so we never trust Coolify's is_required field.
+  const composeMap = new Map<string, { required: boolean; hasDefault: boolean; isSecret: boolean }>();
   if (rawYaml) {
     try {
       const extracted = extractEnvVars(rawYaml);
@@ -1099,6 +1112,7 @@ async function buildEnvList(client: CoolifyClient, app: CoolifyApplication): Pro
         composeMap.set(v.name, {
           required: v.required,
           hasDefault: v.defaultValue !== undefined,
+          isSecret: v.isSecret,
         });
       }
     } catch { /* malformed YAML — leave composeMap empty */ }
@@ -1116,18 +1130,37 @@ async function buildEnvList(client: CoolifyClient, app: CoolifyApplication): Pro
     }
   }
 
-  return Array.from(deduped.values()).map((env: CoolifyEnv): EnrichedEnv => {
+  // Merge: start with all Coolify envs (value comes from Coolify; metadata from compose)
+  const result: EnrichedEnv[] = Array.from(deduped.values()).map((env: CoolifyEnv): EnrichedEnv => {
     const meta = composeMap.get(env.key);
     const currentValue = env.value ?? '';
-    const wasRequiredNoDefault = meta ? (meta.required && !meta.hasDefault) : false;
+    // isRequired = compose says required with no default (authoritative; independent of current value)
+    const isRequired = meta ? (meta.required && !meta.hasDefault) : false;
+    // isSecret = compose-derived if available, else pattern-match fallback
+    const isSecret = meta ? meta.isSecret : SECRET_PATTERN.test(env.key);
     return {
       key: env.key,
       value: currentValue,
-      isRequired: wasRequiredNoDefault && currentValue === '',
-      isSecret: SECRET_PATTERN.test(env.key),
+      isRequired,
+      isSecret,
       hasDefault: meta?.hasDefault ?? false,
     };
   });
+
+  // Add compose vars that Coolify doesn't have yet (e.g. seeding race or lazy backfill gap)
+  for (const [name, meta] of composeMap.entries()) {
+    if (!deduped.has(name)) {
+      result.push({
+        key: name,
+        value: '',
+        isRequired: meta.required && !meta.hasDefault,
+        isSecret: meta.isSecret,
+        hasDefault: meta.hasDefault,
+      });
+    }
+  }
+
+  return result;
 }
 
 // ── GET /api/sites/:slug/env — enriched env var list ─────────────────────────
@@ -1346,7 +1379,7 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
     if (app.build_pack === 'dockercompose') {
       try {
         const envList = await buildEnvList(client, app);
-        const missing = envList.filter((e) => e.isRequired).map((e) => e.key);
+        const missing = envList.filter((e) => e.isRequired && e.value === '').map((e) => e.key);
         if (missing.length > 0) {
           res.status(400).json({
             error: 'Missing required environment variables',
