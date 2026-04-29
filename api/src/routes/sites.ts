@@ -98,20 +98,13 @@ async function setDockerComposeDomain(
     return composedApp;
   }
 
-  // Fix 1: also PATCH fqdn (via 'domains' field) so Coolify DB reflects the real domain,
-  // not the sslip.io placeholder assigned at creation time.
-  // docker_compose_domains alone does not update the application's fqdn column.
-  try {
-    const patched = await client.updateApplication(app.uuid, { domains: fqdn });
-    console.log(`[coolify] PATCH fqdn success: fqdn=${fqdn} uuid=${app.uuid}`);
-    return patched;
-  } catch (fqdnErr) {
-    console.warn(
-      `[coolify] PATCH fqdn failed: fqdn=${fqdn} uuid=${app.uuid}:`,
-      (fqdnErr as Error).message,
-    );
-    return composedApp;
-  }
+  // Fix 1: Coolify v4.3.5 rejects PATCH { domains } for dockercompose apps with HTTP 422:
+  // "The domains field cannot be used for dockercompose applications."
+  // The fqdn column will remain the sslip.io placeholder — this is a Coolify API constraint.
+  // Domain display is derived from docker_compose_domains in the GET handler (see displayDomain below).
+  // Re-fetch to return the updated application state (docker_compose_domains now populated).
+  const refreshed = await client.getApplication(app.uuid).catch(() => null);
+  return refreshed ?? composedApp;
 }
 
 // ── Deploy auth sidecar ───────────────────────────────────────────────────────
@@ -698,9 +691,12 @@ router.post('/', async (req: Request, res: Response) => {
             const required = extracted.filter((v) => v.required).length;
             const optional = extracted.filter((v) => !v.required).length;
             const secrets = extracted.filter((v) => v.isSecret).length;
-            await client.setApplicationEnvs(app.uuid, envs);
+            const requiredKeys = new Set(extracted.filter((v) => v.required).map((v) => v.name));
+            // Use syncApplicationEnvs: waits for Coolify's async auto-extraction, then patches
+            // values into Coolify's own rows rather than creating duplicates.
+            await client.syncApplicationEnvs(app.uuid, envs, requiredKeys);
             console.log(
-              `[coolify] populated ${envs.length} env vars for ${app.uuid}: required=${required}, optional=${optional}, secrets=${secrets}`,
+              `[coolify] synced ${envs.length} env vars for ${app.uuid}: required=${required}, optional=${optional}, secrets=${secrets}`,
             );
           } catch (envErr) {
             console.warn(

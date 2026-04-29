@@ -87,6 +87,19 @@ function primaryDomain(fqdn: string | null): string {
   return first.replace(/^https?:\/\//, '');
 }
 
+// For dockercompose apps Coolify's fqdn column stays as the sslip.io creation-time
+// placeholder because PATCH { domains } is rejected (v4.3.5 API constraint).
+// The authoritative domain is in docker_compose_domains — pick the first service's domain.
+function resolveDisplayDomain(app: CoolifyApplication): string {
+  if (app.build_pack === 'dockercompose' && app.docker_compose_domains) {
+    const entries = Object.values(app.docker_compose_domains);
+    if (entries.length > 0 && entries[0].domain) {
+      return entries[0].domain.replace(/^https?:\/\//, '');
+    }
+  }
+  return primaryDomain(app.fqdn);
+}
+
 // ── Log parsing ───────────────────────────────────────────────────────────────
 
 function parseLogLines(logsJson: string): string[] {
@@ -181,7 +194,7 @@ export function mapSite(
   return {
     slug: app.uuid,
     name: app.name,
-    domain: primaryDomain(app.fqdn),
+    domain: resolveDisplayDomain(app),
     description: app.description ?? '',
     repository: cleanUrl,
     deploy_auth: deployAuth,

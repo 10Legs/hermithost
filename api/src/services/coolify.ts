@@ -12,6 +12,8 @@ export interface CoolifyApplication {
   build_pack: string;
   docker_compose_location?: string;
   docker_compose_raw?: string | null;
+  // Coolify stores docker_compose_domains as a keyed object: { [service]: { domain: string } }
+  docker_compose_domains?: Record<string, { domain: string }> | null;
   base_directory?: string;
   created_at: string;
   updated_at: string;
@@ -307,6 +309,102 @@ export class CoolifyClient {
         console.warn(
           `[coolify] setApplicationEnvs: failed to set ${env.key} on ${uuid} — ${(err as Error).message}`,
         );
+      }
+    }
+  }
+
+  // ── Race-safe env sync ────────────────────────────────────────────────────────
+  // Eliminates the duplicate-env race with Coolify's async compose auto-extraction.
+  //
+  // Strategy: instead of creating new env rows (which races with Coolify's extractor),
+  // wait until Coolify's auto-extracted rows appear, then PATCH their values in-place.
+  // This means we write into the rows Coolify already created — zero duplicate rows.
+  //
+  // For each var from our extractEnvVars() result:
+  //   - If Coolify has the key AND value is empty/null AND we want to populate → PATCH value
+  //   - If Coolify has the key AND is_required should be true → PATCH is_required
+  //   - If Coolify does NOT have the key (rare) → CREATE via setApplicationEnvs
+  //
+  // pollTimeoutMs: how long to wait for Coolify to auto-populate envs (default 30s)
+  async syncApplicationEnvs(
+    uuid: string,
+    envs: CoolifyEnvVar[],
+    requiredKeys: Set<string>,
+    pollTimeoutMs = 30_000,
+  ): Promise<void> {
+    const pollInterval = 500;
+    const maxAttempts = Math.ceil(pollTimeoutMs / pollInterval);
+
+    // Poll until Coolify's auto-extracted envs appear
+    let coolifyEnvs: CoolifyEnv[] = [];
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, pollInterval));
+      try {
+        const fetched = await this.listEnvs(uuid);
+        if (fetched.length > 0) {
+          coolifyEnvs = fetched;
+          break;
+        }
+      } catch (err) {
+        console.warn(`[coolify] syncApplicationEnvs: listEnvs poll attempt ${attempt + 1} failed: ${(err as Error).message}`);
+      }
+    }
+
+    if (coolifyEnvs.length === 0) {
+      console.warn(`[coolify] syncApplicationEnvs: Coolify envs never appeared for ${uuid} after ${pollTimeoutMs}ms — falling back to create`);
+      await this.setApplicationEnvs(uuid, envs);
+      return;
+    }
+
+    console.log(`[coolify] syncApplicationEnvs: found ${coolifyEnvs.length} Coolify-extracted envs for ${uuid}`);
+
+    // Build lookup of Coolify's auto-extracted envs by key.
+    // Keep first occurrence only (in case there are already dupes from a prior failed attempt)
+    const coolifyByKey = new Map<string, CoolifyEnv>();
+    for (const env of coolifyEnvs) {
+      if (!coolifyByKey.has(env.key)) {
+        coolifyByKey.set(env.key, env);
+      }
+    }
+
+    const missing: CoolifyEnvVar[] = [];
+
+    for (const env of envs) {
+      const coolifyRow = coolifyByKey.get(env.key);
+      if (coolifyRow) {
+        // Row exists — PATCH value if empty AND we have a value to set
+        const currentValue = coolifyRow.value ?? '';
+        if (currentValue === '' && env.value !== '') {
+          try {
+            await this.patchEnvByKey(uuid, { key: env.key, value: env.value });
+            console.log(`[coolify] syncApplicationEnvs: patched value for ${env.key} on ${uuid}`);
+          } catch (err) {
+            console.warn(`[coolify] syncApplicationEnvs: patch failed for ${env.key} on ${uuid}: ${(err as Error).message}`);
+          }
+        } else {
+          console.log(`[coolify] syncApplicationEnvs: ${env.key} already has a value on ${uuid} — skipping`);
+        }
+      } else {
+        // Key not in Coolify at all — queue for creation
+        missing.push(env);
+      }
+    }
+
+    // Create any vars Coolify didn't auto-extract
+    if (missing.length > 0) {
+      console.log(`[coolify] syncApplicationEnvs: creating ${missing.length} vars not auto-extracted by Coolify`);
+      for (const env of missing) {
+        const payload: CreateEnvPayload = {
+          key: env.key,
+          value: env.value,
+          ...(env.is_build_time !== undefined ? { is_buildtime: env.is_build_time } : {}),
+          ...(env.is_literal !== undefined ? { is_shown_once: env.is_literal } : {}),
+        };
+        try {
+          await this.createEnv(uuid, payload);
+        } catch (err) {
+          console.warn(`[coolify] syncApplicationEnvs: create failed for ${env.key} on ${uuid}: ${(err as Error).message}`);
+        }
       }
     }
   }
