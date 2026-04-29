@@ -87,6 +87,8 @@ export interface TechnitiumDeleteResponse {
   errorMessage?: string;
 }
 
+export type RecursionMode = 'Disabled' | 'LanOnly' | 'Public';
+
 export interface TechnitiumGetRecordsResult {
   zone: TechnitiumZone;
   records: TechnitiumRecord[];
@@ -242,6 +244,49 @@ export class TechnitiumClient {
       });
       const res = await fetch(`${this.baseUrl}/api/settings/set`, { method: 'POST', headers: this.postHeaders, body });
       await handleResponse<TechnitiumDeleteResponse>(res, 'POST /api/settings/set');
+    });
+  }
+
+  async getRecursion(): Promise<RecursionMode> {
+    return this.withTokenRetry(async () => {
+      const body = this.buildParams({});
+      const res = await fetch(`${this.baseUrl}/api/settings/get`, { method: 'POST', headers: this.postHeaders, body });
+      const data = await res.json() as { status: string; errorMessage?: string; response?: { recursion?: string; recursionNetworkACL?: string } };
+      if (data.status !== 'ok') throw new Error(`Technitium /api/settings/get error: ${data.errorMessage ?? data.status}`);
+      const recursion = data.response?.recursion ?? '';
+      const acl = data.response?.recursionNetworkACL ?? '';
+      switch (recursion) {
+        case 'Deny':  return 'Disabled';
+        case 'Allow': return 'Public';
+        case 'UseSpecifiedNetworkACL': return 'LanOnly';
+        default:
+          // AllowOnlyForPrivateNetworks (broken default) or unrecognized value.
+          // Surface drift for observability; UI shows safe default until reconciled.
+          console.warn(`[technitium] getRecursion: unrecognized Technitium recursion="${recursion}" acl="${acl}" — reporting as LanOnly`);
+          return 'LanOnly';
+      }
+    });
+  }
+
+  async setRecursion(mode: RecursionMode): Promise<void> {
+    return this.withTokenRetry(async () => {
+      const SAFE_RECURSION_ACL = '127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fd00::/8';
+      const technitiumRecursion: Record<RecursionMode, string> = {
+        Disabled: 'Deny',
+        LanOnly:  'UseSpecifiedNetworkACL',
+        Public:   'Allow',
+      };
+      const technitiumAcl: Record<RecursionMode, string> = {
+        Disabled: '',
+        LanOnly:  SAFE_RECURSION_ACL,
+        Public:   '',
+      };
+      const body = this.buildParams({
+        recursion:           technitiumRecursion[mode],
+        recursionNetworkACL: technitiumAcl[mode],
+      });
+      const res = await fetch(`${this.baseUrl}/api/settings/set`, { method: 'POST', headers: this.postHeaders, body });
+      await handleResponse<TechnitiumDeleteResponse>(res, 'POST /api/settings/set (recursion)');
     });
   }
 }

@@ -44,6 +44,18 @@
 	let savingForwarders = false;
 	let forwarderSaveSuccess = false;
 	let forwarderSaveError = '';
+
+	// ── DNS Recursion ──────────────────────────────────────────────────────────
+	type RecursionMode = 'Disabled' | 'LanOnly' | 'Public';
+	const recursionLabels: Record<RecursionMode, string> = {
+		Disabled: 'Disabled (authoritative-only)',
+		LanOnly: 'LAN clients only',
+		Public: 'Public (open resolver — caution)',
+	};
+	let dnsRecursion: RecursionMode = 'LanOnly';
+	let savingDnsRecursion = false;
+	let dnsRecursionSuccess = false;
+	let dnsRecursionError = '';
 	let savingDnsProvider = false;
 	let dnsProviderError = '';
 	let savingCloudflareToken = false;
@@ -148,6 +160,7 @@
 					cloudflare_status?: 'connected' | 'disconnected' | 'unconfigured';
 					cloudflare_token_set?: boolean;
 					network_mode?: 'external' | 'internal';
+					dns_recursion?: RecursionMode;
 				};
 				nsHostname = cfg.ns_hostname ?? '';
 				nsServerIp = cfg.ns_server_ip ?? '';
@@ -161,6 +174,7 @@
 				dnsProvider = cfg.dns_provider ?? 'technitium';
 				cloudflareStatus = cfg.cloudflare_status ?? 'unconfigured';
 				networkMode = cfg.network_mode ?? 'external';
+				dnsRecursion = cfg.dns_recursion ?? 'LanOnly';
 			}
 		} catch {
 			// non-fatal; page still renders
@@ -315,6 +329,47 @@
 			forwarderSaveError = (err as Error).message;
 		} finally {
 			savingForwarders = false;
+		}
+	}
+
+	// ── DNS Recursion handler ──────────────────────────────────────────────────
+	async function onDnsRecursionChange(event: Event) {
+		const select = event.currentTarget as HTMLSelectElement;
+		const newMode = select.value as RecursionMode;
+		const prevMode = dnsRecursion;
+		if (newMode === prevMode) return;
+
+		if (newMode === 'Public') {
+			const confirmed = confirm(
+				'Open resolvers can be abused for DNS amplification attacks. Only enable on trusted networks. Continue?'
+			);
+			if (!confirmed) {
+				select.value = prevMode;
+				return;
+			}
+		}
+
+		savingDnsRecursion = true;
+		dnsRecursionError = '';
+		dnsRecursionSuccess = false;
+		try {
+			const res = await fetch('/api/config', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ dns_recursion: newMode }),
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({})) as { error?: string };
+				throw new Error(body.error ?? `HTTP ${res.status}`);
+			}
+			dnsRecursion = newMode;
+			dnsRecursionSuccess = true;
+			setTimeout(() => { dnsRecursionSuccess = false; }, 3000);
+		} catch (err) {
+			dnsRecursionError = (err as Error).message;
+			select.value = prevMode;
+		} finally {
+			savingDnsRecursion = false;
 		}
 	}
 
@@ -799,6 +854,34 @@
 					{/if}
 					{#if forwarderSaveError}
 						<p class="error-msg">{forwarderSaveError}</p>
+					{/if}
+				</div>
+
+				<!-- DNS Recursion -->
+				<div class="field-group" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
+					<label class="field-label" for="dns-recursion">DNS Recursion</label>
+					<p class="field-hint">LAN clients only is the safe default. Public exposes this server as an open resolver — only enable on trusted networks.</p>
+					<div class="input-row" style="margin-top: 8px;">
+						<select
+							id="dns-recursion"
+							class="text-input select-input"
+							on:change={onDnsRecursionChange}
+							disabled={savingDnsRecursion}
+							value={dnsRecursion}
+						>
+							<option value="Disabled">Disabled (authoritative-only)</option>
+							<option value="LanOnly">LAN clients only</option>
+							<option value="Public">Public (open resolver — caution)</option>
+						</select>
+						{#if savingDnsRecursion}
+							<span class="spinner"></span>
+						{/if}
+					</div>
+					{#if dnsRecursionSuccess}
+						<p class="inline-success">DNS recursion updated to {recursionLabels[dnsRecursion]}.</p>
+					{/if}
+					{#if dnsRecursionError}
+						<p class="error-msg">Failed to update DNS recursion: {dnsRecursionError}</p>
 					{/if}
 				</div>
 			{/if}
