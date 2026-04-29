@@ -373,14 +373,13 @@ export class TechnitiumClient {
     }
 
     // Pull topClients from LastHour stats.
-    // Technitium returns { name: "<ip>", domain: "<rdns or empty>", hits: N }
+    // Technitium returns topClients at response.topClients (sibling of stats, not nested under it).
+    // Each entry: { name: "<ip>", domain: "<rdns or empty>", hits: N }
     type StatsResponse = {
       status: string;
       errorMessage?: string;
       response?: {
-        stats?: {
-          topClients?: Array<{ name: string; domain?: string; hits: number }>;
-        };
+        topClients?: Array<{ name: string; domain?: string; hits: number }>;
       };
     };
     const statsBody = this.buildParams({ type: 'LastHour' });
@@ -391,7 +390,7 @@ export class TechnitiumClient {
     });
     const statsData = await statsRes.json() as StatsResponse;
     const topClients: Array<{ name: string; domain?: string; hits: number }> =
-      statsData.response?.stats?.topClients ?? [];
+      statsData.response?.topClients ?? [];
 
     // Filter to clients NOT covered by any ACL entry.
     // ip is in `name`; reverse-DNS (if resolved) is in `domain`.
