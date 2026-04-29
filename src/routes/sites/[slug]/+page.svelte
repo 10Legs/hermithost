@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import type { PageData } from './$types';
 	import { formatRelativeTime, formatDuration } from '$lib/data';
-	import type { DnsRecord, Deploy, Site, EnvVar } from '$lib/types';
+	import type { DnsRecord, Deploy, Site, EnvVar, ComposeEnvVar } from '$lib/types';
 
 	export let data: PageData;
 
@@ -14,8 +14,13 @@
 
 	function setTab(tab: typeof activeTab): void {
 		activeTab = tab;
-		if (tab === 'environment' && envVars.length === 0 && !envLoading) {
-			loadEnvVars();
+		if (tab === 'environment') {
+			if (envVars.length === 0 && !envLoading) {
+				loadEnvVars();
+			}
+			if (isDockerCompose && composeEnvVars.length === 0 && !composeEnvLoading) {
+				loadComposeEnvVars();
+			}
 		}
 	}
 
@@ -160,6 +165,19 @@
 			if (res.status === 503) {
 				deployState = 'unavailable';
 				deployMessage = 'Deploy unavailable — Coolify not connected';
+				setTimeout(() => { deployState = 'idle'; deployMessage = ''; }, 6000);
+				return;
+			}
+			if (res.status === 400) {
+				const body: { error?: string; missing?: string[] } = await res.json().catch(() => ({}));
+				if (body.missing && body.missing.length > 0) {
+					deployState = 'idle';
+					preflightMissing = body.missing;
+					showPreflightModal = true;
+					return;
+				}
+				deployState = 'error';
+				deployMessage = body.error ?? 'Deploy failed — missing required vars';
 				setTimeout(() => { deployState = 'idle'; deployMessage = ''; }, 6000);
 				return;
 			}
@@ -405,6 +423,109 @@
 		}
 	}
 
+	// ── Compose env vars (new API: GET/PUT /api/sites/:slug/env) ─────────────
+	let composeEnvVars: ComposeEnvVar[] = [];
+	let composeEnvLoading = false;
+	let composeEnvLoadError = '';
+	// Per-row edit drafts: key → draft value string
+	let composeEnvDrafts: Record<string, string> = {};
+	// Per-row save state
+	let composeEnvSaving: Record<string, boolean> = {};
+	let composeEnvSaveError: Record<string, string> = {};
+	let composeEnvSaveOk: Record<string, boolean> = {};
+	// Per-row show/hide for secrets
+	let composeEnvVisible: Record<string, boolean> = {};
+	// Whether the site is docker-compose (env tab meaningful)
+	$: isDockerCompose = site.build_pack === 'dockercompose';
+
+	async function loadComposeEnvVars(): Promise<void> {
+		if (!isDockerCompose) return;
+		composeEnvLoading = true;
+		composeEnvLoadError = '';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/env`);
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				composeEnvLoadError = body.error ?? `Failed to load env vars (${res.status})`;
+				return;
+			}
+			const data: { envs: ComposeEnvVar[] } = await res.json();
+			composeEnvVars = data.envs;
+			// Initialize drafts with current values
+			composeEnvDrafts = {};
+			for (const v of data.envs) {
+				composeEnvDrafts[v.key] = v.value;
+			}
+		} catch {
+			composeEnvLoadError = 'Network error — could not load env vars';
+		} finally {
+			composeEnvLoading = false;
+		}
+	}
+
+	function generateSecret(): string {
+		const bytes = new Uint8Array(16);
+		crypto.getRandomValues(bytes);
+		return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+	}
+
+	async function saveComposeEnvRow(key: string): Promise<void> {
+		composeEnvSaving = { ...composeEnvSaving, [key]: true };
+		composeEnvSaveError = { ...composeEnvSaveError, [key]: '' };
+		composeEnvSaveOk = { ...composeEnvSaveOk, [key]: false };
+		try {
+			// Build full payload — send all current drafts so server has full picture
+			const envs = composeEnvVars.map(v => ({
+				key: v.key,
+				value: composeEnvDrafts[v.key] ?? v.value
+			}));
+			const res = await fetch(`/api/sites/${site.slug}/env`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ envs })
+			});
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				composeEnvSaveError = { ...composeEnvSaveError, [key]: body.error ?? `Save failed (${res.status})` };
+				return;
+			}
+			const updated: { envs: ComposeEnvVar[] } = await res.json();
+			composeEnvVars = updated.envs;
+			// Refresh drafts from server response
+			for (const v of updated.envs) {
+				composeEnvDrafts[v.key] = v.value;
+			}
+			composeEnvSaveOk = { ...composeEnvSaveOk, [key]: true };
+			setTimeout(() => { composeEnvSaveOk = { ...composeEnvSaveOk, [key]: false }; }, 2500);
+		} catch {
+			composeEnvSaveError = { ...composeEnvSaveError, [key]: 'Network error — could not save' };
+		} finally {
+			composeEnvSaving = { ...composeEnvSaving, [key]: false };
+		}
+	}
+
+	// ── Preflight modal ────────────────────────────────────────────────────────
+	let preflightMissing: string[] = [];
+	let showPreflightModal = false;
+
+	function closePreflightModal(): void {
+		showPreflightModal = false;
+		preflightMissing = [];
+	}
+
+	function goToEnvTab(): void {
+		closePreflightModal();
+		setTab('environment');
+		// Focus first missing field after DOM update
+		setTimeout(() => {
+			if (preflightMissing.length > 0) {
+				const firstKey = preflightMissing[0];
+				const el = document.getElementById(`compose-env-input-${firstKey}`);
+				el?.focus();
+			}
+		}, 50);
+	}
+
 	function openLog(deploy: Deploy) {
 		logModal = deploy;
 	}
@@ -443,6 +564,7 @@
 			showAddEnv = false;
 			editingEnv = null;
 			showDeleteEnvConfirm = null;
+			if (showPreflightModal) closePreflightModal();
 		}
 	}
 
@@ -1298,9 +1420,127 @@
 	<!-- Environment Tab -->
 	{#if activeTab === 'environment'}
 		<div class="tab-content">
+
+			<!-- ── Compose env vars section (docker-compose sites only) ── -->
+			{#if isDockerCompose}
+				<div class="section-header" style="margin-bottom: 12px;">
+					<div>
+						<h2 class="section-title">Compose Variables</h2>
+						<p class="section-sub">Variables detected from docker-compose.yml — required vars must be set before deploy.</p>
+					</div>
+					<button class="btn btn-ghost btn-sm" on:click={loadComposeEnvVars} disabled={composeEnvLoading}>
+						{composeEnvLoading ? 'Loading…' : 'Refresh'}
+					</button>
+				</div>
+
+				{#if composeEnvLoading && composeEnvVars.length === 0}
+					<div class="dns-empty" style="margin-bottom: 24px;">
+						<p class="text-secondary">Loading…</p>
+					</div>
+				{:else if composeEnvLoadError}
+					<div class="dns-empty" style="margin-bottom: 24px;">
+						<p class="text-danger">{composeEnvLoadError}</p>
+						<button class="btn btn-ghost btn-sm" on:click={loadComposeEnvVars}>Retry</button>
+					</div>
+				{:else if composeEnvVars.length === 0}
+					<div class="dns-empty" style="margin-bottom: 24px;">
+						<p class="text-secondary">No compose variables detected. Make sure the site has a docker-compose.yml with environment references.</p>
+					</div>
+				{:else}
+					<div class="table-wrapper" style="margin-bottom: 32px;">
+						<table class="dns-table compose-env-table">
+							<thead>
+								<tr>
+									<th>Key</th>
+									<th>Value</th>
+									<th>Status</th>
+									<th></th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each composeEnvVars as env (env.key)}
+									{@const draft = composeEnvDrafts[env.key] ?? env.value}
+									{@const isSaving = composeEnvSaving[env.key] ?? false}
+									{@const saveErr = composeEnvSaveError[env.key] ?? ''}
+									{@const saveOk = composeEnvSaveOk[env.key] ?? false}
+									{@const visible = composeEnvVisible[env.key] ?? false}
+									<tr class:compose-env-required={env.isRequired}>
+										<td class="mono compose-env-key">
+											{env.key}
+											{#if env.isRequired}
+												<span class="compose-required-marker" aria-label="required">*</span>
+											{/if}
+										</td>
+										<td class="compose-env-value-cell">
+											<div class="compose-env-input-wrap">
+												<input
+													id="compose-env-input-{env.key}"
+													class="input mono compose-env-input"
+													class:compose-env-input-required={env.isRequired}
+													type={env.isSecret && !visible ? 'password' : 'text'}
+													placeholder={env.isRequired ? 'required' : env.hasDefault ? 'has default' : ''}
+													value={draft}
+													on:input={(e) => { const t = e.currentTarget; if (t instanceof HTMLInputElement) composeEnvDrafts = { ...composeEnvDrafts, [env.key]: t.value }; }}
+												/>
+												{#if env.isSecret}
+													<button
+														class="btn btn-ghost btn-xs compose-env-toggle-vis"
+														type="button"
+														on:click={() => { composeEnvVisible = { ...composeEnvVisible, [env.key]: !visible }; }}
+														aria-label={visible ? 'Hide value' : 'Show value'}
+													>{visible ? 'Hide' : 'Show'}</button>
+												{/if}
+											</div>
+										</td>
+										<td class="compose-env-status-cell">
+											{#if env.isRequired}
+												<span class="env-badge compose-badge-required">required</span>
+											{:else if env.isSecret}
+												<span class="env-badge compose-badge-secret">secret</span>
+											{:else if env.hasDefault}
+												<span class="env-badge compose-badge-default">has default</span>
+											{/if}
+										</td>
+										<td class="cell-actions compose-env-actions">
+											{#if env.isSecret}
+												<button
+													class="btn btn-ghost btn-xs"
+													type="button"
+													disabled={isSaving}
+													on:click={() => {
+														const secret = generateSecret();
+														composeEnvDrafts = { ...composeEnvDrafts, [env.key]: secret };
+														composeEnvVisible = { ...composeEnvVisible, [env.key]: true };
+													}}
+												>Regenerate</button>
+											{/if}
+											<button
+												class="btn btn-primary btn-xs"
+												type="button"
+												disabled={isSaving || draft === env.value}
+												on:click={() => saveComposeEnvRow(env.key)}
+											>{isSaving ? 'Saving…' : 'Save'}</button>
+											{#if saveOk}
+												<span class="text-success compose-env-save-ok">Saved</span>
+											{/if}
+											{#if saveErr}
+												<span class="text-danger" title={saveErr}>Error</span>
+											{/if}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+
+				<hr class="env-section-divider" />
+			{/if}
+
+			<!-- ── Coolify env vars section ── -->
 			<div class="section-header">
 				<div>
-					<h2 class="section-title">Environment Variables</h2>
+					<h2 class="section-title">Additional Variables</h2>
 					<p class="section-sub mono">{site.domain}</p>
 				</div>
 				<button
@@ -1367,7 +1607,7 @@
 				</div>
 			{:else if envVars.length === 0 && !showAddEnv}
 				<div class="dns-empty">
-					<p class="text-secondary">No environment variables yet.</p>
+					<p class="text-secondary">No additional variables yet.</p>
 					<button class="btn btn-ghost btn-sm" on:click={() => showAddEnv = true}>+ Add first variable</button>
 				</div>
 			{:else if envVars.length > 0}
@@ -1589,6 +1829,34 @@
 		</div>
 	{/if}
 </div>
+
+<!-- Deploy Preflight Modal -->
+{#if showPreflightModal}
+	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+	<div class="modal-backdrop" on:click={closePreflightModal} role="presentation">
+		<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+		<div class="modal preflight-modal" on:click|stopPropagation role="dialog" aria-modal="true" aria-labelledby="preflight-title">
+			<div class="modal-header">
+				<div class="modal-title-row">
+					<span id="preflight-title" class="preflight-title">Missing required environment variables</span>
+				</div>
+				<div class="modal-meta text-secondary">The following must be set before deploy:</div>
+				<button class="modal-close" on:click={closePreflightModal} aria-label="Close">✕</button>
+			</div>
+			<div class="preflight-body">
+				<ul class="preflight-list">
+					{#each preflightMissing as key}
+						<li class="preflight-item mono">{key}</li>
+					{/each}
+				</ul>
+				<div class="preflight-actions">
+					<button class="btn btn-ghost btn-sm" on:click={closePreflightModal}>Cancel</button>
+					<button class="btn btn-primary btn-sm" on:click={goToEnvTab}>Go to Env Tab</button>
+				</div>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <!-- Deploy Log Modal -->
 {#if logModal !== null}
@@ -2918,5 +3186,134 @@
 		border-radius: 6px;
 		font-size: 13px;
 		color: var(--text-secondary);
+	}
+
+	/* ── Compose env vars table ──────────────────────────────────────────────── */
+	.env-section-divider {
+		border: none;
+		border-top: 1px solid var(--border);
+		margin: 0 0 24px;
+	}
+
+	.compose-env-table .compose-env-key {
+		white-space: nowrap;
+		font-size: 13px;
+	}
+
+	.compose-required-marker {
+		color: var(--danger, #e87a7a);
+		margin-left: 3px;
+		font-weight: 700;
+	}
+
+	.compose-env-value-cell {
+		width: 45%;
+	}
+
+	.compose-env-input-wrap {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.compose-env-input {
+		flex: 1;
+		padding: 5px 8px;
+		font-size: 12px;
+		min-width: 0;
+	}
+
+	.compose-env-input-required {
+		border-color: rgba(232, 122, 122, 0.5);
+	}
+
+	.compose-env-input-required:focus {
+		border-color: rgba(232, 122, 122, 0.9);
+		outline-color: rgba(232, 122, 122, 0.4);
+	}
+
+	.compose-env-toggle-vis {
+		flex-shrink: 0;
+	}
+
+	.compose-env-status-cell {
+		white-space: nowrap;
+	}
+
+	.compose-env-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		white-space: nowrap;
+	}
+
+	.compose-env-save-ok {
+		font-size: 12px;
+	}
+
+	tr.compose-env-required td {
+		background: rgba(232, 122, 122, 0.04);
+	}
+
+	/* Compose env status badges */
+	.compose-badge-required {
+		color: #e87a7a;
+		border-color: rgba(232, 122, 122, 0.3);
+		background: rgba(232, 122, 122, 0.08);
+	}
+
+	.compose-badge-secret {
+		color: #c8a8e8;
+		border-color: rgba(200, 168, 232, 0.3);
+		background: rgba(200, 168, 232, 0.08);
+	}
+
+	.compose-badge-default {
+		color: var(--text-muted);
+		border-color: var(--border);
+		background: transparent;
+	}
+
+	/* ── Preflight modal ─────────────────────────────────────────────────────── */
+	.preflight-modal {
+		max-width: 460px;
+	}
+
+	.preflight-title {
+		font-size: 15px;
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+
+	.preflight-body {
+		padding: 20px;
+	}
+
+	.preflight-list {
+		list-style: none;
+		padding: 0;
+		margin: 0 0 20px;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.preflight-item {
+		padding: 6px 10px;
+		background: rgba(232, 122, 122, 0.08);
+		border: 1px solid rgba(232, 122, 122, 0.2);
+		border-radius: 4px;
+		font-size: 13px;
+		color: #e87a7a;
+	}
+
+	.preflight-item::before {
+		content: '• ';
+	}
+
+	.preflight-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
 	}
 </style>

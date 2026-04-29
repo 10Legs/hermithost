@@ -11,6 +11,7 @@ export interface CoolifyApplication {
   git_commit_sha: string;
   build_pack: string;
   docker_compose_location?: string;
+  docker_compose_raw?: string | null;
   base_directory?: string;
   created_at: string;
   updated_at: string;
@@ -54,6 +55,7 @@ export interface CoolifyCreateApplicationPayload {
   name: string;
   description?: string;
   domains?: string;
+  docker_compose_domains?: Array<{ name: string; domain: string }>;
   git_repository: string;
   git_branch: string;
   build_pack: string;
@@ -86,6 +88,7 @@ export interface CoolifyUpdateApplicationPayload {
   name?: string;
   description?: string;
   domains?: string;  // sets fqdn — Coolify PATCH uses 'domains', not 'fqdn'
+  docker_compose_domains?: Array<{ name: string; domain: string }>;
   git_repository?: string;
   git_branch?: string;
   build_pack?: string;
@@ -101,6 +104,13 @@ export interface CoolifyEnv {
   is_runtime: boolean;
   is_buildtime: boolean;
   is_preview: boolean;
+}
+
+export interface CoolifyEnvVar {
+  key: string;
+  value: string;
+  is_build_time?: boolean;
+  is_literal?: boolean;
 }
 
 export interface CreateEnvPayload {
@@ -241,6 +251,39 @@ export class CoolifyClient {
       body: JSON.stringify(payload),
     });
     await handleResponse<unknown>(res, `PATCH /applications/${appUuid}/envs`);
+  }
+
+  // ── Key-based env patch (no uuid in body) ─────────────────────────────────
+  // Coolify's PATCH /applications/{uuid}/envs identifies the var by key.
+  // Sending uuid in the body causes a 422 validation error.
+  async patchEnvByKey(appUuid: string, payload: { key: string; value: string }): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/applications/${appUuid}/envs`, {
+      method: 'PATCH',
+      headers: this.headers,
+      body: JSON.stringify(payload),
+    });
+    await handleResponse<unknown>(res, `PATCH /applications/${appUuid}/envs (by key)`);
+  }
+
+  // ── Bulk env var prefill ──────────────────────────────────────────────────────
+  // Pushes multiple env vars to a Coolify application sequentially.
+  // On duplicate-key or other per-var failure: logs warning and continues.
+  async setApplicationEnvs(uuid: string, envs: CoolifyEnvVar[]): Promise<void> {
+    for (const env of envs) {
+      const payload: CreateEnvPayload = {
+        key: env.key,
+        value: env.value,
+        ...(env.is_build_time !== undefined ? { is_buildtime: env.is_build_time } : {}),
+        ...(env.is_literal !== undefined ? { is_shown_once: env.is_literal } : {}),
+      };
+      try {
+        await this.createEnv(uuid, payload);
+      } catch (err) {
+        console.warn(
+          `[coolify] setApplicationEnvs: failed to set ${env.key} on ${uuid} — ${(err as Error).message}`,
+        );
+      }
+    }
   }
 
   async deleteEnv(appUuid: string, envUuid: string): Promise<void> {
