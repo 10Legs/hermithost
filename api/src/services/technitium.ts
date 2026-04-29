@@ -272,11 +272,14 @@ export class TechnitiumClient {
     return this.withTokenRetry(async () => {
       const body = this.buildParams({});
       const res = await fetch(`${this.baseUrl}/api/settings/get`, { method: 'POST', headers: this.postHeaders, body });
-      const data = await res.json() as { status: string; errorMessage?: string; response?: { recursion?: string; recursionNetworkACL?: string } };
+      const data = await res.json() as { status: string; errorMessage?: string; response?: { recursion?: string; recursionNetworkACL?: string | string[] } };
       if (data.status !== 'ok') throw new Error(`Technitium /api/settings/get error: ${data.errorMessage ?? data.status}`);
       const recursion = data.response?.recursion ?? '';
       const aclRaw = data.response?.recursionNetworkACL ?? '';
-      const acl = aclRaw.split(',').map(s => s.trim()).filter(Boolean);
+      // Technitium returns recursionNetworkACL as an array; older builds returned a comma-string. Handle both.
+      const acl = (Array.isArray(aclRaw) ? aclRaw : String(aclRaw).split(','))
+        .map(s => String(s).trim())
+        .filter(Boolean);
       let mode: RecursionMode;
       switch (recursion) {
         case 'Deny':  mode = 'Disabled'; break;
@@ -370,14 +373,13 @@ export class TechnitiumClient {
     }
 
     // Pull topClients from LastHour stats.
-    // Technitium returns { name: "<ip>", domain: "<rdns or empty>", hits: N }
+    // Technitium returns topClients at response.topClients (sibling of stats, not nested under it).
+    // Each entry: { name: "<ip>", domain: "<rdns or empty>", hits: N }
     type StatsResponse = {
       status: string;
       errorMessage?: string;
       response?: {
-        stats?: {
-          topClients?: Array<{ name: string; domain?: string; hits: number }>;
-        };
+        topClients?: Array<{ name: string; domain?: string; hits: number }>;
       };
     };
     const statsBody = this.buildParams({ type: 'LastHour' });
@@ -388,7 +390,7 @@ export class TechnitiumClient {
     });
     const statsData = await statsRes.json() as StatsResponse;
     const topClients: Array<{ name: string; domain?: string; hits: number }> =
-      statsData.response?.stats?.topClients ?? [];
+      statsData.response?.topClients ?? [];
 
     // Filter to clients NOT covered by any ACL entry.
     // ip is in `name`; reverse-DNS (if resolved) is in `domain`.
