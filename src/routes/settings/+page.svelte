@@ -56,6 +56,88 @@
 	let savingDnsRecursion = false;
 	let dnsRecursionSuccess = false;
 	let dnsRecursionError = '';
+
+	// ── DNS Recursion Diagnose ────────────────────────────────────────────────
+	type UntrustedClient = { ip: string; rdns: string | null; hits: number; in_acl: boolean };
+	type DiagnoseResult = {
+		recursion_working: boolean;
+		current_mode: RecursionMode;
+		current_acl: string[];
+		untrusted_clients: UntrustedClient[];
+	};
+	let diagnosing = false;
+	let diagnoseResult: DiagnoseResult | null = null;
+	let diagnoseError = '';
+	let showDiagnoseModal = false;
+	let trustingIp: string | null = null;
+
+	// Toast state
+	let toastMessage = '';
+	let toastVisible = false;
+	let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function showToast(msg: string) {
+		toastMessage = msg;
+		toastVisible = true;
+		if (toastTimer !== null) clearTimeout(toastTimer);
+		toastTimer = setTimeout(() => { toastVisible = false; }, 4000);
+	}
+
+	async function onDiagnoseClick() {
+		diagnosing = true;
+		diagnoseError = '';
+		diagnoseResult = null;
+		try {
+			const res = await fetch('/api/config/dns-recursion-diagnose', {
+				credentials: 'include',
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({})) as { error?: string };
+				throw new Error(body.error ?? `HTTP ${res.status}`);
+			}
+			diagnoseResult = (await res.json()) as DiagnoseResult;
+			showDiagnoseModal = true;
+		} catch (err) {
+			diagnoseError = (err as Error).message;
+		} finally {
+			diagnosing = false;
+		}
+	}
+
+	async function onTrustClient(ip: string) {
+		trustingIp = ip;
+		try {
+			const res = await fetch('/api/config/dns-recursion-trust', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ ip }),
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({})) as { error?: string };
+				throw new Error(body.error ?? `HTTP ${res.status}`);
+			}
+			showToast(`Added ${ip} to ACL`);
+			if (diagnoseResult) {
+				diagnoseResult = {
+					...diagnoseResult,
+					untrusted_clients: diagnoseResult.untrusted_clients.filter((c) => c.ip !== ip),
+				};
+			}
+		} catch (err) {
+			showToast(`Error: ${(err as Error).message}`);
+		} finally {
+			trustingIp = null;
+		}
+	}
+
+	function closeDiagnoseModal() {
+		showDiagnoseModal = false;
+	}
+
+	function onDiagnoseModalKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape') closeDiagnoseModal();
+	}
 	let savingDnsProvider = false;
 	let dnsProviderError = '';
 	let savingCloudflareToken = false;
@@ -876,7 +958,25 @@
 						{#if savingDnsRecursion}
 							<span class="spinner"></span>
 						{/if}
+						{#if dnsRecursion === 'LanOnly'}
+							<button
+								class="btn btn-ghost"
+								aria-label="Diagnose DNS recursion issues"
+								disabled={diagnosing}
+								on:click={onDiagnoseClick}
+							>
+								{#if diagnosing}
+									<span class="spinner"></span>
+									Diagnosing…
+								{:else}
+									Diagnose
+								{/if}
+							</button>
+						{/if}
 					</div>
+					{#if diagnoseError}
+						<p class="error-msg">Diagnose failed: {diagnoseError}</p>
+					{/if}
 					{#if dnsRecursionSuccess}
 						<p class="inline-success">DNS recursion updated to {recursionLabels[dnsRecursion]}.</p>
 					{/if}
@@ -1138,6 +1238,84 @@
 		</div>
 	</section>
 </div>
+
+<!-- ── DNS Recursion Diagnose Modal ──────────────────────────────────────── -->
+{#if showDiagnoseModal && diagnoseResult}
+	<!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+	<div
+		class="diag-backdrop"
+		role="dialog"
+		aria-modal="true"
+		aria-label="DNS Recursion Diagnosis"
+		on:keydown={onDiagnoseModalKeydown}
+		tabindex="-1"
+	>
+		<div class="diag-modal">
+			<div class="diag-header">
+				<span class="diag-title">
+					{#if !diagnoseResult.recursion_working && diagnoseResult.untrusted_clients.length > 0}
+						Recursion broken — these clients are being REFUSED
+					{:else if diagnoseResult.untrusted_clients.length > 0}
+						Some clients refused — review below
+					{:else}
+						&#10003; Recursion working
+					{/if}
+				</span>
+				<button class="diag-close btn btn-ghost" aria-label="Close" on:click={closeDiagnoseModal}>✕</button>
+			</div>
+			<div class="diag-body">
+				{#if diagnoseResult.untrusted_clients.length === 0}
+					<p class="diag-ok-msg">&#10003; Recursion working. No refused clients in last hour.</p>
+				{:else}
+					<table class="diag-table">
+						<thead>
+							<tr>
+								<th>IP</th>
+								<th>Hits (last hour)</th>
+								<th></th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each diagnoseResult.untrusted_clients as client (client.ip)}
+								<tr>
+									<td class="diag-ip">
+									{client.ip}
+									{#if client.rdns}
+										<div class="diag-rdns">{client.rdns}</div>
+									{:else}
+										<div class="diag-rdns diag-rdns--none"><em>(no PTR)</em></div>
+									{/if}
+								</td>
+									<td class="diag-hits">{client.hits}</td>
+									<td>
+										<button
+											class="btn btn-primary diag-trust-btn"
+											disabled={trustingIp === client.ip}
+											on:click={() => onTrustClient(client.ip)}
+										>
+											{#if trustingIp === client.ip}
+												<span class="spinner"></span>
+											{/if}
+											Trust this client
+										</button>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				{/if}
+			</div>
+			<div class="diag-footer">
+				<button class="btn btn-ghost" on:click={closeDiagnoseModal}>Dismiss</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- ── Toast ─────────────────────────────────────────────────────────────── -->
+{#if toastVisible}
+	<div class="diag-toast" role="status" aria-live="polite">{toastMessage}</div>
+{/if}
 
 <style>
 	.page {
@@ -1720,5 +1898,126 @@
 	.chip-text {
 		color: var(--text-muted);
 		line-height: 1.5;
+	}
+
+	/* ── DNS Diagnose Modal ── */
+	.diag-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.55);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1000;
+	}
+
+	.diag-modal {
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		width: min(560px, 92vw);
+		display: flex;
+		flex-direction: column;
+		max-height: 80vh;
+		overflow: hidden;
+	}
+
+	.diag-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 14px 16px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.diag-title {
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+
+	.diag-close {
+		padding: 4px 8px;
+		font-size: 13px;
+	}
+
+	.diag-body {
+		padding: 16px;
+		overflow-y: auto;
+		flex: 1;
+	}
+
+	.diag-ok-msg {
+		font-size: 13px;
+		color: var(--success, #4caf82);
+		margin: 0;
+	}
+
+	.diag-table {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 12px;
+	}
+
+	.diag-table th {
+		text-align: left;
+		color: var(--text-muted);
+		font-weight: 500;
+		padding: 6px 8px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.diag-table td {
+		padding: 8px;
+		border-bottom: 1px solid var(--border);
+		vertical-align: middle;
+	}
+
+	.diag-ip {
+		font-family: var(--font-mono);
+		color: var(--text-primary);
+	}
+
+	.diag-rdns {
+		font-family: var(--font-mono);
+		font-size: 0.78em;
+		color: var(--text-secondary);
+		margin-top: 2px;
+	}
+
+	.diag-rdns--none {
+		color: var(--text-tertiary, var(--text-secondary));
+	}
+
+	.diag-hits {
+		color: var(--text-secondary);
+	}
+
+	.diag-trust-btn {
+		padding: 5px 10px;
+		font-size: 11px;
+	}
+
+	.diag-footer {
+		padding: 12px 16px;
+		border-top: 1px solid var(--border);
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	/* ── Toast ── */
+	.diag-toast {
+		position: fixed;
+		bottom: 24px;
+		right: 24px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 10px 16px;
+		font-size: 12px;
+		color: var(--text-primary);
+		z-index: 1100;
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+		pointer-events: none;
 	}
 </style>
