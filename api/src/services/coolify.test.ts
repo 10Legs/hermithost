@@ -97,9 +97,9 @@ describe('CoolifyClient.syncApplicationEnvs — race-safe env sync', () => {
     await vi.advanceTimersByTimeAsync(600);
     await syncPromise;
 
-    // POSTGRES_PASSWORD has empty value → should be patched
+    // POSTGRES_PASSWORD has empty value → should be patched with is_required=true (Bug 3 fix)
     expect(patchSpy).toHaveBeenCalledTimes(1);
-    expect(patchSpy).toHaveBeenCalledWith('app-uuid', { key: 'POSTGRES_PASSWORD', value: 'generated-secret-abc123' });
+    expect(patchSpy).toHaveBeenCalledWith('app-uuid', { key: 'POSTGRES_PASSWORD', value: 'generated-secret-abc123', is_required: true });
 
     // NODE_ENV and POSTGRES_DB already have values → no patch, no create
     expect(createSpy).not.toHaveBeenCalled();
@@ -134,6 +134,40 @@ describe('CoolifyClient.syncApplicationEnvs — race-safe env sync', () => {
 
     // POSTGRES_DB is empty and our value is also empty → no patch needed
     expect(patchSpy).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates Coolify rows before patching — deletes extras keyed by uuid (Bug 2)', async () => {
+    // Coolify ran LoadComposeFile twice → 2 rows per key
+    vi.spyOn(client, 'listEnvs').mockResolvedValue([
+      { uuid: 'u1', key: 'POSTGRES_PASSWORD', value: '', is_shown_once: false, is_runtime: true, is_buildtime: false, is_preview: false },
+      { uuid: 'u2', key: 'POSTGRES_PASSWORD', value: '', is_shown_once: false, is_runtime: true, is_buildtime: false, is_preview: false },
+      { uuid: 'u3', key: 'NODE_ENV', value: 'production', is_shown_once: false, is_runtime: true, is_buildtime: false, is_preview: false },
+      { uuid: 'u4', key: 'NODE_ENV', value: 'production', is_shown_once: false, is_runtime: true, is_buildtime: false, is_preview: false },
+    ]);
+    const deleteSpy = vi.spyOn(client, 'deleteEnv').mockResolvedValue(undefined);
+    const patchSpy = vi.spyOn(client, 'patchEnvByKey').mockResolvedValue(undefined);
+
+    const syncPromise = client.syncApplicationEnvs(
+      'app-uuid',
+      [
+        { key: 'POSTGRES_PASSWORD', value: 'secret-xyz' },
+        { key: 'NODE_ENV', value: 'production' },
+      ],
+      new Set(['POSTGRES_PASSWORD']),
+      5_000,
+    );
+
+    await vi.advanceTimersByTimeAsync(600);
+    await syncPromise;
+
+    // Duplicates (u2 and u4) must be deleted
+    expect(deleteSpy).toHaveBeenCalledTimes(2);
+    expect(deleteSpy).toHaveBeenCalledWith('app-uuid', 'u2');
+    expect(deleteSpy).toHaveBeenCalledWith('app-uuid', 'u4');
+
+    // POSTGRES_PASSWORD empty → patched with is_required
+    expect(patchSpy).toHaveBeenCalledTimes(1);
+    expect(patchSpy).toHaveBeenCalledWith('app-uuid', { key: 'POSTGRES_PASSWORD', value: 'secret-xyz', is_required: true });
   });
 
   it('falls back to setApplicationEnvs when Coolify envs never appear', async () => {

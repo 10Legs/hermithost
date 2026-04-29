@@ -90,11 +90,29 @@ function primaryDomain(fqdn: string | null): string {
 // For dockercompose apps Coolify's fqdn column stays as the sslip.io creation-time
 // placeholder because PATCH { domains } is rejected (v4.3.5 API constraint).
 // The authoritative domain is in docker_compose_domains — pick the first service's domain.
+//
+// NOTE: Coolify's REST API serialises docker_compose_domains as a JSON STRING even though
+// the DB column stores an object. We must JSON.parse it when it arrives as a string.
+function parseDockerComposeDomains(raw: string | Record<string, { domain: string }> | null | undefined): Record<string, { domain: string }> | null {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) as Record<string, { domain: string }>;
+    } catch {
+      return null;
+    }
+  }
+  return raw;
+}
+
 function resolveDisplayDomain(app: CoolifyApplication): string {
   if (app.build_pack === 'dockercompose' && app.docker_compose_domains) {
-    const entries = Object.values(app.docker_compose_domains);
-    if (entries.length > 0 && entries[0].domain) {
-      return entries[0].domain.replace(/^https?:\/\//, '');
+    const parsed = parseDockerComposeDomains(app.docker_compose_domains);
+    if (parsed) {
+      const entries = Object.values(parsed);
+      if (entries.length > 0 && entries[0].domain) {
+        return entries[0].domain.replace(/^https?:\/\//, '');
+      }
     }
   }
   return primaryDomain(app.fqdn);

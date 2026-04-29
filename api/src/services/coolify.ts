@@ -12,8 +12,9 @@ export interface CoolifyApplication {
   build_pack: string;
   docker_compose_location?: string;
   docker_compose_raw?: string | null;
-  // Coolify stores docker_compose_domains as a keyed object: { [service]: { domain: string } }
-  docker_compose_domains?: Record<string, { domain: string }> | null;
+  // Coolify's DB stores docker_compose_domains as a keyed object, but the REST API
+  // serialises it as a JSON string. Accept both forms.
+  docker_compose_domains?: string | Record<string, { domain: string }> | null;
   base_directory?: string;
   created_at: string;
   updated_at: string;
@@ -266,12 +267,26 @@ export class CoolifyClient {
   // ── Key-based env patch (no uuid in body) ─────────────────────────────────
   // Coolify's PATCH /applications/{uuid}/envs identifies the var by key.
   // Sending uuid in the body causes a 422 validation error.
-  async patchEnvByKey(appUuid: string, payload: { key: string; value: string }): Promise<void> {
+  // is_required is included when true — if Coolify rejects it (422) we log and swallow.
+  async patchEnvByKey(appUuid: string, payload: { key: string; value: string; is_required?: boolean }): Promise<void> {
+    const body: Record<string, unknown> = { key: payload.key, value: payload.value };
+    if (payload.is_required === true) body.is_required = true;
     const res = await fetch(`${this.baseUrl}/applications/${appUuid}/envs`, {
       method: 'PATCH',
       headers: this.headers,
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
+    if (!res.ok && res.status === 422 && payload.is_required) {
+      // Coolify may not accept is_required — retry without it
+      console.warn(`[coolify] patchEnvByKey: is_required rejected for ${payload.key} on ${appUuid} — retrying without`);
+      const retry = await fetch(`${this.baseUrl}/applications/${appUuid}/envs`, {
+        method: 'PATCH',
+        headers: this.headers,
+        body: JSON.stringify({ key: payload.key, value: payload.value }),
+      });
+      await handleResponse<unknown>(retry, `PATCH /applications/${appUuid}/envs (by key, no is_required)`);
+      return;
+    }
     await handleResponse<unknown>(res, `PATCH /applications/${appUuid}/envs (by key)`);
   }
 
@@ -359,11 +374,26 @@ export class CoolifyClient {
     console.log(`[coolify] syncApplicationEnvs: found ${coolifyEnvs.length} Coolify-extracted envs for ${uuid}`);
 
     // Build lookup of Coolify's auto-extracted envs by key.
-    // Keep first occurrence only (in case there are already dupes from a prior failed attempt)
+    // If Coolify has duplicate rows for a key (caused by LoadComposeFile running twice after
+    // our PATCH docker_compose_domains), keep the first occurrence and delete the extras.
     const coolifyByKey = new Map<string, CoolifyEnv>();
+    const dupesToDelete: string[] = [];
     for (const env of coolifyEnvs) {
       if (!coolifyByKey.has(env.key)) {
         coolifyByKey.set(env.key, env);
+      } else {
+        // This is a duplicate row — queue for deletion (uuid is the Coolify env row uuid)
+        dupesToDelete.push(env.uuid);
+      }
+    }
+    if (dupesToDelete.length > 0) {
+      console.log(`[coolify] syncApplicationEnvs: deduplicating ${dupesToDelete.length} extra Coolify env rows for ${uuid}`);
+      for (const envUuid of dupesToDelete) {
+        try {
+          await this.deleteEnv(uuid, envUuid);
+        } catch (delErr) {
+          console.warn(`[coolify] syncApplicationEnvs: failed to delete dupe env row ${envUuid} on ${uuid}: ${(delErr as Error).message}`);
+        }
       }
     }
 
@@ -374,10 +404,11 @@ export class CoolifyClient {
       if (coolifyRow) {
         // Row exists — PATCH value if empty AND we have a value to set
         const currentValue = coolifyRow.value ?? '';
+        const isRequired = requiredKeys.has(env.key);
         if (currentValue === '' && env.value !== '') {
           try {
-            await this.patchEnvByKey(uuid, { key: env.key, value: env.value });
-            console.log(`[coolify] syncApplicationEnvs: patched value for ${env.key} on ${uuid}`);
+            await this.patchEnvByKey(uuid, { key: env.key, value: env.value, ...(isRequired ? { is_required: true } : {}) });
+            console.log(`[coolify] syncApplicationEnvs: patched value for ${env.key} on ${uuid} (is_required=${isRequired})`);
           } catch (err) {
             console.warn(`[coolify] syncApplicationEnvs: patch failed for ${env.key} on ${uuid}: ${(err as Error).message}`);
           }
