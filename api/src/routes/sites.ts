@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { readFileSync, writeFileSync, unlinkSync } from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
-import { dockerGet, dockerPost } from '../services/docker';
+import { dockerGet, dockerPost, dockerNetworkConnect } from '../services/docker';
 import { DnsRecord } from '../types';
 import {
   createCoolifyClient,
@@ -16,6 +16,7 @@ import {
   UpdateEnvPayload,
 } from '../services/coolify';
 import { extractEnvVars, generateSecretValue } from '../lib/composeEnv';
+import { FQDN_RE, SLUG_RE, domainHasDangerousChars } from '../lib/validation';
 import { mapSite, mapDeploy } from '../services/mapper';
 import { probeSite } from '../services/healthProbe';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
@@ -403,7 +404,13 @@ export async function provisionTraefikRoute(
   domain: string,
   port: number | string = 3000,
   resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt'
-): Promise<void> {
+): Promise<{ ok: boolean; reason?: string }> {
+  // H2 Layer 2 — defensive domain safety check before writing yml
+  if (domainHasDangerousChars(domain)) {
+    const reason = `domain contains dangerous characters: ${JSON.stringify(domain)}`;
+    console.warn(`[traefik-route] BLOCKED — ${reason}`);
+    return { ok: false, reason };
+  }
   const confDir = TRAEFIK_CONF_DIR;
   const filePath = path.join(confDir, `site-${slug}.yml`);
   try {
@@ -412,7 +419,7 @@ export async function provisionTraefikRoute(
     const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<{ Names: string[] }>;
     if (!containers.length) {
       console.warn(`[traefik-route] No container found for slug ${slug} — route not written`);
-      return;
+      return { ok: false, reason: `no container for slug ${slug}` };
     }
     const containerName = containers[0].Names[0].replace(/^\//, '');
     const yml = `http:
@@ -441,8 +448,11 @@ export async function provisionTraefikRoute(
 `;
     writeFileSync(filePath, yml, 'utf8');
     console.log(`[traefik-route] Route written for ${domain} → ${containerName}:${port}`);
+    return { ok: true };
   } catch (err) {
-    console.warn(`[traefik-route] Failed to provision route for ${slug}:`, (err as Error).message);
+    const reason = (err as Error).message;
+    console.warn(`[traefik-route] Failed to provision route for ${slug}:`, reason);
+    return { ok: false, reason };
   }
 }
 
@@ -452,6 +462,184 @@ function removeTraefikRoute(slug: string): void {
     console.log(`[traefik-route] Route removed for slug ${slug}`);
   } catch {
     // File may not exist — that's fine
+  }
+}
+
+// ── Traefik route provisioning — dockercompose build pack ─────────────────────
+// Mirrors provisionTraefikRoute() but handles compose-specific container
+// discovery, port detection, and network attachment.
+//
+// Steps:
+//   1. Wait for docker_compose_raw to be populated (compose parse is async).
+//   2. Pick the primary service using COMPOSE_PRIMARY_SERVICE_NAMES preference list.
+//   3. Discover the running container via com.docker.compose.project/service labels.
+//   4. Detect the exposed port (Traefik label → ExposedPorts → 80 fallback).
+//   5. Attach the primary container to the "coolify" network (idempotent).
+//   6. Write site-${slug}.yml — same filename convention so removeTraefikRoute() works.
+export async function provisionTraefikRouteForCompose(
+  client: CoolifyClient,
+  app: CoolifyApplication,
+  domain: string,
+  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt',
+): Promise<{ ok: boolean; reason?: string }> {
+  // H2 Layer 2 — defensive domain safety check before writing yml
+  if (domainHasDangerousChars(domain)) {
+    const reason = `domain contains dangerous characters: ${JSON.stringify(domain)}`;
+    console.warn(`[traefik-route-compose] BLOCKED — ${reason}`);
+    return { ok: false, reason };
+  }
+  const slug = app.uuid;
+  const confDir = TRAEFIK_CONF_DIR;
+  const filePath = path.join(confDir, `site-${slug}.yml`);
+
+  try {
+    // ── Step 1: Wait for compose parse ─────────────────────────────────────────
+    console.log(`[traefik-route-compose] Waiting for compose parse (uuid=${slug})...`);
+    let composedApp: CoolifyApplication | null = app.docker_compose_raw ? app : null;
+    if (!composedApp) {
+      for (let attempt = 0; attempt < COMPOSE_POLL_MAX_ATTEMPTS; attempt++) {
+        await new Promise<void>((resolve) => setTimeout(resolve, COMPOSE_POLL_INTERVAL_MS));
+        const polled = await client.getApplication(slug).catch(() => null);
+        if (polled?.docker_compose_raw) {
+          composedApp = polled;
+          break;
+        }
+      }
+    }
+    if (!composedApp?.docker_compose_raw) {
+      console.warn(
+        `[traefik-route-compose] Timed out waiting for docker_compose_raw (uuid=${slug}) — route not written`,
+      );
+      return { ok: false, reason: `timed out waiting for docker_compose_raw (uuid=${slug})` };
+    }
+
+    // ── Step 2: Pick primary service ────────────────────────────────────────────
+    let serviceNames: string[] = [];
+    try {
+      const parsed = yaml.load(composedApp.docker_compose_raw) as Record<string, unknown>;
+      const services = (parsed?.services ?? {}) as Record<string, unknown>;
+      serviceNames = Object.keys(services);
+    } catch (parseErr) {
+      const reason = (parseErr as Error).message;
+      console.warn(
+        `[traefik-route-compose] Failed to parse docker_compose_raw (uuid=${slug}):`,
+        reason,
+      );
+      return { ok: false, reason: `compose parse error: ${reason}` };
+    }
+
+    const primaryService =
+      COMPOSE_PRIMARY_SERVICE_NAMES.find((name) => serviceNames.includes(name)) ?? serviceNames[0];
+
+    if (!primaryService) {
+      console.warn(`[traefik-route-compose] No services in compose YAML (uuid=${slug}) — route not written`);
+      return { ok: false, reason: `no services in compose YAML (uuid=${slug})` };
+    }
+
+    // Warn about non-primary services that have domain assignments (MVP: skip them)
+    const nonPrimary = serviceNames.filter((s) => s !== primaryService);
+    if (nonPrimary.length > 0) {
+      console.log(
+        `[traefik-route-compose] Multi-service compose: using primary="${primaryService}", ` +
+        `not routing: [${nonPrimary.join(', ')}] (MVP — primary service only)`,
+      );
+    }
+
+    // ── Step 3: Discover container ──────────────────────────────────────────────
+    console.log(`[traefik-route-compose] Discovering container for project=${slug} service=${primaryService}...`);
+    const filter = encodeURIComponent(
+      JSON.stringify({
+        label: [
+          `com.docker.compose.project=${slug}`,
+          `com.docker.compose.service=${primaryService}`,
+        ],
+      }),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Docker inspect shape varies; use any for raw response
+    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<any>;
+    if (!containers.length) {
+      console.warn(
+        `[traefik-route-compose] No container found for project=${slug} service=${primaryService} — route not written`,
+      );
+      return { ok: false, reason: `no container for project=${slug} service=${primaryService}` };
+    }
+    const container = containers[0];
+    const containerId: string = container.Id as string;
+    const containerName: string = (container.Names as string[])[0].replace(/^\//, '');
+
+    // ── Step 4: Discover port ───────────────────────────────────────────────────
+    // Priority: Traefik label on container → image ExposedPorts → 80
+    let port: number | string = 80;
+    const labels: Record<string, string> = (container.Labels as Record<string, string>) ?? {};
+
+    // Traefik label: traefik.http.services.<anything>-${primaryService}.loadbalancer.server.port
+    const traefikPortLabelPattern = new RegExp(
+      `^traefik\\.http\\.services\\.[^.]*${primaryService}\\.loadbalancer\\.server\\.port$`,
+      'i',
+    );
+    const traefikPortEntry = Object.entries(labels).find(([k]) => traefikPortLabelPattern.test(k));
+    if (traefikPortEntry) {
+      port = traefikPortEntry[1];
+      console.log(`[traefik-route-compose] Port from Traefik label: ${port}`);
+    } else {
+      // Inspect container for ExposedPorts
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Docker inspect response shape
+        const inspected = await dockerGet(`/containers/${containerId}/json`) as any;
+        const exposedPorts: Record<string, unknown> = inspected?.Config?.ExposedPorts ?? {};
+        const firstPort = Object.keys(exposedPorts)[0]; // e.g. "3000/tcp"
+        if (firstPort) {
+          port = firstPort.split('/')[0]; // strip "/tcp"
+          console.log(`[traefik-route-compose] Port from ExposedPorts: ${port}`);
+        } else {
+          console.warn(`[traefik-route-compose] No port hint found for ${containerName} — defaulting to 80`);
+        }
+      } catch (inspectErr) {
+        console.warn(
+          `[traefik-route-compose] Container inspect failed for ${containerId}:`,
+          (inspectErr as Error).message,
+          '— defaulting to port 80',
+        );
+      }
+    }
+
+    // ── Step 5: Attach container to coolify network (idempotent) ───────────────
+    console.log(`[traefik-route-compose] Attaching ${containerName} to coolify network...`);
+    await dockerNetworkConnect('coolify', containerId);
+    console.log(`[traefik-route-compose] ${containerName} is on coolify network`);
+
+    // ── Step 6: Write Traefik yml (same structure as provisionTraefikRoute) ─────
+    const yml = `http:
+  routers:
+    site-${slug}-http:
+      rule: "Host(\`${domain}\`)"
+      entryPoints:
+        - http
+      middlewares:
+        - redirect-to-https
+      service: site-${slug}
+
+    site-${slug}:
+      rule: "Host(\`${domain}\`)"
+      entryPoints:
+        - https
+      tls:
+        certResolver: ${resolver}
+      service: site-${slug}
+
+  services:
+    site-${slug}:
+      loadBalancer:
+        servers:
+          - url: "http://${containerName}:${port}"
+`;
+    writeFileSync(filePath, yml, 'utf8');
+    console.log(`[traefik-route-compose] Route written for ${domain} → ${containerName}:${port}`);
+    return { ok: true };
+  } catch (err) {
+    const reason = (err as Error).message;
+    console.warn(`[traefik-route-compose] Failed to provision route for ${slug}:`, reason);
+    return { ok: false, reason };
   }
 }
 
@@ -767,6 +955,11 @@ router.delete('/:slug', async (req: Request, res: Response) => {
 // PAT is embedded in Coolify's git_repository transparently — never exposed to the frontend.
 // When updating repository URL on a PAT site, the existing PAT is re-embedded automatically.
 router.patch('/:slug', async (req: Request, res: Response) => {
+  // C — slug validation (Coolify UUIDs are alphanumeric)
+  if (!SLUG_RE.test(req.params.slug)) {
+    res.status(400).json({ error: 'Invalid slug' });
+    return;
+  }
   const body = req.body as Partial<CoolifyUpdateApplicationPayload & {
     fqdn?: string;    // alias — maps to domains
     domain?: string;  // alias — maps to domains
@@ -780,6 +973,15 @@ router.patch('/:slug', async (req: Request, res: Response) => {
   if (Object.keys(body).length === 0) {
     res.status(400).json({ error: 'Request body must include at least one field to update' });
     return;
+  }
+  // B Layer 1 — validate fqdn/domain at ingress
+  const incomingFqdnRaw = (body as any).fqdn ?? (body as any).domain ?? body.domains;
+  if (incomingFqdnRaw !== undefined) {
+    const bare = String(incomingFqdnRaw).replace(/^https?:\/\//i, '').replace(/\/.*$/, '').trim();
+    if (!FQDN_RE.test(bare)) {
+      res.status(400).json({ error: 'Invalid domain: must be a valid FQDN' });
+      return;
+    }
   }
   const switchingAuth = body.deploy_auth !== undefined;
   if (switchingAuth && body.deploy_auth === 'pat' && !body.deploy_token?.trim()) {
@@ -863,9 +1065,18 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     // Non-fatal: provisionTraefikRoute logs a warning if no container is running.
     const currentDomain = app.fqdn ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '') : '';
     if (currentDomain) {
-      const port = (app as any).ports_exposes ?? 3000;
       const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
-      await provisionTraefikRoute(req.params.slug, currentDomain, port, resolver);
+      let routeResult: { ok: boolean; reason?: string };
+      if (app.build_pack === 'dockercompose') {
+        const client2 = createCoolifyClient()!;
+        routeResult = await provisionTraefikRouteForCompose(client2, app, currentDomain, resolver);
+      } else {
+        const port = (app as any).ports_exposes ?? 3000;
+        routeResult = await provisionTraefikRoute(req.params.slug, currentDomain, port, resolver);
+      }
+      if (!routeResult.ok) {
+        console.error(`[traefik-route] PATCH ${req.params.slug}: route provision failed — ${routeResult.reason}`);
+      }
     }
     if (switchingAuth) writeStoredDeployAuth(req.params.slug, body.deploy_auth!);
     const result = mapSiteWithStoredAuth(app, []);
@@ -1366,6 +1577,11 @@ router.post('/:slug/enable', async (req: Request, res: Response) => {
 
 // ── POST /api/sites/:slug/deploy — trigger a deploy ──────────────────────────
 router.post('/:slug/deploy', async (req: Request, res: Response) => {
+  // C — slug validation
+  if (!SLUG_RE.test(req.params.slug)) {
+    res.status(400).json({ error: 'Invalid slug' });
+    return;
+  }
   try {
     if (readDisabledState(req.params.slug)) {
       res.status(409).json({ error: 'Site is disabled. Enable it before deploying.' });
@@ -1403,18 +1619,37 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
       const domain = app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '');
       const port = (app as any).ports_exposes ?? 3000;
       const slug = req.params.slug;
+      const isCompose = app.build_pack === 'dockercompose';
       (async () => {
         const maxAttempts = 18; // 18 × 10s = 3 min
         for (let i = 0; i < maxAttempts; i++) {
           await new Promise(r => setTimeout(r, 10_000));
           try {
-            const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
-            const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; State: string }>;
-            const running = containers.find(c => c.State === 'running');
-            if (running) {
-              const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
-              await provisionTraefikRoute(slug, domain, port, resolver);
-              break;
+            const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
+            if (isCompose) {
+              // For compose: poll for any running service container in this project
+              const filter = encodeURIComponent(
+                JSON.stringify({ label: [`com.docker.compose.project=${slug}`] }),
+              );
+              const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ State: string }>;
+              const running = containers.find(c => c.State === 'running');
+              if (running) {
+                const freshApp = await createCoolifyClient()!.getApplication(slug).catch(() => null);
+                if (freshApp) {
+                  const r = await provisionTraefikRouteForCompose(createCoolifyClient()!, freshApp, domain, resolver);
+                  if (!r.ok) console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${r.reason}`);
+                }
+                break;
+              }
+            } else {
+              const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
+              const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; State: string }>;
+              const running = containers.find(c => c.State === 'running');
+              if (running) {
+                const r = await provisionTraefikRoute(slug, domain, port, resolver);
+                if (!r.ok) console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${r.reason}`);
+                break;
+              }
             }
           } catch {
             // keep polling

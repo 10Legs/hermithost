@@ -146,6 +146,55 @@ app.delete('/containers/:id', assertManaged, async (req: Request, res: Response)
   }
 });
 
+// ── POST /networks/:name/connect ──────────────────────────────────────────────
+// SYNC: DOMAIN_DANGEROUS_CHARS_RE and related regexes are also in api/src/lib/validation.ts
+// Only the "coolify" network may be used; container must be hermithost-managed.
+
+app.post('/networks/:name/connect', async (req: Request, res: Response): Promise<void> => {
+  const { name } = req.params;
+
+  // H1 — only the coolify network is allowed
+  if (name !== 'coolify') {
+    console.warn(`[docker-proxy] BLOCKED: network ${name} not allowed`);
+    res.status(403).json({ error: 'Network not allowed' });
+    return;
+  }
+
+  const container = (req.body as Record<string, unknown>)?.Container;
+  if (!container || typeof container !== 'string') {
+    res.status(400).json({ error: 'Container required' });
+    return;
+  }
+
+  const labels = await getContainerLabels(container);
+  if (labels === null) {
+    res.status(404).json({ error: 'Container not found' });
+    return;
+  }
+  if (!isManagedContainer(labels)) {
+    console.warn(`[docker-proxy] BLOCKED: network connect refused — container ${container} is not managed`);
+    res.status(403).json({ error: 'Container not managed' });
+    return;
+  }
+
+  const body = JSON.stringify({ Container: container });
+  try {
+    const result = await dockerRequest({
+      path: '/networks/coolify/connect',
+      method: 'POST',
+      headers: {
+        Host: 'localhost',
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, body);
+    res.status(result.statusCode).send(result.body || undefined);
+  } catch (err) {
+    console.error(`[docker-proxy] POST /networks/coolify/connect failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Docker socket error' });
+  }
+});
+
 // ── Catch-all — deny anything not explicitly routed ──────────────────────────
 
 app.use((_req: Request, res: Response) => {
