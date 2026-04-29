@@ -95,6 +95,24 @@ else
   echo "[setup] WARNING: Could not obtain Technitium token — DNS integration will be limited."
 fi
 
+# ── Technitium recursion init (idempotent — only fixes broken default) ────────
+if [ -n "$TECH_SESSION" ]; then
+  echo "[setup] Checking Technitium recursion mode..."
+  TECH_PERM_TOKEN=$(cat /coolify-api-token/technitium_token 2>/dev/null || echo "$TECH_SESSION")
+  SETTINGS_RESP=$(curl -sf -X POST "$TECH_URL/api/settings/get?token=$TECH_PERM_TOKEN" 2>/dev/null || echo "")
+  CURRENT_RECURSION=$(echo "$SETTINGS_RESP" | jq -r '.response.recursion // empty' 2>/dev/null)
+  CURRENT_ACL=$(echo "$SETTINGS_RESP" | jq -r '.response.recursionNetworkACL // empty' 2>/dev/null)
+  SAFE_ACL="127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fd00::/8"
+  if [ "$CURRENT_RECURSION" = "AllowOnlyForPrivateNetworks" ] && [ -z "$CURRENT_ACL" ]; then
+    echo "[setup] Broken recursion default detected — applying safe LanOnly ACL..."
+    curl -sf -X POST "$TECH_URL/api/settings/set?token=$TECH_PERM_TOKEN&recursion=UseSpecifiedNetworkACL&recursionNetworkACL=$SAFE_ACL" > /dev/null 2>&1 \
+      && echo "[setup] Recursion mode set to UseSpecifiedNetworkACL with safe ACL." \
+      || echo "[setup] WARNING: Failed to apply recursion fix — check Technitium manually."
+  else
+    echo "[setup] Recursion mode is '${CURRENT_RECURSION:-unknown}' — no change needed."
+  fi
+fi
+
 # ── NS_SERVER_IP — public IP for DNS glue records ────────────────────────────
 echo "[setup] Detecting public IP for DNS glue records..."
 PUBLIC_IP=$(curl -sf --max-time 5 https://ifconfig.me 2>/dev/null || \

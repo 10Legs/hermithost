@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { createCoolifyClient } from '../services/coolify';
-import { createTechnitiumClient } from '../services/technitium';
+import { createTechnitiumClient, RecursionMode } from '../services/technitium';
 
 const router = Router();
 
@@ -108,14 +108,28 @@ async function getTechnitiumStatus(): Promise<IntegrationStatus> {
   }
 }
 
+async function getDnsRecursion(): Promise<RecursionMode> {
+  const client = createTechnitiumClient();
+  if (!client) return 'LanOnly';
+  try {
+    return await client.getRecursion();
+  } catch (err) {
+    console.warn('[config] getRecursion failed — defaulting to LanOnly:', (err as Error).message);
+    return 'LanOnly';
+  }
+}
+
+const VALID_RECURSION_MODES: RecursionMode[] = ['Disabled', 'LanOnly', 'Public'];
+
 // GET /api/config
 router.get('/', async (_req: Request, res: Response) => {
   try {
     const cfToken = readSetting('cloudflare_token') ?? process.env.CLOUDFLARE_TOKEN ?? null;
-    const [coolify_status, technitium_status, cloudflare_status] = await Promise.all([
+    const [coolify_status, technitium_status, cloudflare_status, dns_recursion] = await Promise.all([
       getCoolifyStatus(),
       getTechnitiumStatus(),
       getCloudflareStatus(cfToken),
+      getDnsRecursion(),
     ]);
 
     const dns_provider = readSetting('dns_provider') ?? process.env.DNS_PROVIDER ?? 'technitium';
@@ -133,6 +147,7 @@ router.get('/', async (_req: Request, res: Response) => {
       cloudflare_status,
       cloudflare_token_set: !!cfToken,
       network_mode: readNetworkMode(),
+      dns_recursion,
     });
   } catch (err) {
     console.error('[config] GET failed:', (err as Error).message);
@@ -149,6 +164,7 @@ router.put('/', async (req: Request, res: Response) => {
     cloudflare_token?: unknown;
     network_mode?: unknown;
     dns_forwarders?: unknown;
+    dns_recursion?: unknown;
   };
 
   // Validate at least one known key is present
@@ -158,9 +174,10 @@ router.put('/', async (req: Request, res: Response) => {
   const hasCfToken = typeof body.cloudflare_token === 'string';
   const hasNetworkMode = typeof body.network_mode === 'string' && body.network_mode.trim();
   const hasDnsForwarders = Array.isArray(body.dns_forwarders);
+  const hasDnsRecursion = typeof body.dns_recursion === 'string' && (body.dns_recursion as string).trim();
 
-  if (!hasNsHostname && !hasNsServerIp && !hasDnsProvider && !hasCfToken && !hasNetworkMode && !hasDnsForwarders) {
-    res.status(400).json({ error: 'At least one field required: ns_hostname, ns_server_ip, dns_provider, cloudflare_token, network_mode, dns_forwarders' });
+  if (!hasNsHostname && !hasNsServerIp && !hasDnsProvider && !hasCfToken && !hasNetworkMode && !hasDnsForwarders && !hasDnsRecursion) {
+    res.status(400).json({ error: 'At least one field required: ns_hostname, ns_server_ip, dns_provider, cloudflare_token, network_mode, dns_forwarders, dns_recursion' });
     return;
   }
 
@@ -173,6 +190,12 @@ router.put('/', async (req: Request, res: Response) => {
   // Validate network_mode enum if provided
   if (hasNetworkMode && !['external', 'internal', 'mixed'].includes((body.network_mode as string).trim())) {
     res.status(400).json({ error: 'network_mode must be "external" or "internal"' });
+    return;
+  }
+
+  // Validate dns_recursion enum if provided
+  if (hasDnsRecursion && !VALID_RECURSION_MODES.includes((body.dns_recursion as string).trim() as RecursionMode)) {
+    res.status(400).json({ error: 'dns_recursion must be "Disabled", "LanOnly", or "Public"' });
     return;
   }
 
@@ -232,6 +255,25 @@ router.put('/', async (req: Request, res: Response) => {
       const value = (body.network_mode as string).trim() as 'external' | 'internal' | 'mixed';
       writeFileSync(NETWORK_MODE_FILE, value, 'utf8');
       result.network_mode = value;
+    }
+
+    if (hasDnsRecursion) {
+      const mode = (body.dns_recursion as string).trim() as RecursionMode;
+      const technitium = createTechnitiumClient();
+      if (technitium) {
+        // Audit: read current state before mutating so we log from→to (spec §7).
+        let from: RecursionMode | 'unknown' = 'unknown';
+        try { from = await technitium.getRecursion(); } catch { /* fall through with 'unknown' */ }
+        await technitium.setRecursion(mode);
+        console.info(JSON.stringify({
+          event: 'dns_recursion_change',
+          from,
+          to: mode,
+          actor: 'admin',
+          ts: new Date().toISOString(),
+        }));
+      }
+      result.dns_recursion = mode;
     }
 
     res.status(200).json(result);
