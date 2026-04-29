@@ -272,11 +272,14 @@ export class TechnitiumClient {
     return this.withTokenRetry(async () => {
       const body = this.buildParams({});
       const res = await fetch(`${this.baseUrl}/api/settings/get`, { method: 'POST', headers: this.postHeaders, body });
-      const data = await res.json() as { status: string; errorMessage?: string; response?: { recursion?: string; recursionNetworkACL?: string } };
+      const data = await res.json() as { status: string; errorMessage?: string; response?: { recursion?: string; recursionNetworkACL?: string | string[] } };
       if (data.status !== 'ok') throw new Error(`Technitium /api/settings/get error: ${data.errorMessage ?? data.status}`);
       const recursion = data.response?.recursion ?? '';
       const aclRaw = data.response?.recursionNetworkACL ?? '';
-      const acl = aclRaw.split(',').map(s => s.trim()).filter(Boolean);
+      // Technitium returns recursionNetworkACL as an array; older builds returned a comma-string. Handle both.
+      const acl = (Array.isArray(aclRaw) ? aclRaw : String(aclRaw).split(','))
+        .map(s => String(s).trim())
+        .filter(Boolean);
       let mode: RecursionMode;
       switch (recursion) {
         case 'Deny':  mode = 'Disabled'; break;
