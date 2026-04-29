@@ -84,17 +84,31 @@ async function setDockerComposeDomain(
 
   const domainEntry = { name: primaryService, domain: fqdn };
   try {
-    const patched = await client.updateApplication(app.uuid, {
+    await client.updateApplication(app.uuid, {
       docker_compose_domains: [domainEntry],
     });
     console.log(
       `[coolify] PATCH docker_compose_domains success: service=${primaryService} domain=${fqdn} uuid=${app.uuid}`,
     );
-    return patched;
   } catch (patchErr) {
     console.warn(
       `[coolify] PATCH docker_compose_domains failed: service=${primaryService} domain=${fqdn} uuid=${app.uuid}:`,
       (patchErr as Error).message,
+    );
+    return composedApp;
+  }
+
+  // Fix 1: also PATCH fqdn (via 'domains' field) so Coolify DB reflects the real domain,
+  // not the sslip.io placeholder assigned at creation time.
+  // docker_compose_domains alone does not update the application's fqdn column.
+  try {
+    const patched = await client.updateApplication(app.uuid, { domains: fqdn });
+    console.log(`[coolify] PATCH fqdn success: fqdn=${fqdn} uuid=${app.uuid}`);
+    return patched;
+  } catch (fqdnErr) {
+    console.warn(
+      `[coolify] PATCH fqdn failed: fqdn=${fqdn} uuid=${app.uuid}:`,
+      (fqdnErr as Error).message,
     );
     return composedApp;
   }

@@ -88,6 +88,14 @@ export interface CoolifyUpdateApplicationPayload {
   name?: string;
   description?: string;
   domains?: string;  // sets fqdn — Coolify PATCH uses 'domains', not 'fqdn'
+  // Fix 3 — docker_compose_domains payload shape:
+  // We send an array: [{ name: "frontend", domain: "https://example.com" }]
+  // Coolify v4.3.5 accepts the array on PATCH /applications/{uuid} and internally converts
+  // it to an object keyed by service name when persisting to the DB:
+  //   e.g. {"frontend": {"domain": "https://example.com"}}
+  // This is a Coolify-side serialisation detail — no change needed on our end.
+  // Verified against Coolify source (ApplicationController@update, ComposeParser):
+  // the API accepts the array form; the DB stores the object form. Sending an array is correct.
   docker_compose_domains?: Array<{ name: string; domain: string }>;
   git_repository?: string;
   git_branch?: string;
@@ -267,9 +275,26 @@ export class CoolifyClient {
 
   // ── Bulk env var prefill ──────────────────────────────────────────────────────
   // Pushes multiple env vars to a Coolify application sequentially.
+  // Idempotent: fetches existing envs first and skips any key already present in Coolify.
+  // This prevents the 2× duplication that occurs when Coolify auto-extracts compose envs
+  // AND we also seed them — both would create separate rows with the same key.
   // On duplicate-key or other per-var failure: logs warning and continues.
   async setApplicationEnvs(uuid: string, envs: CoolifyEnvVar[]): Promise<void> {
+    // Fetch current env keys so we can skip ones Coolify already has (auto-extracted or prior seed)
+    let existingKeys = new Set<string>();
+    try {
+      const existing = await this.listEnvs(uuid);
+      existingKeys = new Set(existing.map((e) => e.key));
+    } catch (err) {
+      // Non-fatal: if listing fails we proceed without dedup (safe — worst case is dups, not data loss)
+      console.warn(`[coolify] setApplicationEnvs: could not list existing envs for ${uuid} — proceeding without dedup: ${(err as Error).message}`);
+    }
+
     for (const env of envs) {
+      if (existingKeys.has(env.key)) {
+        console.log(`[coolify] setApplicationEnvs: skipping ${env.key} on ${uuid} — already exists in Coolify`);
+        continue;
+      }
       const payload: CreateEnvPayload = {
         key: env.key,
         value: env.value,
