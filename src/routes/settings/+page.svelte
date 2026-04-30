@@ -352,7 +352,7 @@
 			a.click();
 			URL.revokeObjectURL(url);
 		} catch (err) {
-			networkModeError = (err as Error).message;
+			showToast(`Trust cert download failed: ${(err as Error).message}`);
 		} finally {
 			downloadingTrustCert = false;
 		}
