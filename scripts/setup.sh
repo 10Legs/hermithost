@@ -106,13 +106,37 @@ prompt_port_mode() {
           continue
         fi
       fi
+      # Pre-flight: check if port 53 is already bound (TCP + UDP)
+      # On macOS, mDNSResponder listens on UDP 53. The operator may need to
+      # disable it (sudo launchctl unload /System/Library/LaunchDaemons/com.apple.mDNSResponder.plist)
+      # or run hermithost as root for the bind to succeed.
+      local p53tcp p53udp
+      p53tcp="$(lsof -iTCP:53  -sTCP:LISTEN 2>/dev/null || true)"
+      p53udp="$(lsof -iUDP:53             2>/dev/null || true)"
+      if [ -n "$p53tcp" ] || [ -n "$p53udp" ]; then
+        echo ""
+        echo "[setup] WARNING: port 53 (DNS) is already in use:"
+        [ -n "$p53tcp" ] && echo "  TCP 53:" && echo "$p53tcp"
+        [ -n "$p53udp" ] && echo "  UDP 53:" && echo "$p53udp"
+        echo "[setup] NOTE: On macOS, mDNSResponder typically occupies UDP 53."
+        echo "[setup] To free it: sudo launchctl unload /System/Library/LaunchDaemons/com.apple.mDNSResponder.plist"
+        echo "[setup] Alternatively, hermithost can be started as root to override the bind."
+        local confirm53=""
+        read -rp "[setup] Continue with LAN mode (DNS_PORT=53) anyway? [y/N]: " confirm53
+        confirm53="${confirm53:-N}"
+        if [[ ! "$confirm53" =~ ^[Yy]$ ]]; then
+          # Loop back to mode prompt
+          continue
+        fi
+      fi
       # Apply LAN
       sed_i "s|^HERMITHOST_PORT_MODE=.*|HERMITHOST_PORT_MODE=lan|"         "$ENV_FILE"
       sed_i "s|^TRAEFIK_HTTP_PORT=.*|TRAEFIK_HTTP_PORT=80|"                "$ENV_FILE"
       sed_i "s|^TRAEFIK_HTTPS_PORT=.*|TRAEFIK_HTTPS_PORT=443|"             "$ENV_FILE"
       sed_i "s|^PUBLIC_BASE_PORT_HTTP=.*|PUBLIC_BASE_PORT_HTTP=80|"        "$ENV_FILE"
       sed_i "s|^PUBLIC_BASE_PORT_HTTPS=.*|PUBLIC_BASE_PORT_HTTPS=443|"     "$ENV_FILE"
-      echo "[setup] Port mode set to lan: HTTP=80 HTTPS=443"
+      sed_i "s|^DNS_PORT=.*|DNS_PORT=53|"                                  "$ENV_FILE"
+      echo "[setup] Port mode set to lan: HTTP=80 HTTPS=443 DNS=53"
       break
     elif [ "$choice" = "2" ]; then
       # Apply internet
@@ -121,7 +145,8 @@ prompt_port_mode() {
       sed_i "s|^TRAEFIK_HTTPS_PORT=.*|TRAEFIK_HTTPS_PORT=8443|"               "$ENV_FILE"
       sed_i "s|^PUBLIC_BASE_PORT_HTTP=.*|PUBLIC_BASE_PORT_HTTP=8080|"          "$ENV_FILE"
       sed_i "s|^PUBLIC_BASE_PORT_HTTPS=.*|PUBLIC_BASE_PORT_HTTPS=8443|"        "$ENV_FILE"
-      echo "[setup] Port mode set to internet: HTTP=8080 HTTPS=8443"
+      sed_i "s|^DNS_PORT=.*|DNS_PORT=5353|"                                    "$ENV_FILE"
+      echo "[setup] Port mode set to internet: HTTP=8080 HTTPS=8443 DNS=5353"
       break
     else
       echo "[setup] Invalid choice. Please enter 1 or 2."
@@ -143,8 +168,54 @@ set_if_empty "COOLIFY_PUSHER_APP_SECRET" "$(openssl rand -hex 16)"
 echo ""
 echo "[setup] Checking required configuration..."
 prompt_port_mode
-prompt_if_empty "ACME_EMAIL"   "Email for Let's Encrypt SSL certificates (e.g. you@example.com)"
-prompt_if_empty "NS_HOSTNAME"  "Public IP or hostname of this server (e.g. 192.168.2.56 or ns1.example.com)"
+prompt_if_empty "ACME_EMAIL"         "Email for Let's Encrypt SSL certificates (e.g. you@example.com)"
+prompt_if_empty "NS_HOSTNAME"        "Public IP or hostname of this server (e.g. 192.168.2.56 or ns1.example.com)"
+prompt_if_empty "HERMITHOST_PASSWORD" "Password for the hermithost dashboard login"
+
+# ── Derive COOKIE_SECRET from HERMITHOST_PASSWORD ─────────────────────────────
+# The secret is derived deterministically so re-runs with the same password
+# produce the same secret (sessions survive setup re-runs). The password itself
+# is never written to .env; only the derived secret lands there.
+#
+# Salt design:
+#   "${password}${HOSTNAME}-hermithost-cookie-v1"
+#   - HOSTNAME: ties the secret to this specific host, so two hosts sharing the
+#     same operator password don't produce colliding secrets.
+#   - "-hermithost-cookie-v1": versioned tag; bump to "v2" to force a global
+#     rotation without requiring a password change.
+#
+# Idempotent: if COOKIE_SECRET is already set AND the password hasn't changed
+# (i.e., the derivation produces the same value), we leave it alone.
+# If the operator changed HERMITHOST_PASSWORD, the derived secret rotates —
+# that is intentional: existing sessions are invalidated, which is correct.
+derive_cookie_secret() {
+  local current_pw
+  current_pw="$(grep -E '^HERMITHOST_PASSWORD=' "$ENV_FILE" | cut -d'=' -f2-)"
+  if [ -z "$current_pw" ]; then
+    echo "[setup] HERMITHOST_PASSWORD is empty — skipping COOKIE_SECRET derivation."
+    return
+  fi
+
+  # Derive: sha256(password + salt), base64-encoded, stripped to 64 URL-safe chars
+  local derived
+  # NOTE: printf is used (not echo) to avoid appending a newline into the hash input.
+  derived="$(printf '%s' "${current_pw}${HOSTNAME}-hermithost-cookie-v1" \
+    | openssl dgst -sha256 -binary \
+    | base64 \
+    | tr -d '=+/' \
+    | head -c 64)"
+
+  local current_secret
+  current_secret="$(grep -E '^COOKIE_SECRET=' "$ENV_FILE" | cut -d'=' -f2-)"
+
+  if [ "$current_secret" = "$derived" ]; then
+    echo "[setup] COOKIE_SECRET already matches derived value — skipping."
+  else
+    sed_i "s|^COOKIE_SECRET=.*|COOKIE_SECRET=${derived}|" "$ENV_FILE"
+    echo "[setup] COOKIE_SECRET derived and set."
+  fi
+}
+derive_cookie_secret
 # Auto-detect NS_SERVER_IP; strategy depends on HERMITHOST_PORT_MODE
 if grep -qE "^NS_SERVER_IP=\s*$" "$ENV_FILE" 2>/dev/null; then
   PORT_MODE="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2-)"
