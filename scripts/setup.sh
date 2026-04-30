@@ -86,6 +86,13 @@ prompt_port_mode() {
     read -rp "        Choose [1/2] (default: ${prompt_default}): " choice
     choice="${choice:-${prompt_default}}"
 
+    # Migration: ensure LEGO_CA_CERTIFICATES key exists as an uncommented line
+    # so the subsequent sed can match it. Handles legacy .env files where the
+    # line was commented out (# LEGO_CA_CERTIFICATES=...) or absent entirely.
+    if ! grep -qE '^LEGO_CA_CERTIFICATES=' "$ENV_FILE"; then
+      echo "LEGO_CA_CERTIFICATES=" >> "$ENV_FILE"
+    fi
+
     if [ "$choice" = "1" ]; then
       # Pre-flight: check if 80 or 443 are already bound
       local p80 p443
@@ -136,7 +143,8 @@ prompt_port_mode() {
       sed_i "s|^PUBLIC_BASE_PORT_HTTP=.*|PUBLIC_BASE_PORT_HTTP=80|"        "$ENV_FILE"
       sed_i "s|^PUBLIC_BASE_PORT_HTTPS=.*|PUBLIC_BASE_PORT_HTTPS=443|"     "$ENV_FILE"
       sed_i "s|^DNS_PORT=.*|DNS_PORT=53|"                                  "$ENV_FILE"
-      echo "[setup] Port mode set to lan: HTTP=80 HTTPS=443 DNS=53"
+      sed_i "s|^LEGO_CA_CERTIFICATES=.*|LEGO_CA_CERTIFICATES=/home/step/certs/root_ca.crt|" "$ENV_FILE"
+      echo "[setup] Port mode set to lan: HTTP=80 HTTPS=443 DNS=53 LEGO_CA=/home/step/certs/root_ca.crt"
       break
     elif [ "$choice" = "2" ]; then
       # Apply internet
@@ -146,7 +154,8 @@ prompt_port_mode() {
       sed_i "s|^PUBLIC_BASE_PORT_HTTP=.*|PUBLIC_BASE_PORT_HTTP=8080|"          "$ENV_FILE"
       sed_i "s|^PUBLIC_BASE_PORT_HTTPS=.*|PUBLIC_BASE_PORT_HTTPS=8443|"        "$ENV_FILE"
       sed_i "s|^DNS_PORT=.*|DNS_PORT=5353|"                                    "$ENV_FILE"
-      echo "[setup] Port mode set to internet: HTTP=8080 HTTPS=8443 DNS=5353"
+      sed_i "s|^LEGO_CA_CERTIFICATES=.*|LEGO_CA_CERTIFICATES=|"               "$ENV_FILE"
+      echo "[setup] Port mode set to internet: HTTP=8080 HTTPS=8443 DNS=5353 LEGO_CA="
       break
     else
       echo "[setup] Invalid choice. Please enter 1 or 2."
