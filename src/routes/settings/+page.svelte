@@ -34,9 +34,6 @@
 	let cloudflareStatus: 'connected' | 'disconnected' | 'unconfigured' = 'unconfigured';
 	let cloudflareTokenInput = '';
 	let networkMode: 'external' | 'internal' = 'external';
-	let savingNetworkMode = false;
-	let networkModeError = '';
-	let networkModeWarning = '';
 	let showTrustInstall = false;
 	let downloadingTrustCert = false;
 	let dnsForwarder1 = '';
@@ -339,36 +336,6 @@
 			cloudflareTokenError = (err as Error).message;
 		} finally {
 			savingCloudflareToken = false;
-		}
-	}
-
-	async function onNetworkModeChange(event: Event) {
-		const select = event.currentTarget as HTMLSelectElement;
-		const newMode = select.value as 'external' | 'internal';
-		if (newMode === networkMode) return;
-
-		networkModeWarning = newMode === 'internal'
-			? 'New sites will use .hh addresses and the local CA. Existing sites are not updated automatically.'
-			: "Switching to internet mode. New sites will use Let's Encrypt. Existing .hh sites are not updated.";
-
-		savingNetworkMode = true;
-		networkModeError = '';
-		try {
-			const res = await fetch('/api/config', {
-				method: 'PUT',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ network_mode: newMode }),
-			});
-			if (!res.ok) {
-				const body = await res.json().catch(() => ({})) as { error?: string };
-				throw new Error(body.error ?? `HTTP ${res.status}`);
-			}
-			networkMode = newMode;
-		} catch (err) {
-			networkModeError = (err as Error).message;
-			select.value = networkMode;
-		} finally {
-			savingNetworkMode = false;
 		}
 	}
 
@@ -826,29 +793,17 @@
 		<div class="section">
 
 			<div class="field-group">
-				<label class="field-label" for="network-mode">Mode</label>
-				<p class="field-hint">Affects new sites only. Existing sites are not updated automatically.</p>
-				<div class="input-row">
-					<select
-						id="network-mode"
-						class="text-input select-input"
-						on:change={onNetworkModeChange}
-						disabled={savingNetworkMode}
-						value={networkMode}
-					>
-						<option value="external">Internet (Let's Encrypt)</option>
-						<option value="internal">Private network (.hh)</option>
-					</select>
-					{#if savingNetworkMode}
-						<span class="spinner"></span>
-					{/if}
+				<label class="field-label">Mode</label>
+				<p class="field-hint">Set via <code>HERMITHOST_PORT_MODE</code> in your <code>.env</code> file. Re-run <code>scripts/setup.sh</code> to change.</p>
+				<div class="input-row" style="margin-top: 8px;">
+					<span class="text-input select-input" style="display:inline-block;cursor:default;background:var(--bg-muted,#f5f5f5);color:var(--text-muted,#666);">
+						{#if networkMode === 'internal'}
+							Private network (.hh)
+						{:else}
+							Internet (Let's Encrypt)
+						{/if}
+					</span>
 				</div>
-				{#if networkModeWarning}
-					<p class="provider-warning">{networkModeWarning}</p>
-				{/if}
-				{#if networkModeError}
-					<p class="error-msg">{networkModeError}</p>
-				{/if}
 			</div>
 
 			{#if networkMode === 'internal'}

@@ -9,20 +9,21 @@ const router = Router();
 const NS_HOSTNAME_FILE = '/coolify-api-token/ns_hostname';
 const DNS_PROVIDER_FILE = '/coolify-api-token/dns_provider';
 const CLOUDFLARE_TOKEN_FILE = '/coolify-api-token/cloudflare_token';
-const NETWORK_MODE_FILE = '/coolify-api-token/network_mode';
 const DNS_FORWARDER_1_FILE = '/coolify-api-token/dns_forwarder_1';
 const DNS_FORWARDER_2_FILE = '/coolify-api-token/dns_forwarder_2';
 
-// network_mode read precedence:
-// 1. File /coolify-api-token/network_mode
-// 2. process.env.NETWORK_MODE
-// 3. 'external'
+// network_mode is derived from HERMITHOST_PORT_MODE (single source of truth).
+// lan      → 'internal'  (.hh TLD via Technitium)
+// internet → 'external'  (sslip / real public DNS)
+// unset    → 'external'  (safe default — avoids writing .hh records on misconfigured boxes)
 export function readNetworkMode(): 'external' | 'internal' {
-  try {
-    const val = readFileSync(NETWORK_MODE_FILE, 'utf8').trim();
-    if (val === 'internal') return 'internal';
-  } catch { /* file not present */ }
-  return process.env.NETWORK_MODE === 'internal' ? 'internal' : 'external';
+  const portMode = process.env.HERMITHOST_PORT_MODE;
+  if (portMode === 'lan') return 'internal';
+  if (portMode === 'internet') return 'external';
+  if (!portMode) {
+    console.warn('[config] HERMITHOST_PORT_MODE is not set — defaulting network mode to "external". Run scripts/setup.sh to configure.');
+  }
+  return 'external';
 }
 
 // NS_HOSTNAME read precedence:
@@ -163,7 +164,6 @@ router.put('/', async (req: Request, res: Response) => {
     ns_server_ip?: unknown;
     dns_provider?: unknown;
     cloudflare_token?: unknown;
-    network_mode?: unknown;
     dns_forwarders?: unknown;
     dns_recursion?: unknown;
   };
@@ -173,24 +173,17 @@ router.put('/', async (req: Request, res: Response) => {
   const hasNsServerIp = typeof body.ns_server_ip === 'string' && body.ns_server_ip.trim();
   const hasDnsProvider = typeof body.dns_provider === 'string' && body.dns_provider.trim();
   const hasCfToken = typeof body.cloudflare_token === 'string';
-  const hasNetworkMode = typeof body.network_mode === 'string' && body.network_mode.trim();
   const hasDnsForwarders = Array.isArray(body.dns_forwarders);
   const hasDnsRecursion = typeof body.dns_recursion === 'string' && (body.dns_recursion as string).trim();
 
-  if (!hasNsHostname && !hasNsServerIp && !hasDnsProvider && !hasCfToken && !hasNetworkMode && !hasDnsForwarders && !hasDnsRecursion) {
-    res.status(400).json({ error: 'At least one field required: ns_hostname, ns_server_ip, dns_provider, cloudflare_token, network_mode, dns_forwarders, dns_recursion' });
+  if (!hasNsHostname && !hasNsServerIp && !hasDnsProvider && !hasCfToken && !hasDnsForwarders && !hasDnsRecursion) {
+    res.status(400).json({ error: 'At least one field required: ns_hostname, ns_server_ip, dns_provider, cloudflare_token, dns_forwarders, dns_recursion' });
     return;
   }
 
   // Validate dns_provider enum if provided
   if (hasDnsProvider && !['technitium', 'cloudflare'].includes((body.dns_provider as string).trim())) {
     res.status(400).json({ error: 'dns_provider must be "technitium" or "cloudflare"' });
-    return;
-  }
-
-  // Validate network_mode enum if provided
-  if (hasNetworkMode && !['external', 'internal', 'mixed'].includes((body.network_mode as string).trim())) {
-    res.status(400).json({ error: 'network_mode must be "external" or "internal"' });
     return;
   }
 
@@ -250,12 +243,6 @@ router.put('/', async (req: Request, res: Response) => {
       result.cloudflare_token_set = value ? 'true' : 'false';
       const cloudflare_status = await getCloudflareStatus(value || null);
       result.cloudflare_status = cloudflare_status;
-    }
-
-    if (hasNetworkMode) {
-      const value = (body.network_mode as string).trim() as 'external' | 'internal' | 'mixed';
-      writeFileSync(NETWORK_MODE_FILE, value, 'utf8');
-      result.network_mode = value;
     }
 
     if (hasDnsRecursion) {

@@ -56,12 +56,21 @@ prompt_if_empty() {
 
 # ── Helper: prompt for network port mode and write 5 keys ────────────────────
 prompt_port_mode() {
+  # Migration hint: if HERMITHOST_PORT_MODE is unset but legacy NETWORK_MODE=internal is present,
+  # pre-select LAN mode to preserve the operator's prior intent.
+  local legacy_network_mode
+  legacy_network_mode="$(grep -E '^NETWORK_MODE=' "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '[:space:]')"
+
   # Idempotent: skip if already set
   local current_mode
   current_mode="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2-)"
   if [ -n "$current_mode" ]; then
     echo "[setup] Port mode already set: ${current_mode} — skipping"
     return
+  fi
+
+  if [ "$legacy_network_mode" = "internal" ]; then
+    echo "[setup] Migrating: NETWORK_MODE=internal → HERMITHOST_PORT_MODE=lan (pre-selecting LAN mode)"
   fi
 
   local choice=""
@@ -72,8 +81,10 @@ prompt_port_mode() {
     echo "                   Requires 80 and 443 to be free on this host."
     echo "        [2] Internet — binds host ports 8080 / 8443. Use when 80/443 are"
     echo "                       reserved."
-    read -rp "        Choose [1/2] (default: 2): " choice
-    choice="${choice:-2}"
+    local prompt_default="2"
+    [ "$legacy_network_mode" = "internal" ] && prompt_default="1"
+    read -rp "        Choose [1/2] (default: ${prompt_default}): " choice
+    choice="${choice:-${prompt_default}}"
 
     if [ "$choice" = "1" ]; then
       # Pre-flight: check if 80 or 443 are already bound
