@@ -292,6 +292,7 @@ if [ "$PORT_MODE_CURRENT" = "lan" ]; then
   # from the coolify-api-token volume (/coolify-api-token/technitium_token),
   # which coolify-setup.sh writes at startup. Operators never supply this token.
   docker run --rm \
+    --network hermithost_hermithost-net \
     -v coolify-api-token:/coolify-api-token \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v "${SCRIPT_DIR}/conf.d:/scripts/conf.d:ro" \
