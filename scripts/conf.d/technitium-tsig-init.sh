@@ -21,6 +21,13 @@
 
 set -euo pipefail
 
+# ── Temp-file cleanup trap (SEC-N2) ──────────────────────────────────────────
+# Declared early so it covers every exit path including SIGINT/SIGTERM.
+# Variables are set to empty here and replaced once the real paths are known.
+TSIG_BODY_FILE=""
+ZONE_BODY_FILE=""
+trap 'rm -f "$TSIG_BODY_FILE" "$ZONE_BODY_FILE" 2>/dev/null || true' EXIT INT TERM
+
 # ── Inputs ────────────────────────────────────────────────────────────────────
 TECHNITIUM_URL="${TECHNITIUM_URL:-http://localhost:5380}"
 TECHNITIUM_TOKEN="${TECHNITIUM_TOKEN:-}"
@@ -32,9 +39,16 @@ TSIG_MANIFEST_FILE="$(dirname "$TSIG_SECRET_FILE")/rfc2136_tsig.json"
 ZONE="${RFC2136_ZONE:-hh}"
 
 # ── Guards ────────────────────────────────────────────────────────────────────
+# If TECHNITIUM_TOKEN was not passed explicitly, read it from the shared volume
+# (written there by coolify-setup.sh at startup). This removes the requirement
+# for operators to supply the token via .env. QA blocker fix.
 if [ -z "$TECHNITIUM_TOKEN" ]; then
-  echo "[tsig-init] TECHNITIUM_TOKEN is empty — skipping TSIG bootstrap (LAN mode only)."
-  exit 0
+  TECHNITIUM_TOKEN="$(cat /coolify-api-token/technitium_token 2>/dev/null | tr -d '[:space:]' || true)"
+fi
+if [ -z "$TECHNITIUM_TOKEN" ]; then
+  echo "[tsig-init] TECHNITIUM_TOKEN not found in env or volume (/coolify-api-token/technitium_token)."
+  echo "[tsig-init] Bring the stack up first (bash scripts/start.sh -d) then re-run setup.sh."
+  exit 1
 fi
 
 # Only run in LAN mode

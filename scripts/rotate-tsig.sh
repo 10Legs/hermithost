@@ -21,6 +21,11 @@
 
 set -euo pipefail
 
+# ── Temp-file cleanup trap (SEC-N2) ──────────────────────────────────────────
+TSIG_BODY_FILE=""
+ZONE_BODY_FILE=""
+trap 'rm -f "$TSIG_BODY_FILE" "$ZONE_BODY_FILE" 2>/dev/null || true' EXIT INT TERM
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
 ENV_FILE="$ROOT/.env"

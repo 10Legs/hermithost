@@ -285,16 +285,17 @@ if [ "$PORT_MODE_CURRENT" = "lan" ]; then
   # that volume mounted (SEC-S1). The host Docker socket is bind-mounted so the
   # container can run `docker network inspect` for subnet detection.
   _TECH_URL="$(grep -E '^TECHNITIUM_URL=' "$ENV_FILE" | cut -d'=' -f2- || true)"
-  _TECH_TOKEN="$(grep -E '^TECHNITIUM_TOKEN=' "$ENV_FILE" | cut -d'=' -f2- || true)"
   # Resolve env vars that the init script consumes
   _RFC2136_ZONE="$(grep -E '^RFC2136_ZONE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
   _PORT_MODE="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
+  # TECHNITIUM_TOKEN is NOT read from .env — the init script reads it directly
+  # from the coolify-api-token volume (/coolify-api-token/technitium_token),
+  # which coolify-setup.sh writes at startup. Operators never supply this token.
   docker run --rm \
     -v coolify-api-token:/coolify-api-token \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v "${SCRIPT_DIR}/conf.d:/scripts/conf.d:ro" \
     -e TECHNITIUM_URL="${_TECH_URL}" \
-    -e TECHNITIUM_TOKEN="${_TECH_TOKEN}" \
     -e HERMITHOST_PORT_MODE="${_PORT_MODE}" \
     -e RFC2136_ZONE="${_RFC2136_ZONE}" \
     docker:cli sh -c "apk add --no-cache bash openssl curl >/dev/null 2>&1 && bash /scripts/conf.d/technitium-tsig-init.sh" || {

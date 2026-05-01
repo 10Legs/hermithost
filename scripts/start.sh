@@ -12,15 +12,14 @@
 
 docker network inspect coolify >/dev/null 2>&1 || docker network create coolify
 
-# Load .env from project root so PORT_MODE is available even when start.sh is
-# invoked directly (outside of a shell that already sourced .env).
+# Load only the specific vars needed from .env — do NOT export the entire file.
+# Broad export (set -a / source) would leak COOKIE_SECRET, HERMITHOST_PASSWORD,
+# COOLIFY_DB_PASSWORD, etc. into docker compose up env. SEC-S4.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
 if [ -f "$ROOT/.env" ]; then
-  # shellcheck disable=SC1091
-  set -a
-  . "$ROOT/.env"
-  set +a
+  HERMITHOST_PORT_MODE="$(grep -E '^HERMITHOST_PORT_MODE=' "$ROOT/.env" | cut -d'=' -f2- | tr -d '[:space:]' || true)"
+  RFC2136_TSIG_SECRET_FILE="$(grep -E '^RFC2136_TSIG_SECRET_FILE=' "$ROOT/.env" | cut -d'=' -f2- | tr -d '[:space:]' || true)"
 fi
 
 PROFILE_ARG=""
