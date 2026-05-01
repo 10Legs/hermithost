@@ -87,6 +87,46 @@ function primaryDomain(fqdn: string | null): string {
   return first.replace(/^https?:\/\//, '');
 }
 
+// ── formatSiteUrl ─────────────────────────────────────────────────────────────
+// Reads PUBLIC_BASE_PORT_HTTP / PUBLIC_BASE_PORT_HTTPS from the environment at
+// call time so that tests can override process.env between cases.
+// When the port equals the scheme's default (80/443) the port is omitted so
+// LAN-mode (port-bound to 80/443) renders bare URLs. Internet-mode (8080/8443)
+// appends the port. Defaults: HTTPS → 8443, HTTP → 8080 (today's behaviour when
+// env is missing, preserving backward compatibility).
+
+const DEFAULT_PORT_HTTPS = 8443;
+const DEFAULT_PORT_HTTP = 8080;
+
+// Tracks which env var names have already emitted a bad-value warning so we
+// don't spam the log on every request.
+const _warnedVars = new Set<string>();
+
+function parsePortEnv(envVal: string | undefined, defaultPort: number, varName: string): number {
+  if (!envVal) return defaultPort;
+  const trimmed = envVal.trim();
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    if (!_warnedVars.has(varName)) {
+      console.warn(`[mapper] ${varName}="${trimmed}" is not a valid port number — falling back to ${defaultPort}`);
+      _warnedVars.add(varName);
+    }
+    return defaultPort;
+  }
+  return n;
+}
+
+export function formatSiteUrl(host: string, scheme: 'http' | 'https'): string {
+  const port = scheme === 'https'
+    ? parsePortEnv(process.env.PUBLIC_BASE_PORT_HTTPS, DEFAULT_PORT_HTTPS, 'PUBLIC_BASE_PORT_HTTPS')
+    : parsePortEnv(process.env.PUBLIC_BASE_PORT_HTTP,  DEFAULT_PORT_HTTP,  'PUBLIC_BASE_PORT_HTTP');
+  const schemeDefault = scheme === 'https' ? 443 : 80;
+  if (port === schemeDefault) {
+    return `${scheme}://${host}`;
+  }
+  return `${scheme}://${host}:${port}`;
+}
+
 // For dockercompose apps Coolify's fqdn column stays as the sslip.io creation-time
 // placeholder because PATCH { domains } is rejected (v4.3.5 API constraint).
 // The authoritative domain is in docker_compose_domains — pick the first service's domain.
@@ -116,6 +156,29 @@ function resolveDisplayDomain(app: CoolifyApplication): string {
     }
   }
   return primaryDomain(app.fqdn);
+}
+
+// resolveRouteDomain: same field precedence as resolveDisplayDomain — for
+// dockercompose apps docker_compose_domains is the authoritative source because
+// app.fqdn is frozen to the sslip.io placeholder at creation time. Returns null
+// when no usable domain can be found so callers can skip Traefik writes safely.
+export function resolveRouteDomain(app: CoolifyApplication): string | null {
+  if (app.build_pack === 'dockercompose' && app.docker_compose_domains) {
+    const parsed = parseDockerComposeDomains(app.docker_compose_domains);
+    if (parsed) {
+      const entries = Object.values(parsed);
+      if (entries.length > 0 && entries[0].domain) {
+        return entries[0].domain
+          .replace(/^https?:\/\//, '')
+          .replace(/\/.*$/, '');
+      }
+    }
+  }
+  if (!app.fqdn) return null;
+  const host = app.fqdn.split(',')[0].trim()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/.*$/, '');
+  return host || null;
 }
 
 // ── Log parsing ───────────────────────────────────────────────────────────────

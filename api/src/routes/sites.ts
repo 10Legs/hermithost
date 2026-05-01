@@ -17,7 +17,7 @@ import {
 } from '../services/coolify';
 import { extractEnvVars, generateSecretValue } from '../lib/composeEnv';
 import { FQDN_RE, SLUG_RE, domainHasDangerousChars } from '../lib/validation';
-import { mapSite, mapDeploy } from '../services/mapper';
+import { mapSite, mapDeploy, resolveRouteDomain } from '../services/mapper';
 import { probeSite } from '../services/healthProbe';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
 import { createTechnitiumClient, TechnitiumClient } from '../services/technitium';
@@ -650,9 +650,7 @@ router.get('/', async (_req: Request, res: Response) => {
     const applications = await client.listApplications();
     const sites = await Promise.all(
       applications.map(async (app) => {
-        const domain = app.fqdn
-          ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '')
-          : '';
+        const domain = resolveRouteDomain(app) ?? '';
         const [deployments, probe] = await Promise.all([
           client.listDeployments(app.uuid).catch(() => []),
           domain ? probeSite(domain).catch(() => null) : Promise.resolve(null),
@@ -672,9 +670,7 @@ router.get('/:slug', async (req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
     const app = await client.getApplication(req.params.slug);
-    const domain = app.fqdn
-      ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '')
-      : '';
+    const domain = resolveRouteDomain(app) ?? '';
 
     const [deployments, probe] = await Promise.all([
       client.listDeployments(app.uuid).catch(() => []),
@@ -921,9 +917,7 @@ router.delete('/:slug', async (req: Request, res: Response) => {
     const client = createCoolifyClient()!;
     // Fetch domain before deleting so we can clean up DNS
     const app = await client.getApplication(req.params.slug).catch(() => null);
-    const domain = app?.fqdn
-      ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
-      : '';
+    const domain = app ? resolveRouteDomain(app) ?? '' : '';
 
     await client.deleteApplication(req.params.slug);
     removeTraefikRoute(req.params.slug);
@@ -1063,7 +1057,10 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     // Always attempt Traefik route provision on every PATCH — self-heals sites
     // whose route file was never written (e.g. all prior deploys failed).
     // Non-fatal: provisionTraefikRoute logs a warning if no container is running.
-    const currentDomain = app.fqdn ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '') : '';
+    const currentDomain = resolveRouteDomain(app);
+    if (currentDomain === null) {
+      console.warn(`[traefik-route] PATCH ${req.params.slug}: no usable domain resolved — skipping route write`);
+    }
     if (currentDomain) {
       const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
       let routeResult: { ok: boolean; reason?: string };
@@ -1092,9 +1089,7 @@ router.get('/:slug/dns', async (req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
     const app = await client.getApplication(req.params.slug);
-    const domain = app.fqdn
-      ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '')
-      : '';
+    const domain = resolveRouteDomain(app) ?? '';
     if (!domain) {
       res.status(422).json({ error: 'Site has no domain configured' });
       return;
@@ -1122,9 +1117,7 @@ router.post('/:slug/dns', async (req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
     const app = await client.getApplication(req.params.slug);
-    const domain = app.fqdn
-      ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '')
-      : '';
+    const domain = resolveRouteDomain(app) ?? '';
     if (!domain) {
       res.status(422).json({ error: 'Site has no domain configured' });
       return;
@@ -1158,9 +1151,7 @@ router.put('/:slug/dns/:id', async (req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
     const app = await client.getApplication(req.params.slug);
-    const domain = app.fqdn
-      ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '')
-      : '';
+    const domain = resolveRouteDomain(app) ?? '';
     if (!domain) {
       res.status(422).json({ error: 'Site has no domain configured' });
       return;
@@ -1184,9 +1175,7 @@ router.delete('/:slug/dns/:id', async (req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
     const app = await client.getApplication(req.params.slug);
-    const domain = app.fqdn
-      ? app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '')
-      : '';
+    const domain = resolveRouteDomain(app) ?? '';
     if (!domain) {
       res.status(422).json({ error: 'Site has no domain configured' });
       return;
@@ -1615,8 +1604,12 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
 
     // Async: update Traefik route once the container is running.
     // Poll up to 3 minutes for the new container to appear.
-    if (app.fqdn) {
-      const domain = app.fqdn.split(',')[0].trim().replace(/^https?:\/\//, '');
+    const _routeDomain = resolveRouteDomain(app);
+    if (_routeDomain === null) {
+      console.warn(`[traefik-route] deploy ${req.params.slug}: no usable domain resolved — skipping post-deploy route write`);
+    }
+    if (_routeDomain) {
+      const domain = _routeDomain;
       const port = (app as any).ports_exposes ?? 3000;
       const slug = req.params.slug;
       const isCompose = app.build_pack === 'dockercompose';
