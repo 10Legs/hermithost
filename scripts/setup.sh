@@ -267,6 +267,29 @@ else
   echo "[setup] COOLIFY_ADMIN_PASSWORD already set — skipping."
 fi
 
+# ── Technitium TSIG bootstrap (LAN mode only) ────────────────────────────────
+# Generates or reuses the RFC2136 TSIG key and registers it in Technitium.
+# Only runs when HERMITHOST_PORT_MODE=lan and Technitium is reachable.
+# Idempotent: re-running setup.sh reuses the existing key without re-registering.
+echo ""
+echo "[setup] Checking RFC2136 TSIG bootstrap (LAN mode only)..."
+PORT_MODE_CURRENT="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
+if [ "$PORT_MODE_CURRENT" = "lan" ]; then
+  # Source the .env so TECHNITIUM_URL and TECHNITIUM_TOKEN are available.
+  # At setup time the stack may not be running yet, so we skip gracefully if
+  # TECHNITIUM_TOKEN is empty (the init script self-guards on empty token).
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+  bash "$SCRIPT_DIR/conf.d/technitium-tsig-init.sh" || {
+    echo "[setup] WARNING: TSIG bootstrap failed or was skipped."
+    echo "[setup] Re-run 'bash scripts/setup.sh' after starting the stack to complete TSIG setup."
+  }
+else
+  echo "[setup] Not in LAN mode — skipping TSIG bootstrap."
+fi
+
 echo ""
 echo "[setup] Configuration complete. Ready to start:"
 echo "        bash scripts/start.sh -d"

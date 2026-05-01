@@ -27,6 +27,21 @@ PROFILE_ARG=""
 if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
   PROFILE_ARG="--profile internal"
   echo "[start] LAN mode detected — activating internal CA profile (step-ca)"
+
+  # ── RFC2136 TSIG secret (Phase 1: read and export; Phase 2: Traefik consumes) ──
+  # The secret is generated once by setup.sh / conf.d/technitium-tsig-init.sh and
+  # persisted in the coolify-api-token volume. We read it here so that Phase 2 can
+  # reference RFC2136_TSIG_SECRET in docker-compose.yml without storing it in .env.
+  TSIG_SECRET_FILE="${RFC2136_TSIG_SECRET_FILE:-/coolify-api-token/rfc2136_tsig.secret}"
+  if [ -f "$TSIG_SECRET_FILE" ]; then
+    RFC2136_TSIG_SECRET="$(cat "$TSIG_SECRET_FILE")"
+    export RFC2136_TSIG_SECRET
+    echo "[start] RFC2136_TSIG_SECRET loaded from ${TSIG_SECRET_FILE}."
+  else
+    echo "[start] WARNING: RFC2136 TSIG secret file not found at ${TSIG_SECRET_FILE}."
+    echo "[start]   Run 'bash scripts/setup.sh' with the stack running to bootstrap the TSIG key."
+    echo "[start]   DNS-01 certificate issuance will not work until the key is provisioned."
+  fi
 fi
 
 # shellcheck disable=SC2086
