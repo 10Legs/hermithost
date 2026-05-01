@@ -59,11 +59,11 @@ prompt_port_mode() {
   # Migration hint: if HERMITHOST_PORT_MODE is unset but legacy NETWORK_MODE=internal is present,
   # pre-select LAN mode to preserve the operator's prior intent.
   local legacy_network_mode
-  legacy_network_mode="$(grep -E '^NETWORK_MODE=' "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '[:space:]')"
+  legacy_network_mode="$(grep -E '^NETWORK_MODE=' "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '[:space:]' || true)"
 
   # Idempotent: skip if already set
   local current_mode
-  current_mode="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2-)"
+  current_mode="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
   if [ -n "$current_mode" ]; then
     echo "[setup] Port mode already set: ${current_mode} — skipping"
     return
@@ -199,7 +199,7 @@ prompt_if_empty "HERMITHOST_PASSWORD" "Password for the hermithost dashboard log
 # that is intentional: existing sessions are invalidated, which is correct.
 derive_cookie_secret() {
   local current_pw
-  current_pw="$(grep -E '^HERMITHOST_PASSWORD=' "$ENV_FILE" | cut -d'=' -f2-)"
+  current_pw="$(grep -E '^HERMITHOST_PASSWORD=' "$ENV_FILE" | cut -d'=' -f2- || true)"
   if [ -z "$current_pw" ]; then
     echo "[setup] HERMITHOST_PASSWORD is empty — skipping COOKIE_SECRET derivation."
     return
@@ -215,7 +215,7 @@ derive_cookie_secret() {
     | head -c 64)"
 
   local current_secret
-  current_secret="$(grep -E '^COOKIE_SECRET=' "$ENV_FILE" | cut -d'=' -f2-)"
+  current_secret="$(grep -E '^COOKIE_SECRET=' "$ENV_FILE" | cut -d'=' -f2- || true)"
 
   if [ "$current_secret" = "$derived" ]; then
     echo "[setup] COOKIE_SECRET already matches derived value — skipping."
@@ -227,7 +227,7 @@ derive_cookie_secret() {
 derive_cookie_secret
 # Auto-detect NS_SERVER_IP; strategy depends on HERMITHOST_PORT_MODE
 if grep -qE "^NS_SERVER_IP=\s*$" "$ENV_FILE" 2>/dev/null; then
-  PORT_MODE="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2-)"
+  PORT_MODE="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
   AUTO_IP=""
   if [ "$PORT_MODE" = "lan" ]; then
     if [[ "$OSTYPE" == darwin* ]]; then
@@ -253,7 +253,7 @@ fi
 # Password is auto-generated to meet Coolify's policy: min 8 chars, mixed case, numbers, symbols.
 echo ""
 echo "[setup] Checking Coolify admin credentials..."
-ACME_EMAIL_VALUE="$(grep -E '^ACME_EMAIL=' "$ENV_FILE" | cut -d'=' -f2-)"
+ACME_EMAIL_VALUE="$(grep -E '^ACME_EMAIL=' "$ENV_FILE" | cut -d'=' -f2- || true)"
 set_if_empty "COOLIFY_ADMIN_EMAIL" "${ACME_EMAIL_VALUE}"
 if grep -qE "^COOLIFY_ADMIN_PASSWORD=\s*$" "$ENV_FILE" 2>/dev/null; then
   GENERATED_PASSWORD="A$(openssl rand -hex 10)1!"
