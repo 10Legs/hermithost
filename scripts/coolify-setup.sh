@@ -75,21 +75,32 @@ TECH_URL="${TECHNITIUM_URL:-http://technitium:5380}"
 # Step 1: get a session token to bootstrap
 TECH_RESP=$(curl -sf -X POST "$TECH_URL/api/user/login" \
   -d "user=admin&pass=admin&includeInfo=false" 2>/dev/null || echo "")
-TECH_SESSION=$(echo "$TECH_RESP" | jq -r '.token // empty' 2>/dev/null)
+# Technitium v13+ wraps all responses: {"status":"ok","response":{"token":"..."}}
+TECH_SESSION=$(echo "$TECH_RESP" | jq -r '.response.token // .token // empty' 2>/dev/null)
 
 if [ -n "$TECH_SESSION" ]; then
   # Step 2: delete old permanent token (ignore errors if it doesn't exist)
   curl -sf -X POST "$TECH_URL/api/user/deleteToken?token=$TECH_SESSION&tokenName=hermithost-api" > /dev/null 2>&1 || true
   # Step 3: create new permanent token
   PERM_RESP=$(curl -sf -X POST "$TECH_URL/api/user/createToken?token=$TECH_SESSION&tokenName=hermithost-api" 2>/dev/null || echo "")
-  PERM_TOKEN=$(echo "$PERM_RESP" | jq -r '.token // empty' 2>/dev/null)
+  # Technitium v13+ wraps all responses: {"status":"ok","response":{"token":"..."}}
+  PERM_TOKEN=$(echo "$PERM_RESP" | jq -r '.response.token // .token // empty' 2>/dev/null)
   if [ -n "$PERM_TOKEN" ]; then
     printf '%s' "$PERM_TOKEN" > /coolify-api-token/technitium_token
-    echo "[setup] Technitium permanent token written."
+    # Verify the write landed in the volume before declaring success
+    if [ ! -s /coolify-api-token/technitium_token ]; then
+      echo "[setup] ERROR: technitium_token write succeeded but file is missing or empty — volume not mounted?" >&2
+      exit 1
+    fi
+    echo "[setup] Technitium permanent token written ($(wc -c < /coolify-api-token/technitium_token) bytes)."
   else
     # Fallback: write session token — withTokenRetry in API handles expiry
     printf '%s' "$TECH_SESSION" > /coolify-api-token/technitium_token
-    echo "[setup] WARNING: Could not create permanent Technitium token — wrote session token as fallback."
+    if [ ! -s /coolify-api-token/technitium_token ]; then
+      echo "[setup] ERROR: technitium_token fallback write failed — volume not mounted?" >&2
+      exit 1
+    fi
+    echo "[setup] WARNING: Could not create permanent Technitium token — wrote session token as fallback ($(wc -c < /coolify-api-token/technitium_token) bytes)."
   fi
 else
   echo "[setup] WARNING: Could not obtain Technitium token — DNS integration will be limited."
@@ -99,7 +110,7 @@ fi
 if [ -n "$TECH_SESSION" ]; then
   echo "[setup] Checking Technitium recursion mode..."
   TECH_PERM_TOKEN=$(cat /coolify-api-token/technitium_token 2>/dev/null || echo "$TECH_SESSION")
-  SETTINGS_RESP=$(curl -sf -X POST "$TECH_URL/api/settings/get?token=$TECH_PERM_TOKEN" 2>/dev/null || echo "")
+  SETTINGS_RESP=$(curl -sf "$TECH_URL/api/settings/get?token=$TECH_PERM_TOKEN" 2>/dev/null || echo "")
   CURRENT_RECURSION=$(echo "$SETTINGS_RESP" | jq -r '.response.recursion // empty' 2>/dev/null)
   CURRENT_ACL=$(echo "$SETTINGS_RESP" | jq -r '.response.recursionNetworkACL // empty' 2>/dev/null)
   SAFE_ACL="127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fd00::/8"
