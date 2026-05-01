@@ -29,18 +29,30 @@ if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
   echo "[start] LAN mode detected — activating internal CA profile (step-ca)"
 
   # ── RFC2136 TSIG secret (Phase 1: read and export; Phase 2: Traefik consumes) ──
-  # The secret is generated once by setup.sh / conf.d/technitium-tsig-init.sh and
-  # persisted in the coolify-api-token volume. We read it here so that Phase 2 can
-  # reference RFC2136_TSIG_SECRET in docker-compose.yml without storing it in .env.
-  TSIG_SECRET_FILE="${RFC2136_TSIG_SECRET_FILE:-/coolify-api-token/rfc2136_tsig.secret}"
-  if [ -f "$TSIG_SECRET_FILE" ]; then
-    RFC2136_TSIG_SECRET="$(cat "$TSIG_SECRET_FILE")"
-    export RFC2136_TSIG_SECRET
-    echo "[start] RFC2136_TSIG_SECRET loaded from ${TSIG_SECRET_FILE}."
+  # The secret lives exclusively inside the coolify-api-token Docker volume.
+  # It is never written to or read from the host filesystem (SEC-S1).
+  # We use `docker run --rm` with the volume mounted to read it at start time.
+  TSIG_VOLUME_PATH="${RFC2136_TSIG_SECRET_FILE:-/coolify-api-token/rfc2136_tsig.secret}"
+  TSIG_VOLUME_NAME="coolify-api-token"
+  TSIG_FILE_IN_VOLUME="$(basename "$TSIG_VOLUME_PATH")"
+  TSIG_VOLUME_DIR="$(dirname "$TSIG_VOLUME_PATH")"
+  if docker volume inspect "$TSIG_VOLUME_NAME" >/dev/null 2>&1; then
+    RFC2136_TSIG_SECRET="$(
+      docker run --rm \
+        -v "${TSIG_VOLUME_NAME}:${TSIG_VOLUME_DIR}:ro" \
+        alpine sh -c "cat '${TSIG_VOLUME_PATH}' 2>/dev/null" 2>/dev/null || true
+    )"
+    if [ -n "$RFC2136_TSIG_SECRET" ]; then
+      export RFC2136_TSIG_SECRET
+      echo "[start] RFC2136_TSIG_SECRET loaded from volume ${TSIG_VOLUME_NAME}."
+    else
+      echo "[start] WARNING: RFC2136 TSIG secret not found in volume ${TSIG_VOLUME_NAME} at ${TSIG_VOLUME_PATH}."
+      echo "[start]   Run 'bash scripts/setup.sh' with the stack running to bootstrap the TSIG key."
+      echo "[start]   DNS-01 certificate issuance will not work until the key is provisioned."
+    fi
   else
-    echo "[start] WARNING: RFC2136 TSIG secret file not found at ${TSIG_SECRET_FILE}."
-    echo "[start]   Run 'bash scripts/setup.sh' with the stack running to bootstrap the TSIG key."
-    echo "[start]   DNS-01 certificate issuance will not work until the key is provisioned."
+    echo "[start] WARNING: Docker volume '${TSIG_VOLUME_NAME}' not found. TSIG secret unavailable."
+    echo "[start]   Run 'bash scripts/setup.sh' to initialise the stack and provision the TSIG key."
   fi
 fi
 

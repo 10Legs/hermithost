@@ -275,14 +275,29 @@ echo ""
 echo "[setup] Checking RFC2136 TSIG bootstrap (LAN mode only)..."
 PORT_MODE_CURRENT="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
 if [ "$PORT_MODE_CURRENT" = "lan" ]; then
-  # Source the .env so TECHNITIUM_URL and TECHNITIUM_TOKEN are available.
-  # At setup time the stack may not be running yet, so we skip gracefully if
-  # TECHNITIUM_TOKEN is empty (the init script self-guards on empty token).
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
-  bash "$SCRIPT_DIR/conf.d/technitium-tsig-init.sh" || {
+  # Extract only the two variables the TSIG init script needs from .env.
+  # Using explicit variable assignment avoids exporting the entire .env
+  # (COOKIE_SECRET, passwords, etc.) into the child environment. SEC-S4.
+  #
+  # The init script writes the TSIG secret to /coolify-api-token/ which is a
+  # Docker named volume (coolify-api-token). To ensure the secret is NEVER
+  # written to the host filesystem, invoke the script inside a container with
+  # that volume mounted (SEC-S1). The host Docker socket is bind-mounted so the
+  # container can run `docker network inspect` for subnet detection.
+  _TECH_URL="$(grep -E '^TECHNITIUM_URL=' "$ENV_FILE" | cut -d'=' -f2- || true)"
+  _TECH_TOKEN="$(grep -E '^TECHNITIUM_TOKEN=' "$ENV_FILE" | cut -d'=' -f2- || true)"
+  # Resolve env vars that the init script consumes
+  _RFC2136_ZONE="$(grep -E '^RFC2136_ZONE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
+  _PORT_MODE="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
+  docker run --rm \
+    -v coolify-api-token:/coolify-api-token \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v "${SCRIPT_DIR}/conf.d:/scripts/conf.d:ro" \
+    -e TECHNITIUM_URL="${_TECH_URL}" \
+    -e TECHNITIUM_TOKEN="${_TECH_TOKEN}" \
+    -e HERMITHOST_PORT_MODE="${_PORT_MODE}" \
+    -e RFC2136_ZONE="${_RFC2136_ZONE}" \
+    docker:cli sh -c "apk add --no-cache bash openssl curl >/dev/null 2>&1 && bash /scripts/conf.d/technitium-tsig-init.sh" || {
     echo "[setup] WARNING: TSIG bootstrap failed or was skipped."
     echo "[setup] Re-run 'bash scripts/setup.sh' after starting the stack to complete TSIG setup."
   }

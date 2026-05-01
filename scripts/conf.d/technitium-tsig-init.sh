@@ -78,26 +78,33 @@ for NET_NAME in hermithost_hermithost-net hermithost-net; do
 done
 
 if [ -z "$HERMITHOST_NET_SUBNET" ]; then
-  # Fallback: use the broad Docker bridge range but warn loudly
-  HERMITHOST_NET_SUBNET="172.16.0.0/12"
-  echo "[tsig-init] WARNING: Could not detect hermithost-net subnet. Falling back to ${HERMITHOST_NET_SUBNET}."
-  echo "[tsig-init] To narrow the ACL, ensure the 'docker' command is available and the stack is running."
+  echo "[tsig-init] ERROR: hermithost-net subnet detection failed. Bring stack up first, then re-run setup." >&2
+  exit 1
 fi
 
-# Loopback is included so Traefik (running inside the container stack) can update via 127.0.0.1
-# when the compose network routes through the host stack.
-UPDATE_ACL="${HERMITHOST_NET_SUBNET},127.0.0.0/8"
+# Trust model: TSIG secret is the primary security boundary; the network ACL is a coarse
+# second factor (defense-in-depth, not the sole gate). Ref: ADR-007 Risk R1 + Security review S-finding.
+UPDATE_ACL="${HERMITHOST_NET_SUBNET}"
 
 # ── Step 3: Register the TSIG key in Technitium ───────────────────────────────
 # Format: tsigKeys=keyName|sharedSecret|algorithmName (pipe-delimited, from Technitium web UI).
 # Key name is stored WITHOUT trailing dot; Technitium normalizes it internally.
+#
+# SEC: secret is written to a mode-0600 temp file and passed via curl stdin to
+# avoid leaking it on the process argv (visible to `ps`).
 echo "[tsig-init] Registering TSIG key '${TSIG_KEY_NAME}' in Technitium..."
+TSIG_BODY_FILE="$(dirname "$TSIG_SECRET_FILE")/.tsig_req_body.tmp"
+# Build the body without exposing to argv; printf avoids newline injection.
+printf 'token=%s&tsigKeys=%s|%s|%s' \
+  "${TECHNITIUM_TOKEN}" "${TSIG_KEY_NAME}" "${TSIG_SECRET}" "${TSIG_ALGORITHM}" \
+  > "$TSIG_BODY_FILE"
+chmod 0600 "$TSIG_BODY_FILE"
 TSIG_REGISTER_RESULT="$(
   curl -sf -X POST "${TECHNITIUM_URL}/api/settings/set" \
-    --data-urlencode "token=${TECHNITIUM_TOKEN}" \
-    --data-urlencode "tsigKeys=${TSIG_KEY_NAME}|${TSIG_SECRET}|${TSIG_ALGORITHM}" \
+    --data @"$TSIG_BODY_FILE" \
     2>/dev/null
-)"
+)" || true
+rm -f "$TSIG_BODY_FILE"
 TSIG_STATUS="$(echo "$TSIG_REGISTER_RESULT" | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "unknown")"
 if [ "$TSIG_STATUS" != "ok" ]; then
   echo "[tsig-init] ERROR: Failed to register TSIG key. Response: ${TSIG_REGISTER_RESULT}"
@@ -107,20 +114,22 @@ echo "[tsig-init] TSIG key registered successfully."
 
 # ── Step 4: Configure zone update permissions ─────────────────────────────────
 # - update mode: UseSpecifiedNetworkACL (v15 name for subnet-restricted updates)
-# - updateNetworkACL: hermithost-net subnet + loopback
+# - updateNetworkACL: hermithost-net subnet (no loopback — SA-1)
 # - updateSecurityPolicies: require TSIG signature matching the registered key,
 #   allow TXT record type only (DNS-01 only needs TXT), domain=*.${ZONE}.
 #   The wildcard domain *.${ZONE}. covers _acme-challenge.<host>.<zone> records.
 echo "[tsig-init] Configuring zone '${ZONE}' update permissions..."
+ZONE_BODY_FILE="$(dirname "$TSIG_SECRET_FILE")/.zone_req_body.tmp"
+printf 'token=%s&zone=%s&update=UseSpecifiedNetworkACL&updateNetworkACL=%s&updateSecurityPolicies=%s|*.%s.|TXT' \
+  "${TECHNITIUM_TOKEN}" "${ZONE}" "${UPDATE_ACL}" "${TSIG_KEY_NAME}" "${ZONE}" \
+  > "$ZONE_BODY_FILE"
+chmod 0600 "$ZONE_BODY_FILE"
 ZONE_SET_RESULT="$(
   curl -sf -X POST "${TECHNITIUM_URL}/api/zones/options/set" \
-    --data-urlencode "token=${TECHNITIUM_TOKEN}" \
-    --data-urlencode "zone=${ZONE}" \
-    --data-urlencode "update=UseSpecifiedNetworkACL" \
-    --data-urlencode "updateNetworkACL=${UPDATE_ACL}" \
-    --data-urlencode "updateSecurityPolicies=${TSIG_KEY_NAME}|*.${ZONE}.|TXT" \
+    --data @"$ZONE_BODY_FILE" \
     2>/dev/null
-)"
+)" || true
+rm -f "$ZONE_BODY_FILE"
 ZONE_STATUS="$(echo "$ZONE_SET_RESULT" | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "unknown")"
 if [ "$ZONE_STATUS" != "ok" ]; then
   echo "[tsig-init] ERROR: Failed to configure zone permissions. Response: ${ZONE_SET_RESULT}"
@@ -129,13 +138,15 @@ fi
 echo "[tsig-init] Zone '${ZONE}' configured: UseSpecifiedNetworkACL, ACL=${UPDATE_ACL}, TSIG policy=TXT."
 
 # ── Step 5: Write the manifest ────────────────────────────────────────────────
+CREATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 cat > "$TSIG_MANIFEST_FILE" << MANIFEST_EOF
 {
   "keyName": "${TSIG_KEY_NAME}",
   "algorithm": "${TSIG_ALGORITHM}",
   "zone": "${ZONE}",
   "subnet": "${HERMITHOST_NET_SUBNET}",
-  "updateMode": "UseSpecifiedNetworkACL"
+  "updateMode": "UseSpecifiedNetworkACL",
+  "createdAt": "${CREATED_AT}"
 }
 MANIFEST_EOF
 echo "[tsig-init] Manifest written to ${TSIG_MANIFEST_FILE}."
