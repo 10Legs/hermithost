@@ -181,6 +181,7 @@ services:
       - ./scripts/coolify-setup.sh:/setup.sh:ro
     environment:
       COOLIFY_API_TOKEN: "${COOLIFY_API_TOKEN}"
+      TECHNITIUM_URL: "${TECHNITIUM_URL:-http://technitium:5380}"
       PGHOST: "coolify-db"
       PGPORT: "5432"
       PGDATABASE: "coolify"

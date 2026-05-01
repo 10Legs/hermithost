@@ -267,6 +267,46 @@ else
   echo "[setup] COOLIFY_ADMIN_PASSWORD already set — skipping."
 fi
 
+# ── Technitium TSIG bootstrap (LAN mode only) ────────────────────────────────
+# Generates or reuses the RFC2136 TSIG key and registers it in Technitium.
+# Only runs when HERMITHOST_PORT_MODE=lan and Technitium is reachable.
+# Idempotent: re-running setup.sh reuses the existing key without re-registering.
+echo ""
+echo "[setup] Checking RFC2136 TSIG bootstrap (LAN mode only)..."
+PORT_MODE_CURRENT="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
+if [ "$PORT_MODE_CURRENT" = "lan" ]; then
+  # Extract only the two variables the TSIG init script needs from .env.
+  # Using explicit variable assignment avoids exporting the entire .env
+  # (COOKIE_SECRET, passwords, etc.) into the child environment. SEC-S4.
+  #
+  # The init script writes the TSIG secret to /coolify-api-token/ which is a
+  # Docker named volume (coolify-api-token). To ensure the secret is NEVER
+  # written to the host filesystem, invoke the script inside a container with
+  # that volume mounted (SEC-S1). The host Docker socket is bind-mounted so the
+  # container can run `docker network inspect` for subnet detection.
+  _TECH_URL="$(grep -E '^TECHNITIUM_URL=' "$ENV_FILE" | cut -d'=' -f2- || true)"
+  # Resolve env vars that the init script consumes
+  _RFC2136_ZONE="$(grep -E '^RFC2136_ZONE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
+  _PORT_MODE="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
+  # TECHNITIUM_TOKEN is NOT read from .env — the init script reads it directly
+  # from the coolify-api-token volume (/coolify-api-token/technitium_token),
+  # which coolify-setup.sh writes at startup. Operators never supply this token.
+  docker run --rm \
+    --network hermithost_hermithost-net \
+    -v coolify-api-token:/coolify-api-token \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v "${SCRIPT_DIR}/conf.d:/scripts/conf.d:ro" \
+    -e TECHNITIUM_URL="${_TECH_URL}" \
+    -e HERMITHOST_PORT_MODE="${_PORT_MODE}" \
+    -e RFC2136_ZONE="${_RFC2136_ZONE}" \
+    docker:cli sh -c "apk add --no-cache bash openssl curl >/dev/null 2>&1 && bash /scripts/conf.d/technitium-tsig-init.sh" || {
+    echo "[setup] WARNING: TSIG bootstrap failed or was skipped."
+    echo "[setup] Re-run 'bash scripts/setup.sh' after starting the stack to complete TSIG setup."
+  }
+else
+  echo "[setup] Not in LAN mode — skipping TSIG bootstrap."
+fi
+
 echo ""
 echo "[setup] Configuration complete. Ready to start:"
 echo "        bash scripts/start.sh -d"
