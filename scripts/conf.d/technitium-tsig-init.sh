@@ -126,6 +126,39 @@ if [ "$TSIG_STATUS" != "ok" ]; then
 fi
 echo "[tsig-init] TSIG key registered successfully."
 
+# ── Step 3.5: Ensure root zone exists ────────────────────────────────────────
+# On a clean-volume bring-up, zone 'hh' does not exist until the first site is
+# provisioned via the API.  zones/options/set fails with "No such zone was found"
+# if we call it before the zone exists.  Proactively create it here so this
+# script is self-sufficient regardless of bring-up order.
+#
+# Detection: POST /api/zones/list, grep for the zone name in the JSON response.
+# Creation:  POST /api/zones/create with zone=hh&type=Primary.
+# Both calls are idempotent — create silently succeeds if the zone already exists.
+echo "[tsig-init] Ensuring zone '${ZONE}' exists in Technitium..."
+ZONE_LIST_RESULT="$(
+  curl -sf -X POST "${TECHNITIUM_URL}/api/zones/list" \
+    -d "token=${TECHNITIUM_TOKEN}" \
+    2>/dev/null
+)" || true
+ZONE_EXISTS="$(echo "$ZONE_LIST_RESULT" | grep -o "\"name\":\"${ZONE}\"" || true)"
+if [ -n "$ZONE_EXISTS" ]; then
+  echo "[tsig-init] Zone '${ZONE}' already exists — skipping creation."
+else
+  echo "[tsig-init] Zone '${ZONE}' not found — creating Primary zone..."
+  ZONE_CREATE_RESULT="$(
+    curl -sf -X POST "${TECHNITIUM_URL}/api/zones/create" \
+      -d "token=${TECHNITIUM_TOKEN}&zone=${ZONE}&type=Primary" \
+      2>/dev/null
+  )" || true
+  ZONE_CREATE_STATUS="$(echo "$ZONE_CREATE_RESULT" | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "unknown")"
+  if [ "$ZONE_CREATE_STATUS" != "ok" ]; then
+    echo "[tsig-init] ERROR: Failed to create zone '${ZONE}'. Response: ${ZONE_CREATE_RESULT}"
+    exit 1
+  fi
+  echo "[tsig-init] Zone '${ZONE}' created successfully."
+fi
+
 # ── Step 4: Configure zone update permissions ─────────────────────────────────
 # - update mode: UseSpecifiedNetworkACL (v15 name for subnet-restricted updates)
 # - updateNetworkACL: hermithost-net subnet (no loopback — SA-1)
