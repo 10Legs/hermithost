@@ -53,7 +53,7 @@ if [ -z "$TECHNITIUM_TOKEN" ]; then
 fi
 
 TSIG_KEY_NAME="${RFC2136_TSIG_KEYNAME:-hermithost-acme}"
-TSIG_ALGORITHM="${RFC2136_TSIG_ALGORITHM:-hmac-sha256.}"
+TSIG_ALGORITHM="${RFC2136_TSIG_ALGORITHM:-hmac-sha256}"
 TSIG_SECRET_FILE="${RFC2136_TSIG_SECRET_FILE:-/coolify-api-token/rfc2136_tsig.secret}"
 TSIG_MANIFEST_FILE="$(dirname "$TSIG_SECRET_FILE")/rfc2136_tsig.json"
 ZONE="${RFC2136_ZONE:-hh}"

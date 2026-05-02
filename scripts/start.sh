@@ -44,7 +44,7 @@ if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
   RFC2136_TSIG_SECRET="$(
     docker run --rm \
       -v "${TSIG_VOLUME_NAME}:${TSIG_VOLUME_DIR}:ro" \
-      alpine sh -c "cat '${TSIG_VOLUME_PATH}' 2>/dev/null" 2>/dev/null || true
+      alpine sh -c "cat '${TSIG_VOLUME_PATH}' 2>/dev/null | tr -d '\n\r '" 2>/dev/null || true
   )"
   if [ -z "$RFC2136_TSIG_SECRET" ]; then
     echo "[start] ERROR: RFC2136 TSIG secret not found or empty in volume '${TSIG_VOLUME_NAME}' at '${TSIG_VOLUME_PATH}'."
