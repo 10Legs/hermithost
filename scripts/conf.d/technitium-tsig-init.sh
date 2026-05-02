@@ -32,7 +32,7 @@ trap 'rm -f "$TSIG_BODY_FILE" "$ZONE_BODY_FILE" 2>/dev/null || true' EXIT INT TE
 TECHNITIUM_URL="${TECHNITIUM_URL:-http://localhost:5380}"
 TECHNITIUM_TOKEN="${TECHNITIUM_TOKEN:-}"
 TSIG_KEY_NAME="${RFC2136_TSIG_KEYNAME:-hermithost-acme}"
-TSIG_ALGORITHM="${RFC2136_TSIG_ALGORITHM:-hmac-sha256}"
+TSIG_ALGORITHM="${RFC2136_TSIG_ALGORITHM:-hmac-sha256.}"
 TSIG_SECRET_FILE="${RFC2136_TSIG_SECRET_FILE:-/coolify-api-token/rfc2136_tsig.secret}"
 # Manifest lives alongside the secret file (same directory, Docker volume)
 TSIG_MANIFEST_FILE="$(dirname "$TSIG_SECRET_FILE")/rfc2136_tsig.json"
@@ -66,7 +66,7 @@ echo "[tsig-init]   Secret file: ${TSIG_SECRET_FILE}"
 # ── Step 1: Generate or reuse the TSIG secret ─────────────────────────────────
 if [ -f "$TSIG_SECRET_FILE" ]; then
   echo "[tsig-init] Secret file already exists — reusing."
-  TSIG_SECRET="$(cat "$TSIG_SECRET_FILE")"
+  TSIG_SECRET="$(cat "$TSIG_SECRET_FILE" | tr -d '\n')"
 else
   echo "[tsig-init] Generating new 32-byte HMAC-SHA256 secret..."
   TSIG_SECRET="$(openssl rand -base64 32 | tr -d '\n')"
