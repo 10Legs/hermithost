@@ -123,6 +123,10 @@ services:
       - step-ca-data:/home/step
     networks:
       - hermithost-net
+    # Route step-ca's DNS through Technitium so its ACME validator can resolve
+    # _acme-challenge.<host>.hh TXT records during DNS-01 pre-check (R4 / Open Q #4).
+    dns:
+      - technitium
     restart: unless-stopped
     depends_on:
       step-ca-init:
@@ -207,10 +211,11 @@ services:
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=http"
       - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/acme/acme.json"
-      # ── Internal CA resolver (step-ca) ─────────────────────────
+      # ── Internal CA resolver (step-ca, DNS-01 via RFC2136) ────────
       - "--certificatesresolvers.internal-ca.acme.caserver=https://step-ca:9000/acme/acme/directory"
-      - "--certificatesresolvers.internal-ca.acme.httpchallenge=true"
-      - "--certificatesresolvers.internal-ca.acme.httpchallenge.entrypoint=http"
+      - "--certificatesresolvers.internal-ca.acme.dnschallenge=true"
+      - "--certificatesresolvers.internal-ca.acme.dnschallenge.provider=rfc2136"
+      - "--certificatesresolvers.internal-ca.acme.dnschallenge.resolvers=technitium:53"
       - "--certificatesresolvers.internal-ca.acme.email=internal@hermithost.hh"
       - "--certificatesresolvers.internal-ca.acme.storage=/acme/internal-acme.json"
       # ── Access logging (JSON) ───────────────────────────────────────────────
@@ -236,6 +241,16 @@ services:
       # Only set when running with --profile internal; empty value is
       # ignored by Traefik so the letsencrypt resolver works unimpaired.
       LEGO_CA_CERTIFICATES: "${LEGO_CA_CERTIFICATES:-}"
+      # RFC2136 DNS-01 provider config for the internal-ca resolver.
+      # Consumed by Lego's rfc2136 driver; ignored when TSIG secret is empty
+      # (Internet mode — letsencrypt resolver is used instead).
+      RFC2136_NAMESERVER: "technitium:53"
+      RFC2136_TSIG_ALGORITHM: "hmac-sha256."
+      RFC2136_TSIG_KEY: "hermithost-acme."
+      RFC2136_TSIG_SECRET: "${RFC2136_TSIG_SECRET:-}"
+      # Force Lego's pre-validation DNS check to query Technitium directly.
+      # Docker's embedded DNS does not know the .hh zone (R3 in risk register).
+      LEGO_DNS_RESOLVERS: "technitium:53"
     ports:
       - "${TRAEFIK_HTTP_PORT:-8080}:80"
       - "${TRAEFIK_HTTPS_PORT:-8443}:443"
