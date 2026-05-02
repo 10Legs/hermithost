@@ -272,7 +272,7 @@ services:
       # Consumed by Lego's rfc2136 driver; ignored when TSIG secret is empty
       # (Internet mode — letsencrypt resolver is used instead).
       RFC2136_NAMESERVER: "technitium:53"
-      RFC2136_TSIG_ALGORITHM: "hmac-sha256."
+      RFC2136_TSIG_ALGORITHM: "hmac-sha256"
       RFC2136_TSIG_KEY: "hermithost-acme."
       RFC2136_TSIG_SECRET: "${RFC2136_TSIG_SECRET:-}"
       # Force Lego's pre-validation DNS check to query Technitium directly.
