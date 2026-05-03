@@ -28,5 +28,10 @@ else
   echo "[step-ca-entrypoint] WARNING: cannot write /etc/resolv.conf (not root). DNS may be wrong." >&2
 fi
 
-# Hand off to the real step-ca binary with all original arguments.
-exec /usr/local/bin/step-ca "$@"
+# Invoke step-ca with --password-file explicitly so it never tries to read
+# the passphrase from /dev/tty (which does not exist in a Docker container
+# and causes a crash-loop). PWDPATH is set by the image to
+# /home/step/secrets/password and is populated by the step-ca-init service.
+# The Compose command passes only the config path, so we inject --password-file
+# here rather than relying on the image's default CMD.
+exec /usr/local/bin/step-ca --password-file "${PWDPATH:-/home/step/secrets/password}" "$@"
