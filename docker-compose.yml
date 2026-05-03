@@ -119,14 +119,39 @@ services:
   step-ca:
     image: smallstep/step-ca:latest
     profiles: [internal]
+    # Run as root so the entrypoint shim can write /etc/resolv.conf before
+    # handing off to step-ca (which handles its own uid internally).
+    user: root
+    # Wrapper writes resolv.conf to 172.28.0.10 (Technitium) on every start,
+    # regardless of whether the container was --force-recreated or just restarted.
+    # This makes DNS correct even when docker dns: is not re-applied on restart.
+    entrypoint: ["/bin/sh", "/scripts/step-ca-entrypoint.sh"]
+    command: ["/home/step/config/ca.json"]
     volumes:
       - step-ca-data:/home/step
+      - ./scripts/step-ca-entrypoint.sh:/scripts/step-ca-entrypoint.sh:ro
     networks:
       - hermithost-net
     restart: unless-stopped
     depends_on:
       step-ca-init:
         condition: service_completed_successfully
+      technitium:
+        condition: service_healthy
+    # step-ca binds :9000; curl is not in the image so we use wget (busybox).
+    # -k: self-signed root during first boot is acceptable here.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --no-check-certificate https://localhost:9000/health || exit 1"]
+      interval: 10s
+      retries: 12
+      timeout: 5s
+    # Technitium is the authoritative resolver for .hh — step-ca must use it
+    # directly so ACME DNS-01 challenge TXT lookups resolve correctly.
+    # Pinned IP matches the static address assigned to technitium below.
+    # Note: dns: is only applied at container creation; the entrypoint shim
+    # above enforces it on every start as a belt-and-suspenders guarantee.
+    dns:
+      - 172.28.0.10
 
   # ── Coolify Keys Init (one-shot) ──────────────────────────────
   coolify-keys-init:
@@ -196,6 +221,12 @@ services:
   traefik:
     image: traefik:v3.2
     restart: unless-stopped
+    # required: false — enforced only when step-ca is scheduled (--profile internal).
+    # Silently skipped in internet mode. Requires Compose v2.20+ (running v5.1.1).
+    depends_on:
+      step-ca:
+        condition: service_healthy
+        required: false
     command:
       - "--providers.file.directory=/etc/traefik/conf.d"
       - "--providers.file.watch=true"
@@ -207,10 +238,11 @@ services:
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=http"
       - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/acme/acme.json"
-      # ── Internal CA resolver (step-ca) ─────────────────────────
+      # ── Internal CA resolver (step-ca, DNS-01 via RFC2136) ────────
       - "--certificatesresolvers.internal-ca.acme.caserver=https://step-ca:9000/acme/acme/directory"
-      - "--certificatesresolvers.internal-ca.acme.httpchallenge=true"
-      - "--certificatesresolvers.internal-ca.acme.httpchallenge.entrypoint=http"
+      - "--certificatesresolvers.internal-ca.acme.dnschallenge=true"
+      - "--certificatesresolvers.internal-ca.acme.dnschallenge.provider=rfc2136"
+      - "--certificatesresolvers.internal-ca.acme.dnschallenge.resolvers=technitium:53"
       - "--certificatesresolvers.internal-ca.acme.email=internal@hermithost.hh"
       - "--certificatesresolvers.internal-ca.acme.storage=/acme/internal-acme.json"
       # ── Access logging (JSON) ───────────────────────────────────────────────
@@ -236,6 +268,16 @@ services:
       # Only set when running with --profile internal; empty value is
       # ignored by Traefik so the letsencrypt resolver works unimpaired.
       LEGO_CA_CERTIFICATES: "${LEGO_CA_CERTIFICATES:-}"
+      # RFC2136 DNS-01 provider config for the internal-ca resolver.
+      # Consumed by Lego's rfc2136 driver; ignored when TSIG secret is empty
+      # (Internet mode — letsencrypt resolver is used instead).
+      RFC2136_NAMESERVER: "technitium:53"
+      RFC2136_TSIG_ALGORITHM: "hmac-sha256"
+      RFC2136_TSIG_KEY: "hermithost-acme."
+      RFC2136_TSIG_SECRET: "${RFC2136_TSIG_SECRET:-}"
+      # Force Lego's pre-validation DNS check to query Technitium directly.
+      # Docker's embedded DNS does not know the .hh zone (R3 in risk register).
+      LEGO_DNS_RESOLVERS: "technitium:53"
     ports:
       - "${TRAEFIK_HTTP_PORT:-8080}:80"
       - "${TRAEFIK_HTTPS_PORT:-8443}:443"
@@ -389,7 +431,10 @@ services:
     volumes:
       - technitium-config:/etc/dns
     networks:
-      - hermithost-net
+      hermithost-net:
+        # Static IP so step-ca dns: block and RFC2136_NAMESERVER can reference
+        # a stable address rather than a hostname (Docker dns: validates IPs only).
+        ipv4_address: 172.28.0.10
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5380/api/user/login?user=admin&pass=admin > /dev/null 2>&1 || exit 1"]
       interval: 5s
@@ -399,6 +444,13 @@ services:
 networks:
   hermithost-net:
     driver: bridge
+    # Explicit subnet required to pin Technitium's IP (172.28.0.10).
+    # step-ca dns: and Traefik RFC2136_NAMESERVER both reference this address.
+    # Operators upgrading from an auto-assigned subnet must run setup.sh again
+    # (TSIG ACL in technitium-tsig-init.sh is re-registered from the new CIDR).
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
   coolify:
     external: true
     name: coolify
@@ -412,6 +464,7 @@ volumes:
   coolify-redis:
   coolify-keys:
   coolify-api-token:
+    name: coolify-api-token
   ssh-bridge-host-keys:
   step-ca-data:
   traefik-logs:
