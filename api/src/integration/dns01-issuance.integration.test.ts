@@ -45,11 +45,13 @@ function tlsHandshake(host: string, port: number, servername: string) {
         let cur: tls.DetailedPeerCertificate | undefined = peer as tls.DetailedPeerCertificate;
         let depth = 0;
         while (cur && depth < 5) {
+          const sCN = cur.subject?.CN;
+          const iCN = cur.issuer?.CN;
           chain.push({
-            subjectCN: cur.subject?.CN ?? '',
-            issuerCN: cur.issuer?.CN ?? '',
+            subjectCN: Array.isArray(sCN) ? (sCN[0] ?? '') : (sCN ?? ''),
+            issuerCN: Array.isArray(iCN) ? (iCN[0] ?? '') : (iCN ?? ''),
           });
-          const next = (cur as tls.DetailedPeerCertificate).issuerCertificate;
+          const next: tls.DetailedPeerCertificate = (cur as tls.DetailedPeerCertificate).issuerCertificate;
           if (!next || next === cur) break;
           cur = next;
           depth++;
