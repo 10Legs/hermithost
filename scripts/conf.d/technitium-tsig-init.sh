@@ -184,6 +184,55 @@ if [ "$ZONE_STATUS" != "ok" ]; then
 fi
 echo "[tsig-init] Zone '${ZONE}' configured: UseSpecifiedNetworkACL, ACL=${UPDATE_ACL}, TSIG policy=TXT."
 
+# ── Step 4.5: Ensure NS + A glue records for the zone ────────────────────────
+# lego (used by Traefik for DNS-01) performs an SOA preflight that resolves the
+# authoritative nameserver via the zone's NS record. A primary zone created via
+# /api/zones/create has no NS record by default, only an SOA whose primary
+# field is the Technitium container's hostname (a docker-generated random ID
+# that resolves to nothing). Without an NS record lego fails with:
+#   "could not determine authoritative nameservers"
+#
+# We register an NS record pointing at "technitium." plus an A glue record so
+# lego (configured with LEGO_DNS_RESOLVERS=technitium:53) can resolve the
+# nameserver name and complete propagation.
+#
+# Idempotent: /api/zones/records/add returns 200 even if the record exists
+# (Technitium dedups identical records). On non-200 we log and continue rather
+# than fail — operators can fix manually if needed.
+NS_TARGET="${RFC2136_NS_TARGET:-technitium.}"
+TECH_IP_RUNTIME=""
+# Detect Technitium IP from the docker network (same lookup pattern as ACL).
+TECH_IP_RUNTIME="$(getent hosts technitium 2>/dev/null | awk '{print $1}' | head -1 || true)"
+echo "[tsig-init] Ensuring NS record '${ZONE} -> ${NS_TARGET}'..."
+NS_ADD_RESULT="$(
+  curl -sf -X POST "${TECHNITIUM_URL}/api/zones/records/add" \
+    -d "token=${TECHNITIUM_TOKEN}&domain=${ZONE}&type=NS&ttl=3600&nameServer=${NS_TARGET}" \
+    2>/dev/null || true
+)"
+NS_ADD_STATUS="$(echo "$NS_ADD_RESULT" | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "unknown")"
+if [ "$NS_ADD_STATUS" = "ok" ]; then
+  echo "[tsig-init] NS record ensured."
+else
+  echo "[tsig-init] NS record add returned status=${NS_ADD_STATUS} (existing record is acceptable)."
+fi
+if [ -n "${TECH_IP_RUNTIME}" ]; then
+  GLUE_NAME="${NS_TARGET%.}"
+  echo "[tsig-init] Ensuring A glue '${GLUE_NAME} -> ${TECH_IP_RUNTIME}'..."
+  GLUE_ADD_RESULT="$(
+    curl -sf -X POST "${TECHNITIUM_URL}/api/zones/records/add" \
+      -d "token=${TECHNITIUM_TOKEN}&domain=${GLUE_NAME}&type=A&ttl=3600&ipAddress=${TECH_IP_RUNTIME}" \
+      2>/dev/null || true
+  )"
+  GLUE_ADD_STATUS="$(echo "$GLUE_ADD_RESULT" | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "unknown")"
+  if [ "$GLUE_ADD_STATUS" = "ok" ]; then
+    echo "[tsig-init] A glue record ensured."
+  else
+    echo "[tsig-init] A glue add returned status=${GLUE_ADD_STATUS} (existing record is acceptable)."
+  fi
+else
+  echo "[tsig-init] WARNING: Could not detect Technitium IP for A glue — skipping (NS-only)."
+fi
+
 # ── Step 5: Write the manifest ────────────────────────────────────────────────
 CREATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 cat > "$TSIG_MANIFEST_FILE" << MANIFEST_EOF
