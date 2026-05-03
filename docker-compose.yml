@@ -464,6 +464,7 @@ volumes:
   coolify-redis:
   coolify-keys:
   coolify-api-token:
+    name: coolify-api-token
   ssh-bridge-host-keys:
   step-ca-data:
   traefik-logs:
