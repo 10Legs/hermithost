@@ -1,0 +1,34 @@
+# Phase 4 — wildcard *.hh cert pre-fetch
+#
+# Declares a stub HTTPS router whose only purpose is to make Traefik request
+# a single *.hh wildcard cert from the internal-ca resolver at startup,
+# even before any per-site router file exists. This guarantees the wildcard
+# is available the moment the first .hh site comes online.
+#
+# - Listens on a Host that will never match real traffic ("wildcard-prefetch.hh")
+#   so this router does not interfere with site routing. Traefik still
+#   triggers an ACME order for the wildcard SAN declared in tls.domains.
+# - Service routes to a non-existent backend; the router exists only for
+#   cert acquisition. No traffic is expected to land here.
+# - Public-mode (letsencrypt) is unaffected: this file's tls.certResolver is
+#   pinned to internal-ca and only matters when that resolver is wired.
+#
+# See ADR-007 (DNS-01 internal CA) + Phase 4 security review.
+
+http:
+  routers:
+    wildcard-internal-prefetch:
+      rule: "Host(`wildcard-prefetch.hh`)"
+      entryPoints:
+        - https
+      tls:
+        certResolver: internal-ca
+        domains:
+          - main: "*.hh"
+      service: wildcard-internal-noop
+
+  services:
+    wildcard-internal-noop:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:1"

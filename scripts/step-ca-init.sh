@@ -37,6 +37,15 @@ step ca init \
 # ── Add ACME provisioner with 90-day cert lifetime ────────────────────────────
 # The default JWK provisioner stays but is unused; Traefik will use 'acme'.
 # 90 days (2160h) balances security and homelab convenience.
+#
+# Policy block (Phase 4 wildcard adoption — security review §5.1):
+#   - allow.dns: only ".hh" SANs (exact apex + any subdomain via wildcard)
+#   - allowWildcardNames: true to permit "*.hh" SAN
+#   - deny: empty — implicit deny via the allow-list semantics
+# Without this policy, an ACME provisioner with no policy block accepts
+# any SAN. Pinning to .hh defends against mis-issuance even if a downstream
+# component sends a stray order. See:
+#   clients/self/projects/hermithost/specs/security-review-dns01-phase4-wildcard-2026-05-03.md
 jq '.authority.provisioners += [{
   "type": "ACME",
   "name": "acme",
@@ -45,6 +54,14 @@ jq '.authority.provisioners += [{
     "defaultTLSCertDuration": "2160h",
     "maxTLSCertDuration": "8760h",
     "minTLSCertDuration": "5m"
+  },
+  "policy": {
+    "x509": {
+      "allow": {
+        "dns": ["*.hh", "hh"]
+      },
+      "allowWildcardNames": true
+    }
   }
 }]' "$STEPPATH/config/ca.json" > /tmp/ca.json.tmp \
   && mv /tmp/ca.json.tmp "$STEPPATH/config/ca.json"
