@@ -30,7 +30,7 @@ graph TD
   Docker["Docker Daemon"]
   Technitium["Technitium (DNS)"]
   StepCA["step-ca (LAN Internal CA)"]
-  LetsEncrypt["Let's Encrypt (Internet Mode)"]
+  LetsEncrypt["Lets Encrypt (Internet Mode)"]
   
   Browser -->|HTTPS| Traefik
   Traefik -->|Route /api/*| API
@@ -53,13 +53,13 @@ graph TD
 sequenceDiagram
   participant Traefik
   participant stepCA as step-ca
-  participant Lego as Traefik Lego<br/>ACME Client
+  participant Lego as Lego ACME Client
   participant Technitium
-  
+
   Traefik->>stepCA: Request DNS-01 challenge for myapp.hh
   stepCA-->>Traefik: Challenge token
   Traefik->>Lego: Issue cert for myapp.hh
-  Lego->>Technitium: RFC2136 + TSIG: Write TXT record<br/>_acme-challenge.myapp.hh
+  Lego->>Technitium: RFC2136 + TSIG write _acme-challenge.myapp.hh TXT
   Technitium-->>Lego: Record created
   Lego->>stepCA: Validate DNS challenge
   stepCA->>Technitium: Query TXT record
@@ -73,7 +73,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   participant User
-  participant Dashboard as HermitHost<br/>Dashboard
+  participant Dashboard as HermitHost Dashboard
   participant API
   participant Coolify
   participant Docker
