@@ -257,6 +257,8 @@ services:
       - "--metrics.prometheus.addEntryPointsLabels=true"
       - "--metrics.prometheus.addRoutersLabels=true"
       - "--metrics.prometheus.addServicesLabels=true"
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
       - "--ping=true"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/ping"]
@@ -281,7 +283,7 @@ services:
     ports:
       - "${TRAEFIK_HTTP_PORT:-8080}:80"
       - "${TRAEFIK_HTTPS_PORT:-8443}:443"
-      - "9080:9080"
+      - "127.0.0.1:9080:9080"
     volumes:
       - ./traefik/conf.d:/etc/traefik/conf.d
       - traefik-acme:/acme
