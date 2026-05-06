@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
-export DOCKER_HOST=unix:///Users/rdemeritt/.docker/run/docker.sock
+export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.docker/run/docker.sock}"
 
 echo "   Restarting hermithost..."
 docker compose -f "$ROOT/docker-compose.yml" down

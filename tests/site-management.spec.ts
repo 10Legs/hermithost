@@ -11,7 +11,7 @@ test.slow();
 test.describe('Site CRUD', () => {
 	let testSiteSlug: string;
 	const testSiteName = `test-qa-${Date.now()}`;
-	const testGitRepo = 'https://github.com/10Legs/cantaconmigo';
+	const testGitRepo = 'https://github.com/coollabsio/coolify-examples';
 	const testGitBranch = 'feat/docker-deploy';
 	const testDomain = `test-qa-${Date.now()}.hermithost.local`;
 

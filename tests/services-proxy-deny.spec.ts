@@ -2,7 +2,8 @@ import { test, expect } from '@playwright/test';
 
 const BASE_URL = 'http://localhost:9080';
 const API_BASE = 'http://localhost:9080/api';
-const PASSWORD = '938xDTvcWnyk9TXbo9dlpbcvOuMsqUuwrIB+BPiNIMc=';
+// Set HERMITHOST_TEST_PASSWORD env var for local testing
+const PASSWORD = process.env.HERMITHOST_TEST_PASSWORD || 'changeme';
 const SITE_SLUG = 'iiofu1wpchxjnru4oaejdjp5';
 
 test.describe('Services Page & Docker Proxy Tests', () => {

@@ -27,3 +27,14 @@ data/*
 
 # Harness workspace (should live in molt-and-deploy-harness, not here)
 clients/
+
+# Session / credential artifacts
+cookies.txt
+*.cookies.txt
+
+# Traefik runtime configs (generated from templates — not committed)
+traefik/conf.d/routes.yml
+traefik/conf.d/site-*.yml
+
+# QA result snapshots
+test-dns-qa-results.json

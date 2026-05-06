@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
 PORT=5113
 API_PORT=3013
-export DOCKER_HOST=unix:///Users/rdemeritt/.docker/run/docker.sock
+export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.docker/run/docker.sock}"
 LOG_DIR="$ROOT/logs"
 
 # Colors

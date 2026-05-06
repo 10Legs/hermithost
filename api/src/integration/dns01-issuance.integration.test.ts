@@ -1,13 +1,13 @@
 /**
  * Phase 3 E2E integration test — DNS-01 cert issuance via internal CA.
  *
- * Verifies that an existing `.hh` site (cantaconmigo.hh) is served by Traefik
+ * Verifies that an existing `.hh` site (example.hh) is served by Traefik
  * with a TLS certificate issued via DNS-01 challenge against Technitium
  * (RFC2136) and signed by the step-ca HermitHost root.
  *
  * This test is observe-only: it does NOT modify state, .env, compose, or
  * Technitium config. It assumes the LAN-mode stack is already running
- * (bash scripts/start.sh -d in /Users/rdemeritt/projects/ai/hermithost).
+ * (bash scripts/start.sh -d in <your-clone-path>).
  *
  * Skipped automatically when:
  *   - Traefik container is not reachable on 127.0.0.1:443
@@ -23,7 +23,7 @@ import { describe, it, expect } from 'vitest';
 import * as tls from 'node:tls';
 import { execSync } from 'node:child_process';
 
-const TEST_DOMAIN = 'cantaconmigo.hh';
+const TEST_DOMAIN = 'example.hh';
 const TEST_HOST = '127.0.0.1';
 const TEST_PORT = 443;
 const SHOULD_RUN = process.env.HERMITHOST_DNS01_TEST === '1';
@@ -77,7 +77,7 @@ function tlsHandshake(host: string, port: number, servername: string) {
 }
 
 describe.runIf(SHOULD_RUN)('Phase 3 — DNS-01 issuance E2E', () => {
-  it('serves a TLS cert for cantaconmigo.hh with HermitHost CA chain', async () => {
+  it('serves a TLS cert for example.hh with HermitHost CA chain', async () => {
     const cert = await tlsHandshake(TEST_HOST, TEST_PORT, TEST_DOMAIN);
 
     // Leaf cert is for the requested domain.
@@ -101,7 +101,7 @@ describe.runIf(SHOULD_RUN)('Phase 3 — DNS-01 issuance E2E', () => {
     expect(validToMs - validFromMs).toBeLessThan(100 * 24 * 60 * 60 * 1000);
   }, 15000);
 
-  it('Traefik internal-ca resolver storage holds an issued cert for cantaconmigo.hh', () => {
+  it('Traefik internal-ca resolver storage holds an issued cert for example.hh', () => {
     // The Traefik ACME storage (internal-acme.json) is the source of truth for
     // issued certs. Inspect it via docker (read-only) and confirm the leaf
     // domain is present with non-empty cert + key material.

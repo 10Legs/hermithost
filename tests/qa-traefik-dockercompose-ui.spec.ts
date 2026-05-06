@@ -4,7 +4,7 @@ import * as path from 'path';
 
 const BASE_URL = 'http://localhost:9080';
 const TEST_DOMAIN = 'cantaconmigo-qa.localhost';
-const TEST_REPO = 'https://github.com/10Legs/cantaconmigo';
+const TEST_REPO = 'https://github.com/coollabsio/coolify-examples';
 const TEST_PAT = process.env.GITHUB_PAT_TEST_QA || '';
 const TRAEFIK_CONF_DIR = '/app/traefik-conf.d';
 

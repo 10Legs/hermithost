@@ -4,7 +4,8 @@ import http from 'http';
 import { execSync } from 'child_process';
 
 const BASE_URL = 'http://localhost:9080';
-const PASSWORD = '938xDTvcWnyk9TXbo9dlpbcvOuMsqUuwrIB+BPiNIMc=';
+// Set HERMITHOST_TEST_PASSWORD env var for local testing
+const PASSWORD = process.env.HERMITHOST_TEST_PASSWORD || 'changeme';
 
 const tests = [];
 let sessionCookie = null;

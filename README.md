@@ -383,7 +383,7 @@ hermithost/
 │   └── lib/
 │       └── types.ts              # Frontend types
 ├── traefik/                  # Traefik config
-│   └── conf.d/routes.yml     # Route rules (HermitHost stack + per-site dynamic routes)
+│   └── conf.d/routes.yml.example  # Route rules template — copy to routes.yml and set ADMIN_HOSTNAME
 ├── docker/                   # Container entrypoint scripts
 ├── scripts/                  # Setup and management scripts
 ├── docker-compose.yml        # Full stack
@@ -492,4 +492,4 @@ TRAEFIK_HTTPS_PORT=8444
 
 ## License
 
-Proprietary — part of Ron DeMeritt's personal project harness.
+Licensed under the MIT License. See [LICENSE](LICENSE) for details.

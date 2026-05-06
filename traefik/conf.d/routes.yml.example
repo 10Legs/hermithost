@@ -1,9 +1,12 @@
+# Generated from ADMIN_HOSTNAME env var — customize in .env
+# Copy to routes.yml and set ADMIN_HOSTNAME to your actual hostname.
+# routes.yml is gitignored (runtime file). This example is the template.
 http:
   routers:
     # ── HermitHost Admin UI — named domain (cert-eligible) ────────────────────
     # Host-based routers win over PathPrefix fallbacks via higher auto-priority.
     api-admin:
-      rule: "Host(`hermithost.shallowfordroad.com`) && PathPrefix(`/api`)"
+      rule: "Host(`${ADMIN_HOSTNAME:-hermithost.example.com}`) && PathPrefix(`/api`)"
       entryPoints:
         - http
         - https
@@ -11,7 +14,7 @@ http:
       service: api
 
     frontend-admin:
-      rule: "Host(`hermithost.shallowfordroad.com`)"
+      rule: "Host(`${ADMIN_HOSTNAME:-hermithost.example.com}`)"
       entryPoints:
         - http
         - https

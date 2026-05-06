@@ -137,9 +137,9 @@ describe('resolveRouteDomain — Phase C .hh routing fix', () => {
     const app = makeApp({
       build_pack: 'dockercompose',
       fqdn: 'https://placeholder.12.34.56.78.sslip.io',
-      docker_compose_domains: '{"web":{"domain":"https://cantaconmigo.hh"}}',
+      docker_compose_domains: '{"web":{"domain":"https://example.hh"}}',
     });
-    expect(resolveRouteDomain(app)).toBe('cantaconmigo.hh');
+    expect(resolveRouteDomain(app)).toBe('example.hh');
   });
 
   it('returns the fqdn host for a non-dockercompose app', () => {
@@ -193,8 +193,8 @@ describe('resolveRouteDomain — Phase C .hh routing fix', () => {
     const app = makeApp({
       build_pack: 'dockercompose',
       fqdn: 'https://v13-abc123.12.34.56.78.sslip.io',
-      docker_compose_domains: '{"web":{"domain":"cantaconmigo.hh"}}',
+      docker_compose_domains: '{"web":{"domain":"example.hh"}}',
     });
-    expect(resolveRouteDomain(app)).toBe('cantaconmigo.hh');
+    expect(resolveRouteDomain(app)).toBe('example.hh');
   });
 });
