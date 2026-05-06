@@ -257,8 +257,6 @@ services:
       - "--metrics.prometheus.addEntryPointsLabels=true"
       - "--metrics.prometheus.addRoutersLabels=true"
       - "--metrics.prometheus.addServicesLabels=true"
-      - "--api.dashboard=true"
-      - "--api.insecure=true"
       - "--ping=true"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/ping"]
