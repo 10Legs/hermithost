@@ -17,6 +17,10 @@ sed_i() {
   fi
 }
 
+# ── Configure git hooks ───────────────────────────────────────────────────────
+git -C "$ROOT" config core.hooksPath .githooks
+echo "[setup] Git hooks configured (.githooks/pre-commit)"
+
 # ── Create .env from template if it doesn't exist ────────────────────────────
 if [ ! -f "$ENV_FILE" ]; then
   cp "$TEMPLATE_FILE" "$ENV_FILE"
