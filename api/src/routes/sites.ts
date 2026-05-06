@@ -422,18 +422,15 @@ export async function provisionTraefikRoute(
       return { ok: false, reason: `no container for slug ${slug}` };
     }
     const containerName = containers[0].Names[0].replace(/^\//, '');
-    // Phase 4 wildcard adoption: when the resolver is internal-ca the
-    // certificate scope is the *.hh wildcard, so emit tls.domains pinned to
-    // the wildcard. Lego will request a single wildcard cert that serves
-    // every .hh router. Public-mode (letsencrypt) routes keep per-host
-    // issuance with no tls.domains block.
+    // Phase 4 wildcard routing: internal-ca routes must NOT declare certResolver or
+    // tls.domains — wildcard-internal.yml owns the single *.hh cert acquisition via
+    // DNS-01. Individual site routes emit bare `tls: {}` so Traefik matches the
+    // pre-fetched *.hh cert by SNI without triggering a new ACME order per host.
+    // Public-mode (letsencrypt) routes declare their resolver for per-host issuance.
     // See ADR-007 + security-review-dns01-phase4-wildcard-2026-05-03.md.
     const tlsBlock =
       resolver === 'internal-ca'
-        ? `      tls:
-        certResolver: ${resolver}
-        domains:
-          - main: "*.hh"`
+        ? `      tls: {}`
         : `      tls:
         certResolver: ${resolver}`;
     const yml = `http:
@@ -622,13 +619,10 @@ export async function provisionTraefikRouteForCompose(
     console.log(`[traefik-route-compose] ${containerName} is on coolify network`);
 
     // ── Step 6: Write Traefik yml (same structure as provisionTraefikRoute) ─────
-    // Phase 4 wildcard adoption: see provisionTraefikRoute() comment above.
+    // Phase 4 wildcard routing: see provisionTraefikRoute() comment above.
     const tlsBlock =
       resolver === 'internal-ca'
-        ? `      tls:
-        certResolver: ${resolver}
-        domains:
-          - main: "*.hh"`
+        ? `      tls: {}`
         : `      tls:
         certResolver: ${resolver}`;
     const yml = `http:

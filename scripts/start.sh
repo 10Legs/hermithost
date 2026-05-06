@@ -23,6 +23,36 @@ if [ -f "$ROOT/.env" ]; then
 fi
 
 PROFILE_ARG=""
+
+# ── Migrate stale per-site Traefik route files (Phase 4 fix) ──────────────────
+# Pre-Phase-4 route files emitted certresolver: internal-ca + domains per host,
+# causing every site router to independently trigger a DNS-01 wildcard challenge.
+# wildcard-internal.yml now owns the single *.hh cert acquisition. Site route
+# files must only carry `tls: {}` so Traefik matches the pre-fetched cert by SNI.
+#
+# This migration is only needed in LAN mode — internet mode uses letsencrypt and
+# never emits tls.domains on site routes.
+if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
+  TRAEFIK_CONF="${ROOT}/traefik/conf.d"
+  for f in "$TRAEFIK_CONF"/site-*.yml; do
+    [ -f "$f" ] || continue
+    if grep -q 'certResolver\|certresolver' "$f" 2>/dev/null; then
+      echo "[start] Migrating stale wildcard cert config in: $f"
+      # Replace the 3-line tls block (certResolver + domains + main) with bare tls: {}
+      # Pattern covers both Phase-4 and any earlier variant that set certResolver directly.
+      # sed -i '' is required on macOS (BSD sed); -i alone works on GNU sed.
+      sed -i '' \
+        -e '/certResolver:/d' \
+        -e '/certresolver:/d' \
+        -e '/domains:/d' \
+        -e '/- main:/d' \
+        -e 's/^      tls:$/      tls: {}/' \
+        "$f"
+      echo "[start]   Done: $f"
+    fi
+  done
+fi
+
 if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
   PROFILE_ARG="--profile internal"
   echo "[start] LAN mode detected — activating internal CA profile (step-ca)"
