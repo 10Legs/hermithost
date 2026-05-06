@@ -15,7 +15,11 @@ import { startStatsIngester } from './services/statsIngester';
 import { startLiveStats } from './services/liveStats';
 import { readNsHostname, readNsServerIp } from './routes/config';
 import { createTechnitiumClient } from './services/technitium';
-import { ensureNsGlueRecords, cleanBadNsRecords } from './routes/sites';
+import { ensureNsGlueRecords, cleanBadNsRecords, provisionTraefikRoute, provisionTraefikRouteForCompose } from './routes/sites';
+import { createCoolifyClient } from './services/coolify';
+import { resolveRouteDomain } from './services/mapper';
+import { existsSync } from 'fs';
+import * as path from 'path';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -110,6 +114,63 @@ app.listen(PORT, () => {
       console.warn('[dns-init] NS_SERVER_IP not set — skipping glue record provisioning');
     }
     await cleanBadNsRecords(client);
+  })();
+
+  // Non-blocking startup route sync — regenerates any missing Traefik route files
+  // for active Coolify applications. Route files are gitignored (traefik/conf.d/site-*.yml)
+  // and are lost on fresh clones or after sanitization. This ensures sites remain
+  // accessible without requiring a manual PATCH to each site.
+  (async () => {
+    try {
+      const coolifyClient = createCoolifyClient();
+      if (!coolifyClient) {
+        console.warn('[startup-sync] Coolify client not available — skipping route sync');
+        return;
+      }
+      const confDir = process.env.TRAEFIK_CONF_DIR ?? '/app/traefik-conf.d';
+      const { readNetworkMode } = await import('./routes/config');
+      const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
+
+      let applications: Awaited<ReturnType<typeof coolifyClient.listApplications>>;
+      try {
+        applications = await coolifyClient.listApplications();
+      } catch (listErr) {
+        console.warn('[startup-sync] Failed to list applications from Coolify:', (listErr as Error).message);
+        return;
+      }
+
+      for (const app of applications) {
+        const slug = app.uuid;
+        const routeFile = path.join(confDir, `site-${slug}.yml`);
+        if (existsSync(routeFile)) continue;
+
+        const domain = resolveRouteDomain(app);
+        if (!domain) {
+          console.warn(`[startup-sync] No domain for app ${slug} — skipping`);
+          continue;
+        }
+
+        try {
+          let result: { ok: boolean; reason?: string };
+          if (app.build_pack === 'dockercompose') {
+            const freshApp = await coolifyClient.getApplication(slug).catch(() => app);
+            result = await provisionTraefikRouteForCompose(createCoolifyClient()!, freshApp, domain, resolver);
+          } else {
+            const port = (app as any).ports_exposes ?? 3000;
+            result = await provisionTraefikRoute(slug, domain, port, resolver);
+          }
+          if (result.ok) {
+            console.log(`[startup-sync] regenerated missing route for ${domain}`);
+          } else {
+            console.warn(`[startup-sync] failed to regenerate route for ${domain}: ${result.reason}`);
+          }
+        } catch (routeErr) {
+          console.warn(`[startup-sync] error regenerating route for ${slug}:`, (routeErr as Error).message);
+        }
+      }
+    } catch (err) {
+      console.warn('[startup-sync] Unexpected error during route sync:', (err as Error).message);
+    }
   })();
 });
 
