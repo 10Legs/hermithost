@@ -422,6 +422,20 @@ export async function provisionTraefikRoute(
       return { ok: false, reason: `no container for slug ${slug}` };
     }
     const containerName = containers[0].Names[0].replace(/^\//, '');
+    // Phase 4 wildcard adoption: when the resolver is internal-ca the
+    // certificate scope is the *.hh wildcard, so emit tls.domains pinned to
+    // the wildcard. Lego will request a single wildcard cert that serves
+    // every .hh router. Public-mode (letsencrypt) routes keep per-host
+    // issuance with no tls.domains block.
+    // See ADR-007 + security-review-dns01-phase4-wildcard-2026-05-03.md.
+    const tlsBlock =
+      resolver === 'internal-ca'
+        ? `      tls:
+        certResolver: ${resolver}
+        domains:
+          - main: "*.hh"`
+        : `      tls:
+        certResolver: ${resolver}`;
     const yml = `http:
   routers:
     site-${slug}-http:
@@ -436,8 +450,7 @@ export async function provisionTraefikRoute(
       rule: "Host(\`${domain}\`)"
       entryPoints:
         - https
-      tls:
-        certResolver: ${resolver}
+${tlsBlock}
       service: site-${slug}
 
   services:
@@ -447,7 +460,7 @@ export async function provisionTraefikRoute(
           - url: "http://${containerName}:${port}"
 `;
     writeFileSync(filePath, yml, 'utf8');
-    console.log(`[traefik-route] Route written for ${domain} → ${containerName}:${port}`);
+    console.log(`[traefik-route] Route written for ${domain} → ${containerName}:${port} (resolver=${resolver})`);
     return { ok: true };
   } catch (err) {
     const reason = (err as Error).message;
@@ -609,6 +622,15 @@ export async function provisionTraefikRouteForCompose(
     console.log(`[traefik-route-compose] ${containerName} is on coolify network`);
 
     // ── Step 6: Write Traefik yml (same structure as provisionTraefikRoute) ─────
+    // Phase 4 wildcard adoption: see provisionTraefikRoute() comment above.
+    const tlsBlock =
+      resolver === 'internal-ca'
+        ? `      tls:
+        certResolver: ${resolver}
+        domains:
+          - main: "*.hh"`
+        : `      tls:
+        certResolver: ${resolver}`;
     const yml = `http:
   routers:
     site-${slug}-http:
@@ -623,8 +645,7 @@ export async function provisionTraefikRouteForCompose(
       rule: "Host(\`${domain}\`)"
       entryPoints:
         - https
-      tls:
-        certResolver: ${resolver}
+${tlsBlock}
       service: site-${slug}
 
   services:
@@ -634,7 +655,7 @@ export async function provisionTraefikRouteForCompose(
           - url: "http://${containerName}:${port}"
 `;
     writeFileSync(filePath, yml, 'utf8');
-    console.log(`[traefik-route-compose] Route written for ${domain} → ${containerName}:${port}`);
+    console.log(`[traefik-route-compose] Route written for ${domain} → ${containerName}:${port} (resolver=${resolver})`);
     return { ok: true };
   } catch (err) {
     const reason = (err as Error).message;

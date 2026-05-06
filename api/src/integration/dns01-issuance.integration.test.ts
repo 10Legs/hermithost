@@ -134,6 +134,39 @@ describe.runIf(SHOULD_RUN)('Phase 3 — DNS-01 issuance E2E', () => {
     expect(match?.key, 'private key payload non-empty').toBeTruthy();
   }, 15000);
 
+  it('Phase 4 wildcard: leaf cert SAN includes *.hh (single wildcard for all .hh sites)', async () => {
+    // After Phase 4, the served leaf for any .hh site should be a wildcard
+    // cert with SAN "*.hh" — one cert covers every site. This complements
+    // the per-domain SAN check above; both must hold (CN may be the requested
+    // hostname while SAN list contains the wildcard).
+    const cert = await tlsHandshake(TEST_HOST, TEST_PORT, TEST_DOMAIN);
+    expect(cert.sans ?? '').toMatch(/DNS:\*\.hh\b/);
+  }, 15000);
+
+  it('Phase 4 wildcard: internal-acme.json stores a cert whose domain.main is "*.hh"', () => {
+    // The Traefik ACME storage should now hold a wildcard entry. Old
+    // per-host entries may remain until they expire (documented behavior;
+    // no migration required), but at least one entry must be the wildcard.
+    let raw = '';
+    try {
+      raw = execSync(
+        'docker exec hermithost-traefik-1 sh -c "cat /acme/internal-acme.json 2>/dev/null"',
+        { encoding: 'utf8', timeout: 10000 }
+      );
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    const data = JSON.parse(raw) as {
+      'internal-ca'?: {
+        Certificates?: Array<{ domain?: { main?: string; sans?: string[] } }>;
+      };
+    };
+    const certs = data['internal-ca']?.Certificates ?? [];
+    const wildcard = certs.find((c) => c.domain?.main === '*.hh');
+    expect(wildcard, 'expected stored wildcard cert with domain.main = *.hh').toBeDefined();
+  }, 15000);
+
   it('Technitium hh zone has no leftover _acme-challenge TXT records (cleanup)', async () => {
     // Read token from coolify-api-token volume (read-only inspection).
     let token = '';
