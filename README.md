@@ -1,501 +1,410 @@
 # HermitHost
 
-A self-hosted web platform dashboard for managing deployed sites, DNS records, and deployments. HermitHost wraps Coolify (deployments), Technitium or Cloudflare (DNS), and Traefik (reverse proxy + SSL) into a single unified dashboard with zero-config setup.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docker Required](https://img.shields.io/badge/Docker-v20.10+-blue)](https://www.docker.com/)
+[![Node.js](https://img.shields.io/badge/Node.js-v18+-green)](https://nodejs.org/)
 
-**Status Dashboard** • **DNS Management** • **Deploy History** • **Health Monitoring** • **Services Pane** • **Backup & Restore** • **Auto SSL**
-
----
+**A self-hosted platform dashboard for deploying web apps with automatic DNS and SSL — no cloud required.**
 
 ## What is HermitHost?
 
-HermitHost is a lightweight platform dashboard that gives you full visibility and control over all your deployed web applications in one place. Coolify, Technitium, and Traefik are infrastructure — HermitHost is the only interface you interact with.
+HermitHost is a unified control panel that wraps Coolify (deployment engine), Technitium or Cloudflare (DNS), and Traefik (reverse proxy + SSL) into a single, intuitive dashboard. Deploy web applications from Git repositories, manage DNS records, monitor application health, and issue HTTPS certificates — all without complex configuration or cloud dependencies.
 
-- **Monitor everything:** HTTP status, SSL certificate health, DNS resolution — live probes, 60s cache
-- **Manage DNS:** Use Technitium (internal/LAN) or Cloudflare (public authoritative DNS) — switchable from Settings
-- **Track deployments:** See deployment history and stream logs per site
-- **Services pane:** Real-time view of all Docker containers — stack services and deployed sites — with start/stop/restart controls
-- **Backup & restore:** Export/import your full hermithost configuration
-- **Auto SSL:** Traefik + Let's Encrypt — HTTPS with no manual certificate management
-- **One-command setup:** `bash scripts/setup.sh` prompts for two values and handles the rest
+HermitHost operates in two modes: **LAN mode** runs everything on your local network with a private `.hh` TLD and internal CA (step-ca), while **Internet mode** uses public domains and Let's Encrypt for HTTPS. Both modes automatically handle certificate renewal and DNS provisioning. The dashboard is the only interface you interact with — the underlying infrastructure (Coolify, Technitium, Traefik) remains abstracted and automatically managed.
 
----
+Key capabilities include deploying sites from any Git repository, creating and managing DNS records, monitoring application HTTP status and SSL certificate expiry in real time, managing Docker container lifecycles, streaming deployment logs, and exporting/importing full system backups. Whether you're running a home lab, private cloud, or small-scale production environment, HermitHost simplifies self-hosting without sacrificing control.
 
-## Architecture
+## Architecture Overview
 
-### Request Flow
+HermitHost coordinates three core services to provide its full-stack functionality. Traefik acts as the reverse proxy and SSL termination point, receiving requests from browsers and routing them to the HermitHost dashboard, API, or deployed applications. The HermitHost API (Express.js) serves as the orchestration layer, communicating with Coolify to manage application deployments, Technitium/Cloudflare to manage DNS records, Docker to monitor container state, and step-ca (in LAN mode) to issue certificates. The frontend (SvelteKit) provides the dashboard interface.
 
-```
-Browser
-  ├─ LAN: http://<server-ip>:9080  (admin entrypoint — no DNS required)
-  └─ Named domain: https://hermithost.<your-domain>
-         ↓
-    Traefik :9080 (admin) / :80 / :443
-      ├─ /api/* → Express API :3001
-      └─ /*     → SvelteKit Frontend :3000
-```
+### Service Topology
 
-### API Layer
-
-```
-Express API
-  ├─ /api/sites        — Site CRUD, health probes, deploy triggers
-  │     └─ Coolify API client (GET/POST/PATCH/DELETE /v1/applications)
-  ├─ /api/services     — Docker container monitoring (stack + deployed sites)
-  │     └─ Docker socket (/var/run/docker.sock)
-  ├─ /api/dns          — DNS record management
-  │     └─ DnsProvider (abstraction)
-  │           ├─ TechnitiumProvider → Technitium REST API :5380
-  │           └─ CloudflareProvider → Cloudflare API v4
-  ├─ /api/config       — Settings read/write
-  ├─ /api/backup       — Export / import / validate
-  ├─ /api/stats        — Live request stats (ingested from Traefik access logs)
-  └─ /api/health       — Stack health check
+```mermaid
+graph TD
+  Browser["User Browser"]
+  Traefik["Traefik (Reverse Proxy)"]
+  API["HermitHost API"]
+  Frontend["HermitHost Dashboard"]
+  Coolify["Coolify (Deployment Engine)"]
+  Docker["Docker Daemon"]
+  Technitium["Technitium (DNS)"]
+  StepCA["step-ca (LAN Internal CA)"]
+  LetsEncrypt["Let's Encrypt (Internet Mode)"]
+  
+  Browser -->|HTTPS| Traefik
+  Traefik -->|Route /api/*| API
+  Traefik -->|Route /*| Frontend
+  Traefik -->|Verify DNS| Technitium
+  
+  API -->|Deploy/Status| Coolify
+  API -->|Create Records| Technitium
+  API -->|Query Container State| Docker
+  Coolify -->|Build/Run| Docker
+  
+  Traefik -->|DNS-01 Challenge| Technitium
+  Traefik -->|ACME (LAN)| StepCA
+  Traefik -->|ACME (Internet)| LetsEncrypt
 ```
 
-### Services
+### LAN Mode SSL Certificate Issuance
 
-| Service | Tech | Purpose |
-|---------|------|---------|
-| **Frontend** | SvelteKit + TypeScript | Dashboard UI |
-| **API** | Express.js + TypeScript | Aggregation layer — Coolify, DNS, Docker, health probes |
-| **Traefik** | Traefik v3 | Reverse proxy, Let's Encrypt SSL, admin entrypoint |
-| **Coolify** | Coolify (Docker) | Deployment engine — not user-facing; HermitHost is the interface |
-| **DNS Provider** | Technitium DNS or Cloudflare API | DNS management (switchable) |
-| **PostgreSQL** | Postgres 15 | Coolify database |
-| **Redis** | Redis | Coolify queue and cache |
-
-### Design Principles
-
-- **HermitHost is the authority.** Coolify is a deployment engine accessed only via API — the Coolify UI is an escape hatch, not part of the normal workflow.
-- **Docker socket for container reality.** The Services pane reads directly from the Docker API to show actual container state — not what Coolify thinks is running.
-- **Infra is invisible.** One-shot init containers (`coolify-server-setup`, `coolify-keys-init`) and infrastructure containers (`coolify-proxy`, `coolify-sentinel`) are automatically filtered from the Services pane once they exit.
-
----
-
-## CI
-
-GitHub Actions runs CI on every pull request to `main`:
-
-```
-Pull Request opened
-  → CI workflow (runs on self-hosted runner)
-       ├─ API: TypeScript typecheck + build
-       ├─ Frontend: TypeScript typecheck + svelte-check + build
-       └─ Docker: both images build cleanly
-            ↓ (all must pass before merge)
+```mermaid
+sequenceDiagram
+  participant Traefik
+  participant stepCA as step-ca
+  participant Lego as Traefik Lego<br/>ACME Client
+  participant Technitium
+  
+  Traefik->>stepCA: Request DNS-01 challenge for myapp.hh
+  stepCA-->>Traefik: Challenge token
+  Traefik->>Lego: Issue cert for myapp.hh
+  Lego->>Technitium: RFC2136 + TSIG: Write TXT record<br/>_acme-challenge.myapp.hh
+  Technitium-->>Lego: Record created
+  Lego->>stepCA: Validate DNS challenge
+  stepCA->>Technitium: Query TXT record
+  Technitium-->>stepCA: Token verified
+  stepCA-->>Traefik: Certificate issued
+  Traefik->>Traefik: Store cert in acme volume
 ```
 
-Deployment is left to the operator — run `bash scripts/start.sh -d --build` on the host after pulling latest code.
+### Site Deployment Flow
 
-### Setup
-
-```bash
-# 1. Clone the repo to the live stack directory
-git clone https://github.com/your-org/hermithost.git /path/to/hermithost
-cd /path/to/hermithost
-
-# 2. Create .env from template and fill in secrets
-cp .env.template .env
-# Edit .env — fill in ACME_EMAIL and NS_HOSTNAME at minimum
-# All other secrets are auto-generated by setup.sh
-
-bash scripts/setup.sh
-
-# 3. Start the stack
-bash scripts/start.sh -d
+```mermaid
+sequenceDiagram
+  participant User
+  participant Dashboard as HermitHost<br/>Dashboard
+  participant API
+  participant Coolify
+  participant Docker
+  participant Traefik
+  
+  User->>Dashboard: Create new site (repo URL + domain)
+  Dashboard->>API: POST /api/sites
+  API->>Coolify: Create application
+  Coolify-->>API: Application ID
+  API->>Coolify: Trigger build
+  Coolify->>Docker: Build image + run container
+  Docker-->>Coolify: Container running
+  API->>API: Write Traefik route config
+  Traefik->>Traefik: Pick up route from dynamic config
+  Traefik->>Traefik: Request SSL certificate
+  Traefik-->>Traefik: Cert issued + stored
+  API-->>Dashboard: Deployment complete
+  User->>Traefik: https://myapp.hh (or public domain)
+  Traefik-->>User: Site live with HTTPS
 ```
 
----
+## Features
+
+- **One-command setup** — `bash scripts/setup.sh` handles all initialization interactively
+- **Two operating modes** — LAN mode (`.hh` TLD, internal CA, DNS-01) and Internet mode (public domains, Let's Encrypt, HTTP-01)
+- **Automatic SSL certificates** — ACME-based issuance and renewal; step-ca for LAN, Let's Encrypt for Internet
+- **Git-based deployments** — Deploy applications from any Git repository via the Coolify integration
+- **Unified DNS management** — Bundled Technitium for internal networks or switchable Cloudflare for public domains
+- **Real-time health monitoring** — HTTP status, SSL expiry dates, and DNS resolution checks cached every 60 seconds
+- **Deployment log streaming** — Watch builds and deployments in real time from the dashboard
+- **Docker container management** — Start, stop, restart, and inspect all running containers
+- **Backup and restore** — Export full system configuration as JSON, import to restore or migrate
+- **TSIG-authenticated dynamic DNS** — Secure DNS record provisioning via RFC2136
+- **Docker socket proxy** — Least-privilege container access with an unprivileged proxy daemon
+- **Automatic state checkpoint** — Container state captured on shutdown; containers restored to prior state on restart
 
 ## Prerequisites
 
-- **Docker** (v20.10+) and **Docker Compose** (v2.0+)
-- **Node.js** (v18+) — only for native development, not required for Docker
-- **Cloudflare account** (optional, only if using Cloudflare for public DNS)
-
----
+- **Docker** v20.10 or later and **Docker Compose** v2.20 or later
+- **Operating System:** Linux (recommended), macOS with Docker Desktop, or WSL2
+- **Memory:** 4GB minimum (8GB recommended)
+- **Disk space:** 10GB minimum
+- **Ports:** 80/443 (LAN mode) or 8080/8443 (Internet mode), 53 or 53053 (DNS), 8000 (Coolify)
+- **Public IP or hostname** (Internet mode only — required for Let's Encrypt validation)
 
 ## Quick Start
 
-### 1. Clone and setup
+Clone the repository and run the interactive setup:
 
 ```bash
 git clone https://github.com/your-org/hermithost.git
 cd hermithost
-
 bash scripts/setup.sh
 ```
 
-`setup.sh` handles first-time git hook activation (`git config core.hooksPath .githooks`) in addition to secrets and config. If you skip `setup.sh`, activate the hooks manually:
+The setup script will ask you:
+1. **Operating mode:** LAN (internal `.hh` domains) or Internet (public domains)
+2. **ACME email:** Your email for SSL certificate notifications (and Coolify admin login)
+3. **Server hostname:** Your server's IP address or public hostname (Internet mode only)
+
+Then start the stack:
 
 ```bash
-git config core.hooksPath .githooks
+bash scripts/start.sh
 ```
 
-`setup.sh` will:
-- Generate all Coolify internal secrets automatically
-- Prompt for your **ACME email** (Let's Encrypt SSL notifications) — also used as the Coolify admin email
-- Prompt for your **NS_HOSTNAME** (public IP or hostname of this server)
-- Auto-generate a strong Coolify admin password and print it once — save it
+Access the dashboard:
+- **Coolify UI (deployment interface):** http://localhost:8000
+- **HermitHost dashboard (main interface):** http://localhost:3000 or https://hermithost.hh (LAN mode) / https://hermithost.yourdomain.com (Internet mode)
 
-### 2. Start the stack
+## Installation — Detailed
+
+### Step 1: Clone and Configure
 
 ```bash
-bash scripts/start.sh -d
+git clone https://github.com/your-org/hermithost.git
+cd hermithost
+cp .env.template .env
 ```
 
-`start.sh` ensures the external `coolify` Docker network exists before starting the stack (required for inter-container communication).
+Edit `.env` and set these operator-configurable variables:
 
-### 3. Open the dashboard
+```bash
+# Required
+HERMITHOST_PORT_MODE=lan              # or "internet"
+ACME_EMAIL=your-email@example.com      # SSL notifications + Coolify admin email
+NS_HOSTNAME=192.168.1.100              # Your server IP (LAN) or hostname (Internet)
 
-**LAN (no DNS required):**
+# Optional (can be set in dashboard later)
+DNS_PROVIDER=technitium                # or "cloudflare"
+COOLIFY_PORT=8000
+DNS_PORT=53053                         # 53 if allowed; default avoids conflicts
+STEP_CA_PASSWORD=your-secure-password  # LAN mode only
 ```
-http://<server-ip>:9080
-```
 
-**Named domain (requires DNS + TLS):**
-```
-https://hermithost.<your-domain>
-```
-
-Coolify UI (escape hatch only): `http://localhost:8000`
-Technitium DNS UI (if using Technitium): `http://localhost:5380`
-
----
-
-## Setup Script Details
+Or run the interactive setup:
 
 ```bash
 bash scripts/setup.sh
 ```
 
-| Variable | How it's set |
-|----------|-------------|
-| `COOLIFY_ADMIN_EMAIL` | Defaults to `ACME_EMAIL` value (real email required by Coolify) |
-| `COOLIFY_ADMIN_PASSWORD` | Auto-generated strong password — printed to stdout during setup |
-| `COOLIFY_APP_ID/KEY` | Auto-generated (`openssl rand`) |
-| `COOLIFY_DB_PASSWORD` | Auto-generated |
-| `COOLIFY_REDIS_PASSWORD` | Auto-generated |
-| `COOLIFY_PUSHER_*` | Auto-generated |
-| `ACME_EMAIL` | **Prompted** — required for SSL cert issuance |
-| `NS_HOSTNAME` | **Prompted** — your server's public IP or hostname |
-| `DNS_PROVIDER` | Default: `technitium` — optionally switch to `cloudflare` after setup |
-| `CLOUDFLARE_TOKEN` | Optional — set via Settings if using Cloudflare provider |
+### Step 2: Run Setup Script
 
-Safe to re-run — only fills empty values, never overwrites existing ones.
+```bash
+bash scripts/setup.sh
+```
 
----
+This script will:
+- Generate all required secrets (Coolify API keys, database passwords, TSIG keys)
+- Provision Coolify administrator credentials and print them once
+- Configure the Technitium TSIG key for secure DNS updates
+- Set up Traefik dynamic config directory
+- Activate Git pre-commit hooks (PII blocking)
+- In LAN mode: initialize step-ca and root CA certificate
+
+The script is idempotent — safe to run multiple times; it only fills empty values and never overwrites existing configuration.
+
+### Step 3: Start the Stack
+
+```bash
+bash scripts/start.sh
+```
+
+In LAN mode, this starts step-ca and step-ca-init. In Internet mode, these services are skipped. Traefik will begin issuing certificates immediately.
+
+### Step 4: First Login
+
+- **Coolify UI:** http://localhost:8000
+  - Email: the `ACME_EMAIL` you provided
+  - Password: printed at the end of setup.sh (save this somewhere secure)
+- **HermitHost Dashboard:** Access via the Traefik-proxied address
+  - LAN mode: https://hermithost.hh (after configuring your DNS resolver)
+  - Internet mode: https://hermithost.yourdomain.com
+
+## Operating Modes
+
+### LAN Mode
+
+LAN mode runs HermitHost entirely within your local network using a private `.hh` top-level domain. All sites are only accessible from devices on your LAN; no public internet access is required.
+
+**How it works:**
+- **DNS:** Technitium runs as your local DNS resolver on port 53 (or DNS_PORT). All `.hh` queries resolve to your HermitHost server.
+- **SSL certificates:** step-ca acts as an internal Certificate Authority. Traefik requests certificates for `*.hh` domains via ACME DNS-01 challenges. The challenge is written to Technitium via RFC2136 (TSIG-authenticated dynamic DNS), validated, and the certificate is issued by step-ca.
+- **Setup:** Point your devices' DNS resolver to your HermitHost server's IP and port 53 (or DNS_PORT). Install the step-ca root CA certificate in your browser's or OS trust store (available in Settings → SSL).
+
+**Example DNS flow:**
+```
+laptop (192.168.1.50)
+  → queries hermithost.hh
+  → resolver configured to Technitium (192.168.1.100:53)
+  → Technitium returns hermithost.hh = 192.168.1.100
+  → laptop connects to https://hermithost.hh
+```
+
+### Internet Mode
+
+Internet mode runs HermitHost with public domain names, making it accessible over the internet. Traefik obtains certificates from Let's Encrypt.
+
+**How it works:**
+- **Domains:** You own a public domain (e.g., `example.com`). Point your domain's DNS A record to your HermitHost server's public IP address.
+- **SSL certificates:** Traefik requests certificates from Let's Encrypt using HTTP-01 validation. Let's Encrypt verifies you control the domain by requesting `http://yourdomain.com/.well-known/acme-challenge/token`. Traefik listens on port 8080 (configurable) to serve this challenge.
+- **Access:** Sites are live at https://myapp.yourdomain.com once their DNS A record is configured and the certificate is issued.
+
+**Ports:**
+- Traefik HTTP: port 8080 (configurable TRAEFIK_HTTP_PORT)
+- Traefik HTTPS: port 8443 (configurable TRAEFIK_HTTPS_PORT)
+
+These avoid conflicts with system services on port 80/443.
+
+## Deploying Your First Site
+
+1. **Open the HermitHost dashboard** — navigate to http://localhost:3000 or your configured HermitHost domain
+2. **Click "Add Site"** — enter your Git repository URL and desired domain name
+3. **HermitHost provisions everything:**
+   - DNS A record (pointing to your server)
+   - Traefik route (proxies requests to the deployed app)
+   - Coolify application (clones repo, builds, deploys)
+4. **Monitor deployment logs** — view real-time build output in the site detail page
+5. **Access your site** — once deployment completes, visit https://yourdomain.hh (LAN) or https://yourdomain.com (Internet)
+
+## DNS Management
+
+The dashboard provides full DNS zone and record management. The default DNS provider is **Technitium** (bundled, no external dependencies). You can switch to **Cloudflare** anytime via Settings.
+
+### Using Technitium (Default)
+
+Technitium is deployed automatically. Access the Technitium UI at http://localhost:5380 (internal only). No additional setup is required.
+
+### Using Cloudflare
+
+To use Cloudflare as your DNS provider:
+
+1. **Create a Cloudflare API token:**
+   - Go to https://dash.cloudflare.com/profile/api-tokens
+   - Create a custom token with permissions: **Zone:Edit** and **Zone:Create** (account-level scopes)
+   - Note: The "Edit zone DNS" template is insufficient — you must use a custom token with both permissions
+
+2. **Configure in HermitHost:**
+   - Open the dashboard → Settings → DNS Provider
+   - Select "Cloudflare"
+   - Paste your API token
+   - Click "Save" — the system will verify connectivity
+
+3. **Use your domain's Cloudflare nameservers** — ensure your registrar points your domain to Cloudflare
+
+## SSL Certificate Management
+
+HermitHost automates SSL certificate issuance and renewal. Certificates are stored in the `traefik-acme` volume and never require manual management.
+
+### LAN Mode Certificates
+
+- **Issuer:** step-ca (internal CA)
+- **Validity:** 30 days
+- **Renewal:** Automatic (Traefik renews at 14 days remaining)
+- **Trust:** Must install the step-ca root CA certificate in your browser/OS
+  - Download from: Settings → SSL → Download Root CA
+  - Import into your browser's certificate store
+
+### Internet Mode Certificates
+
+- **Issuer:** Let's Encrypt
+- **Validity:** 90 days
+- **Renewal:** Automatic (Traefik renews at 30 days remaining)
+- **No installation needed:** Let's Encrypt root CAs are trusted by all browsers
+
+### Viewing Active Certificates
+
+View all active certificates in the dashboard: Settings → SSL
+
+To inspect certificates via Docker:
+
+```bash
+docker exec traefik cat /acme/acme.json
+```
+
+## Operational Scripts
+
+| Script | Description |
+|--------|-------------|
+| `bash scripts/setup.sh` | First-time initialization: generates secrets, configures services, provisions Coolify credentials |
+| `bash scripts/start.sh` | Start the HermitHost stack (applies correct mode automatically) |
+| `bash scripts/stop.sh` | Gracefully stop all deployed site containers and HermitHost services; checkpoints container state |
+| `bash scripts/restart.sh` | Restart the entire stack |
+| `bash scripts/status.sh` | Display service status and health check results |
+| `bash scripts/rotate-tsig.sh` | Rotate the TSIG secret for secure DNS updates (requires Traefik restart after) |
 
 ## Environment Variables
 
-Full reference for `.env`:
+Operator-configurable variables in `.env`. For the complete list, see `.env.template`.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `COOLIFY_ADMIN_EMAIL` | Coolify admin login email | Defaults to `ACME_EMAIL` value |
-| `COOLIFY_ADMIN_PASSWORD` | Coolify admin login password | Auto-generated strong password, printed at setup |
+| `HERMITHOST_PORT_MODE` | Operating mode: `lan` or `internet` | *(prompted)* |
+| `ACME_EMAIL` | Email for SSL cert notifications (also Coolify admin email) | *(prompted)* |
+| `NS_HOSTNAME` | Server IP (LAN) or hostname (Internet) | *(prompted)* |
+| `DNS_PROVIDER` | Active DNS provider: `technitium` or `cloudflare` | `technitium` |
+| `CLOUDFLARE_TOKEN` | Cloudflare API token (also settable in Settings UI) | *(empty)* |
 | `COOLIFY_PORT` | Coolify UI port | `8000` |
-| `ACME_EMAIL` | Let's Encrypt contact email | *(prompted)* |
-| `NS_HOSTNAME` | Server public IP or hostname | *(prompted)* |
-| `TRAEFIK_HTTP_PORT` | Traefik HTTP port | `8080` |
-| `TRAEFIK_HTTPS_PORT` | Traefik HTTPS port | `8443` |
-| `TECHNITIUM_URL` | Technitium API base URL | `http://technitium:5380` |
-| `DNS_PORT` | Host port for DNS queries. Use `53` on dedicated servers; default avoids macOS/Linux conflict | `5353` |
-| `DNS_PROVIDER` | Active DNS provider | `technitium` |
-| `CLOUDFLARE_TOKEN` | Cloudflare API token (also settable via Settings UI) | *(empty)* |
-| `COOLIFY_API_TOKEN` | Auto-provisioned at startup | *(auto)* |
-| `TECHNITIUM_TOKEN` | Auto-provisioned at startup | *(auto)* |
+| `DNS_PORT` | Host port for DNS (use 53 if allowed; avoid conflicts) | `53053` |
+| `TRAEFIK_HTTP_PORT` | Traefik HTTP port (Internet mode) | `8080` |
+| `TRAEFIK_HTTPS_PORT` | Traefik HTTPS port (Internet mode) | `8443` |
+| `STEP_CA_PASSWORD` | step-ca (LAN mode) password | *(auto-generated)* |
+| `TECHNITIUM_URL` | Technitium API endpoint | `http://technitium:5380` |
 
----
+## Architecture Reference
 
-## Features
+### Services
 
-### Site Directory
-List all deployed sites with live status indicators — HTTP reachability, SSL validity, DNS resolution.
+| Service | Image/Tech | Purpose | Ports |
+|---------|-----------|---------|-------|
+| **HermitHost API** | Node.js/Express | Orchestration layer; Coolify/DNS/Docker abstraction | 3001 |
+| **HermitHost Dashboard** | Node.js/SvelteKit | Web UI | 3000 |
+| **Traefik** | traefik:v3 | Reverse proxy, ACME client, SSL termination | 80, 443, 8000, 8080, 8443 |
+| **Coolify** | coolify/coolify | Application deployment engine | 8000 |
+| **Technitium DNS** | technitium/technitium-core | DNS resolver and authoritative server | 53 (or DNS_PORT) |
+| **step-ca** | smallstep/step-ca | Internal CA (LAN mode only) | 9000 |
+| **PostgreSQL** | postgres:15 | Coolify database | 5432 |
+| **Redis** | redis:7 | Coolify cache and queue | 6379 |
 
-### Health Probes
-Real-time per-site probes run in parallel, cached 60 seconds:
-- **HTTP** — response code + latency
-- **SSL** — cert valid, expiry date, issuer
-- **DNS** — A-record resolves
+### Volumes
 
-### Deployment Management
-Trigger deploys, view deployment history, stream live deployment logs — all via the Coolify integration.
+| Volume | Purpose | Data |
+|--------|---------|------|
+| `traefik-acme` | ACME certificates and metadata | JSON (acme.json) |
+| `coolify-db` | PostgreSQL data | Database tables |
+| `coolify-redis` | Redis persistence | Cache/queue data |
+| `technitium-config` | DNS zones and records | JSON config |
+| `step-ca-config` | step-ca PKI data (LAN mode) | Certificates, keys |
 
-### Services Pane
-Real-time view of every Docker container on the host, sourced directly from the Docker socket:
+### Networks
 
-- **Stack Services** — hermithost infrastructure containers grouped by function (HermitHost, Coolify, Infrastructure). Exited one-shot init containers are hidden automatically.
-- **Deployed Sites** — all user-deployed application containers grouped by site. Containers belonging to sites that no longer exist in Coolify are flagged as abandoned and can be force-deleted.
-- **Actions** — start, stop, and restart any container directly from the UI
-- **Shutdown** — gracefully stop all deployed site containers with a checkpoint, then stop the hermithost stack
+**hermithost-net:** Bridges HermitHost API, dashboard, and infrastructure services.
 
-### DNS Management
-Create, update, and delete DNS records via Technitium (internal/LAN) or Cloudflare (public authoritative DNS). Switch providers anytime from Settings → DNS Provider.
+**coolify (external network):** Shared with all deployed applications; allows Coolify containers to communicate.
 
-### DNS Provider Setup
+## Backup and Restore
 
-#### Technitium (Default)
-- No setup required — Technitium is deployed automatically
-- Access UI at `http://localhost:5380` (internal only)
-- Best for: home labs, internal networks, ISPs that don't block port 53
+### Dashboard Backup
 
-#### Cloudflare (Public DNS)
-- Use when your ISP blocks inbound port 53 (common with AT&T and others)
-- **One-time setup:**
-  1. Create a Cloudflare API token at https://dash.cloudflare.com/profile/api-tokens
-  2. Token must have permissions: **Zone:Edit** + **Zone:Create** (account-level)
-  3. *(Note: "Edit zone DNS" template is insufficient — create a custom token)*
-  4. Open HermitHost Settings → DNS Provider
-  5. Select "Cloudflare"
-  6. Paste your API token
-  7. Save — system will verify connectivity
-- Best for: public-facing sites, when ISP blocks port 53, production deployments
+1. Open the dashboard → Settings → Backup
+2. Click "Export" to download a JSON archive containing all sites, DNS records, and configuration
+3. Save this file in a secure location
 
-### Backup & Restore
-Export a full snapshot of your hermithost configuration (sites, DNS records, settings) to a JSON file. Import to restore or migrate to a new server.
-
-```
-Settings → Backup → Export
-Settings → Backup → Import
-```
-
-### Settings
-Manage hermithost configuration:
-- NS hostname, Traefik ports, admin credentials
-- **DNS Provider** — switch between Technitium and Cloudflare
-- **Cloudflare Token** — set/update your API token
-- Backup & restore
-
-All from the UI without editing `.env` directly.
-
-### Auto SSL
-Traefik + Let's Encrypt automatically issues and renews SSL certificates for all sites. Requires a valid `ACME_EMAIL` and publicly reachable `NS_HOSTNAME`.
-
----
-
-## Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `bash scripts/setup.sh` | First-time config — generates secrets, prompts for email + hostname |
-| `bash scripts/start.sh -d` | Start the full stack (auto-creates `coolify` network if needed) |
-| `bash scripts/stop.sh` | Stop all containers |
-| `bash scripts/restart.sh` | Restart the stack |
-| `bash scripts/status.sh` | Show container status |
-| `bash scripts/logs` | Tail logs (usage: `bash scripts/logs api`) |
-
----
-
-## API Reference
-
-All endpoints are under `/api`.
-
-### Sites
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/sites` | List all sites |
-| `GET` | `/api/sites/:slug` | Site detail with live health probes |
-| `POST` | `/api/sites` | Create site |
-| `PATCH` | `/api/sites/:slug` | Update site settings |
-| `DELETE` | `/api/sites/:slug` | Delete site |
-
-### Deployments
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/sites/:slug/deploy` | Trigger deployment |
-| `GET` | `/api/sites/:slug/deployments` | Deployment history |
-| `GET` | `/api/sites/:slug/deployments/:id/log` | Deployment logs |
-
-### DNS
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/sites/:slug/dns` | List DNS records |
-| `POST` | `/api/sites/:slug/dns` | Create DNS record |
-| `PUT` | `/api/sites/:slug/dns/:id` | Update DNS record |
-| `DELETE` | `/api/sites/:slug/dns/:id` | Delete DNS record |
-
-### Services (Docker)
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/services` | All containers — stack groups + site groups + restore event |
-| `POST` | `/api/services/:id/start` | Start container |
-| `POST` | `/api/services/:id/stop` | Stop container |
-| `POST` | `/api/services/:id/restart` | Restart container |
-| `DELETE` | `/api/services/:id` | Force-remove abandoned container |
-| `POST` | `/api/services/shutdown` | Checkpoint + graceful stack shutdown |
-
-### Config & Backup
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/config` | Get current hermithost config (includes `dns_provider`, `cloudflare_status`, `cloudflare_token_set`) |
-| `PATCH` | `/api/config` | Update config values (accepts `dns_provider`, `cloudflare_token`) |
-| `GET` | `/api/backup/export` | Export full config backup |
-| `POST` | `/api/backup/import` | Import backup file |
-| `POST` | `/api/backup/validate` | Validate backup before importing |
-
-### System
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/health` | Health check |
-
----
-
-## Project Structure
-
-```
-hermithost/
-├── .github/
-│   └── workflows/
-│       └── ci.yml            # PR checks — typecheck, build, Docker image validation
-├── api/                      # Express API
-│   ├── src/
-│   │   ├── index.ts          # App setup + route registration
-│   │   ├── routes/
-│   │   │   ├── sites.ts      # Site CRUD, health probes, DNS provisioning, deployments
-│   │   │   ├── services.ts   # Docker container monitoring + container actions
-│   │   │   ├── backup.ts     # Export / import / validate
-│   │   │   ├── config.ts     # Config read/write
-│   │   │   ├── stats.ts      # Live request stats
-│   │   │   └── health.ts     # Health check
-│   │   ├── services/
-│   │   │   ├── coolify.ts        # Coolify API client (typed)
-│   │   │   ├── docker.ts         # Docker socket HTTP client
-│   │   │   ├── healthProbe.ts    # HTTP/SSL/DNS probes
-│   │   │   ├── backup.ts         # Backup/restore logic
-│   │   │   ├── mapper.ts         # Coolify → hermithost type mapper
-│   │   │   ├── liveStats.ts      # Real-time stats aggregation
-│   │   │   ├── statsIngester.ts  # Traefik log ingestion
-│   │   │   └── dns/
-│   │   │       ├── DnsProvider.ts        # Interface (abstract)
-│   │   │       ├── TechnitiumProvider.ts # Technitium implementation
-│   │   │       ├── CloudflareProvider.ts # Cloudflare API v4 implementation
-│   │   │       └── index.ts              # Factory (reads DNS_PROVIDER setting)
-│   │   └── types.ts          # Shared API types
-│   ├── package.json
-│   └── Dockerfile
-├── src/                      # SvelteKit frontend
-│   ├── routes/
-│   │   ├── +page.svelte          # Sites dashboard
-│   │   ├── +layout.svelte        # App shell + sidebar navigation
-│   │   ├── sites/[slug]/
-│   │   │   └── +page.svelte      # Site detail
-│   │   ├── services/
-│   │   │   └── +page.svelte      # Container management pane
-│   │   ├── dns/
-│   │   │   └── +page.svelte      # DNS management
-│   │   └── settings/
-│   │       └── +page.svelte      # Settings + backup + DNS provider UI
-│   └── lib/
-│       └── types.ts              # Frontend types
-├── traefik/                  # Traefik config
-│   └── conf.d/routes.yml.example  # Route rules template — copy to routes.yml and set ADMIN_HOSTNAME
-├── docker/                   # Container entrypoint scripts
-├── scripts/                  # Setup and management scripts
-├── docker-compose.yml        # Full stack
-├── docker-compose.prod.yml   # Production overrides (ACME volumes)
-├── Dockerfile                # SvelteKit multi-stage build
-├── vite.config.ts            # Dev proxy config
-├── .env.template             # Environment template
-└── README.md
-```
-
----
-
-## Development (Native)
-
-Run frontend and API outside Docker:
-
-**Terminal 1 — API**
-```bash
-cd api && npm install && npm run dev
-# http://localhost:3001
-```
-
-**Terminal 2 — Frontend**
-```bash
-npm install && npm run dev
-# http://localhost:5113 — proxies /api to :3001 automatically
-```
-
-### Useful Commands
+### CLI Backup
 
 ```bash
-# Frontend
-npm run dev          # Dev server
-npm run build        # Production build
-npm run check        # TypeScript + Svelte type check
-
-# API
-cd api
-npm run dev          # Express dev server
-npm run build        # Compile TypeScript → dist/
-
-# Docker
-docker compose up --build    # Build and start
-docker compose logs -f       # Stream logs
-docker compose down          # Stop and remove
+curl -X GET http://localhost:3000/api/backup/export > hermithost-backup.json
 ```
 
----
+### Restoring
 
-## Troubleshooting
+1. Open the dashboard → Settings → Backup
+2. Click "Import" and select your backup JSON file
+3. The system will validate the backup before restoring
 
-### Stack won't start — missing .env values
+Automatic state checkpoint occurs on graceful shutdown (`scripts/stop.sh`). Containers are restored to their prior state when the stack restarts.
 
-Run `bash scripts/setup.sh` — it will prompt for anything missing and generate all secrets.
+## Contributing
 
-### Stack won't start — Docker network missing
+Contributions are welcome. To contribute:
 
-`scripts/start.sh` automatically creates the `coolify` network before starting the stack. If you ran `docker compose up` directly instead, create the network manually:
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Git hooks are automatically activated by `scripts/setup.sh` — they block commits containing PII
+4. Run tests: `npm run test`
+5. Validate Docker builds: `docker compose build`
+6. Commit and push: `git push origin feature/my-feature`
+7. Open a pull request
 
-```bash
-docker network create coolify
-```
-
-### Coolify login fails
-
-- **Email:** the value of `ACME_EMAIL` you entered during `setup.sh`
-- **Password:** the strong password printed to stdout during `setup.sh` (look for `[setup] Coolify admin password: ...`)
-- To reset: clear `COOLIFY_ADMIN_EMAIL` and `COOLIFY_ADMIN_PASSWORD` in `.env` and re-run `bash scripts/setup.sh`
-
-### SSL certs not issuing
-
-- Confirm `ACME_EMAIL` is a real email address
-- Confirm `NS_HOSTNAME` resolves publicly and ports 80/443 are open
-- Check Traefik logs: `docker compose logs traefik`
-
-### Probes show "not reachable"
-
-- Verify the site domain is publicly resolvable
-- Confirm outbound HTTPS from the container isn't blocked
-- Test: `curl -I https://yourdomain.com`
-
-### ISP blocks port 53 (DNS queries fail)
-
-Use Cloudflare provider instead:
-1. Create a Cloudflare API token (see **DNS Provider Setup** section)
-2. Open Settings → DNS Provider
-3. Select "Cloudflare" and paste your token
-4. Save and verify connection
-
-### Cloudflare provider not connecting
-
-- Verify token has **Zone:Edit** + **Zone:Create** permissions (not just "Edit zone DNS" template)
-- Check that your Cloudflare account owns the domain you're configuring
-- Review API token in Cloudflare dashboard — confirm it hasn't expired
-- Check API logs: `docker compose logs api | grep -i cloudflare`
-
-### Port conflict
-
-Change ports in `.env`:
-```bash
-TRAEFIK_HTTP_PORT=8082
-TRAEFIK_HTTPS_PORT=8444
-```
-
----
+Note: The pre-commit hook (`git config core.hooksPath .githooks`) blocks accidental commits of secrets, API keys, and email addresses.
 
 ## License
 
-Licensed under the MIT License. See [LICENSE](LICENSE) for details.
+HermitHost is licensed under the MIT License. See [LICENSE](LICENSE) for details.
