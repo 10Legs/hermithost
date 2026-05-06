@@ -1,0 +1,24 @@
+http:
+  routers:
+    hermithost-api-admin:
+      rule: "PathPrefix(`/api`)"
+      entryPoints:
+        - admin
+      service: hermithost-api
+
+    hermithost-frontend-admin:
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - admin
+      service: hermithost-frontend
+
+  services:
+    hermithost-api:
+      loadBalancer:
+        servers:
+          - url: "http://api:3001"
+
+    hermithost-frontend:
+      loadBalancer:
+        servers:
+          - url: "http://frontend:3000"
