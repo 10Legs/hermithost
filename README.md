@@ -114,7 +114,7 @@ sequenceDiagram
 - **Operating System:** Linux (recommended), macOS with Docker Desktop, or WSL2
 - **Memory:** 4GB minimum (8GB recommended)
 - **Disk space:** 10GB minimum
-- **Ports:** 80/443 (LAN mode) or 8080/8443 (Internet mode), 53 or 53053 (DNS), 8000 (Coolify)
+- **Ports:** 80/443 (LAN mode) or 8080/8443 (Internet mode), 53 or 53053 (DNS)
 - **Public IP or hostname** (Internet mode only — required for Let's Encrypt validation)
 
 ## Quick Start
@@ -129,7 +129,7 @@ bash scripts/setup.sh
 
 The setup script will ask you:
 1. **Operating mode:** LAN (internal `.hh` domains) or Internet (public domains)
-2. **ACME email:** Your email for SSL certificate notifications (and Coolify admin login)
+2. **ACME email:** Your email for SSL certificate notifications
 3. **Server hostname:** Your server's IP address or public hostname (Internet mode only)
 
 Then start the stack:
@@ -138,9 +138,9 @@ Then start the stack:
 bash scripts/start.sh
 ```
 
-Access the dashboard:
-- **Coolify UI (deployment interface):** http://localhost:8000
-- **HermitHost dashboard (main interface):** http://localhost:3000 or https://hermithost.hh (LAN mode) / https://hermithost.yourdomain.com (Internet mode)
+Access the HermitHost dashboard:
+- LAN mode: https://hermithost.hh (after pointing your DNS resolver at HermitHost)
+- Internet mode: https://hermithost.yourdomain.com
 
 ## Installation — Detailed
 
@@ -157,7 +157,7 @@ Edit `.env` and set these operator-configurable variables:
 ```bash
 # Required
 HERMITHOST_PORT_MODE=lan              # or "internet"
-ACME_EMAIL=your-email@example.com      # SSL notifications + Coolify admin email
+ACME_EMAIL=your-email@example.com      # SSL certificate notifications
 NS_HOSTNAME=192.168.1.100              # Your server IP (LAN) or hostname (Internet)
 
 # Optional (can be set in dashboard later)
@@ -180,8 +180,7 @@ bash scripts/setup.sh
 ```
 
 This script will:
-- Generate all required secrets (Coolify API keys, database passwords, TSIG keys)
-- Provision Coolify administrator credentials and print them once
+- Generate all required secrets (database passwords, TSIG keys, API tokens)
 - Configure the Technitium TSIG key for secure DNS updates
 - Set up Traefik dynamic config directory
 - Activate Git pre-commit hooks (PII blocking)
@@ -199,12 +198,11 @@ In LAN mode, this starts step-ca and step-ca-init. In Internet mode, these servi
 
 ### Step 4: First Login
 
-- **Coolify UI:** http://localhost:8000
-  - Email: the `ACME_EMAIL` you provided
-  - Password: printed at the end of setup.sh (save this somewhere secure)
-- **HermitHost Dashboard:** Access via the Traefik-proxied address
-  - LAN mode: https://hermithost.hh (after configuring your DNS resolver)
-  - Internet mode: https://hermithost.yourdomain.com
+Open the HermitHost dashboard — everything is managed from here:
+- LAN mode: https://hermithost.hh (after pointing your DNS resolver at HermitHost)
+- Internet mode: https://hermithost.yourdomain.com
+
+Log in with the `HERMITHOST_PASSWORD` you set (or configured via Settings after first run).
 
 ## Operating Modes
 
@@ -325,11 +323,11 @@ Operator-configurable variables in `.env`. For the complete list, see `.env.temp
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `HERMITHOST_PORT_MODE` | Operating mode: `lan` or `internet` | *(prompted)* |
-| `ACME_EMAIL` | Email for SSL cert notifications (also Coolify admin email) | *(prompted)* |
+| `ACME_EMAIL` | Email for SSL cert notifications | *(prompted)* |
 | `NS_HOSTNAME` | Server IP (LAN) or hostname (Internet) | *(prompted)* |
 | `DNS_PROVIDER` | Active DNS provider: `technitium` or `cloudflare` | `technitium` |
 | `CLOUDFLARE_TOKEN` | Cloudflare API token (also settable in Settings UI) | *(empty)* |
-| `COOLIFY_PORT` | Coolify UI port | `8000` |
+| `COOLIFY_PORT` | Internal deployment engine port | `8000` |
 | `DNS_PORT` | Host port for DNS (use 53 if allowed; avoid conflicts) | `53053` |
 | `TRAEFIK_HTTP_PORT` | Traefik HTTP port (Internet mode) | `8080` |
 | `TRAEFIK_HTTPS_PORT` | Traefik HTTPS port (Internet mode) | `8443` |
@@ -344,8 +342,8 @@ Operator-configurable variables in `.env`. For the complete list, see `.env.temp
 |---------|-----------|---------|-------|
 | **HermitHost API** | Node.js/Express | Orchestration layer; Coolify/DNS/Docker abstraction | 3001 |
 | **HermitHost Dashboard** | Node.js/SvelteKit | Web UI | 3000 |
-| **Traefik** | traefik:v3 | Reverse proxy, ACME client, SSL termination | 80, 443, 8000, 8080, 8443 |
-| **Coolify** | coolify/coolify | Application deployment engine | 8000 |
+| **Traefik** | traefik:v3 | Reverse proxy, ACME client, SSL termination | 80, 443, 8080, 8443 |
+| **Coolify** | coolify/coolify | Application deployment engine (internal) | — |
 | **Technitium DNS** | technitium/technitium-core | DNS resolver and authoritative server | 53 (or DNS_PORT) |
 | **step-ca** | smallstep/step-ca | Internal CA (LAN mode only) | 9000 |
 | **PostgreSQL** | postgres:15 | Coolify database | 5432 |
