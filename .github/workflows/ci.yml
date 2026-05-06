@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── API: typecheck + build in one job (avoids double npm ci) ──────────────
+  api:
+    name: API — Typecheck & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Build
+        run: npm run build
+
+  # ── Frontend: typecheck + svelte-check + build ───────────────────────────
+  frontend:
+    name: Frontend — Typecheck & Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Sync SvelteKit
+        run: npx svelte-kit sync
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Svelte Check
+        run: npx svelte-check --threshold error
+      - name: Build
+        run: npm run build
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+
+  # ── Docker: validate both images build cleanly ───────────────────────────
+  docker:
+    name: Docker — Image Build
+    runs-on: ubuntu-latest
+    needs: [api, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build API image
+        run: |
+          docker buildx build \
+            --load \
+            --tag hermithost-api:ci-${{ github.sha }} \
+            ./api
+      - name: Build Frontend image
+        run: |
+          docker buildx build \
+            --load \
+            --tag hermithost-frontend:ci-${{ github.sha }} \
+            .
+      - name: Clean up CI images
+        if: always()
+        run: |
+          docker rmi hermithost-api:ci-${{ github.sha }} || true
+          docker rmi hermithost-frontend:ci-${{ github.sha }} || true

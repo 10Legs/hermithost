@@ -1,0 +1,3319 @@
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import type { PageData } from './$types';
+	import { formatRelativeTime, formatDuration } from '$lib/data';
+	import type { DnsRecord, Deploy, Site, EnvVar, ComposeEnvVar } from '$lib/types';
+
+	export let data: PageData;
+
+	$: site = data.site;
+	$: dns = data.dns;
+	let deploys = data.deploys;
+
+	let activeTab: 'overview' | 'dns' | 'deployments' | 'environment' | 'settings' = 'overview';
+
+	function setTab(tab: typeof activeTab): void {
+		activeTab = tab;
+		if (tab === 'environment') {
+			if (envVars.length === 0 && !envLoading) {
+				loadEnvVars();
+			}
+			if (isDockerCompose && composeEnvVars.length === 0 && !composeEnvLoading) {
+				loadComposeEnvVars();
+			}
+		}
+	}
+
+	// Deploy button state
+	type DeployState = 'idle' | 'loading' | 'success' | 'error' | 'unavailable';
+	let deployState: DeployState = 'idle';
+	let deployMessage: string = '';
+
+	// Refresh checks state
+	let refreshState: 'idle' | 'loading' = 'idle';
+
+	async function refreshChecks(): Promise<void> {
+		refreshState = 'loading';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}`);
+			if (res.ok) {
+				const fresh: Site = await res.json();
+				data = { ...data, site: fresh };
+			}
+		} catch {
+			// silently fail — status stays as-is
+		} finally {
+			refreshState = 'idle';
+		}
+	}
+
+	// Settings form state
+	let settingsDomain = data.site.domain;
+	let settingsRepo = data.site.repository;
+	let settingsBranch = data.site.branch ?? 'main';
+	let settingsServer = data.site.server;
+	let settingsDesc = data.site.description;
+	let settingsBuildPack = data.site.build_pack ?? 'nixpacks';
+	let settingsDockerComposeLoc = data.site.docker_compose_location ?? '/docker-compose.yml';
+	let settingsBaseDir = data.site.base_directory ?? '/';
+	let settingsDeployAuth: 'ssh_key' | 'pat' = data.site.deploy_auth;
+	let settingsDeployToken = '';
+	type AuthSaveState = 'idle' | 'saving' | 'saved' | 'error';
+	let authSaveState: AuthSaveState = 'idle';
+	let authSaveMessage = '';
+
+	$: {
+		// Only sync read-only domain field reactively.
+		// Editable fields (repo, branch, server, desc) are NOT synced here —
+		// reactive reassignment overwrites user input mid-edit.
+		// They are updated explicitly in saveSettings() after a successful save.
+		settingsDomain = site.domain;
+	}
+
+	type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+	let saveState: SaveState = 'idle';
+	let saveMessage = '';
+
+	async function saveSettings(): Promise<void> {
+		saveState = 'saving';
+		saveMessage = '';
+		const payload: Record<string, string> = {};
+		if (settingsRepo !== site.repository) payload.repository = settingsRepo;
+		if (settingsBranch !== (site.branch ?? 'main')) payload.git_branch = settingsBranch;
+		if (settingsServer !== site.server) payload.server = settingsServer;
+		if (settingsDesc !== site.description) payload.description = settingsDesc;
+		if (settingsBuildPack !== (site.build_pack ?? 'nixpacks')) payload.build_pack = settingsBuildPack;
+		// Always include path fields when build_pack is dockercompose — change-detection is unreliable
+		// because the mapper applies defaults (?? '/docker-compose.yml', ?? '/') that mask NULL values
+		// in Coolify's DB, making the comparison always appear equal and the fields never get persisted.
+		if (settingsBuildPack === 'dockercompose' || settingsDockerComposeLoc !== (site.docker_compose_location ?? '/docker-compose.yml')) payload.docker_compose_location = settingsDockerComposeLoc;
+		if (settingsBuildPack === 'dockercompose' || settingsBaseDir !== (site.base_directory ?? '/')) payload.base_directory = settingsBaseDir;
+
+		try {
+			const res = await fetch(`/api/sites/${site.slug}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				saveState = 'error';
+				saveMessage = body.error ?? `Save failed (${res.status})`;
+				setTimeout(() => { saveState = 'idle'; saveMessage = ''; }, 6000);
+				return;
+			}
+			const updated: Site = await res.json();
+			data = { ...data, site: updated };
+			// Explicitly sync editable fields to saved values
+			settingsRepo = updated.repository;
+			settingsBranch = updated.branch ?? 'main';
+			settingsServer = updated.server;
+			settingsDesc = updated.description;
+			saveState = 'saved';
+			saveMessage = 'Saved';
+			setTimeout(() => { saveState = 'idle'; saveMessage = ''; }, 3000);
+		} catch {
+			saveState = 'error';
+			saveMessage = 'Network error — could not save';
+			setTimeout(() => { saveState = 'idle'; saveMessage = ''; }, 6000);
+		}
+	}
+
+	async function saveDeployAuth(): Promise<void> {
+		if (settingsDeployAuth === 'pat' && !settingsDeployToken.trim()) {
+			authSaveState = 'error';
+			authSaveMessage = 'Access token required for PAT auth';
+			setTimeout(() => { authSaveState = 'idle'; authSaveMessage = ''; }, 6000);
+			return;
+		}
+		authSaveState = 'saving';
+		authSaveMessage = '';
+		const payload: Record<string, string> = { deploy_auth: settingsDeployAuth };
+		if (settingsDeployToken.trim()) payload.deploy_token = settingsDeployToken.trim();
+		try {
+			const res = await fetch(`/api/sites/${site.slug}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+			if (!res.ok) {
+				const b: { error?: string } = await res.json().catch(() => ({}));
+				authSaveState = 'error';
+				authSaveMessage = b.error ?? `Save failed (${res.status})`;
+				setTimeout(() => { authSaveState = 'idle'; authSaveMessage = ''; }, 6000);
+				return;
+			}
+			const updated: Site = await res.json();
+			data = { ...data, site: updated };
+			settingsDeployToken = '';
+			settingsDeployAuth = updated.deploy_auth;
+			authSaveState = 'saved';
+			authSaveMessage = 'Auth method updated';
+			setTimeout(() => { authSaveState = 'idle'; authSaveMessage = ''; }, 3000);
+		} catch {
+			authSaveState = 'error';
+			authSaveMessage = 'Network error — could not save';
+			setTimeout(() => { authSaveState = 'idle'; authSaveMessage = ''; }, 6000);
+		}
+	}
+
+	async function triggerDeploy(): Promise<void> {
+		deployState = 'loading';
+		deployMessage = '';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/deploy`, { method: 'POST' });
+			if (res.status === 503) {
+				deployState = 'unavailable';
+				deployMessage = 'Deploy unavailable — Coolify not connected';
+				setTimeout(() => { deployState = 'idle'; deployMessage = ''; }, 6000);
+				return;
+			}
+			if (res.status === 400) {
+				const body: { error?: string; missing?: string[] } = await res.json().catch(() => ({}));
+				if (body.missing && body.missing.length > 0) {
+					deployState = 'idle';
+					preflightMissing = body.missing;
+					showPreflightModal = true;
+					return;
+				}
+				deployState = 'error';
+				deployMessage = body.error ?? 'Deploy failed — missing required vars';
+				setTimeout(() => { deployState = 'idle'; deployMessage = ''; }, 6000);
+				return;
+			}
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				deployState = 'error';
+				deployMessage = body.error ?? `Deploy failed (${res.status})`;
+				setTimeout(() => { deployState = 'idle'; deployMessage = ''; }, 6000);
+				return;
+			}
+			deployState = 'success';
+			deployMessage = 'Deploy queued';
+			// Refresh deployments list
+			const deploysRes = await fetch(`/api/sites/${site.slug}/deployments`);
+			if (deploysRes.ok) {
+				deploys = await deploysRes.json();
+			}
+			setTimeout(() => { deployState = 'idle'; deployMessage = ''; }, 4000);
+		} catch {
+			deployState = 'error';
+			deployMessage = 'Network error — could not reach server';
+			setTimeout(() => { deployState = 'idle'; deployMessage = ''; }, 6000);
+		}
+	}
+	let logModal: Deploy | null = null;
+	let showDeleteSiteConfirm = false;
+	let deleteSiteState: 'idle' | 'deleting' | 'error' = 'idle';
+	let deleteSiteError = '';
+
+	async function deleteSite(): Promise<void> {
+		deleteSiteState = 'deleting';
+		deleteSiteError = '';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}`, { method: 'DELETE' });
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				deleteSiteError = body.error ?? `Delete failed (${res.status})`;
+				deleteSiteState = 'error';
+				return;
+			}
+			window.location.href = '/';
+		} catch {
+			deleteSiteError = 'Network error — could not delete site';
+			deleteSiteState = 'error';
+		}
+	}
+
+	let showDeleteDnsConfirm: string | null = null; // stores the record ID pending confirmation, null when no dialog open
+	let showAddDns = false;
+
+	// New DNS record form state
+	let newRecord = { type: 'A', name: '', value: '', ttl: 3600, priority: '' };
+
+	// DNS add/edit state
+	let editingRecord: DnsRecord | null = null;
+	let dnsFormSaving = false;
+	let dnsFormError = '';
+	let deletingRecordId: string | null = null;
+	let deleteError: string | null = null;
+
+	function resetDnsForm() {
+		newRecord = { type: 'A', name: '', value: '', ttl: 3600, priority: '' };
+		editingRecord = null;
+		dnsFormError = '';
+		showAddDns = false;
+	}
+
+	async function addRecord(): Promise<void> {
+		dnsFormSaving = true;
+		dnsFormError = '';
+		const isEditing = editingRecord !== null;
+		const url = isEditing
+			? `/api/sites/${site.slug}/dns/${editingRecord!.id}`
+			: `/api/sites/${site.slug}/dns`;
+		const method = isEditing ? 'PUT' : 'POST';
+		const payload: Record<string, string | number | undefined> = {
+			type: newRecord.type,
+			name: newRecord.name,
+			value: newRecord.value,
+			ttl: Number(newRecord.ttl),
+			priority: newRecord.priority !== '' ? Number(newRecord.priority) : undefined
+		};
+		try {
+			const res = await fetch(url, {
+				method,
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				dnsFormError = body.error ?? `Failed to save record (${res.status})`;
+				dnsFormSaving = false;
+				return;
+			}
+			const saved: DnsRecord = await res.json();
+			if (isEditing) {
+				dns = dns.map((r) => (r.id === saved.id ? saved : r));
+			} else {
+				dns = [...dns, saved];
+			}
+			resetDnsForm();
+		} catch {
+			dnsFormError = 'Network error — could not save record';
+		} finally {
+			dnsFormSaving = false;
+		}
+	}
+
+	function startEditRecord(record: DnsRecord): void {
+		editingRecord = record;
+		newRecord = {
+			type: record.type,
+			name: record.name,
+			value: record.value,
+			ttl: record.ttl,
+			priority: record.priority !== undefined ? String(record.priority) : ''
+		};
+		showAddDns = true;
+	}
+
+	async function deleteRecord(id: string): Promise<void> {
+		deletingRecordId = id;
+		deleteError = null;
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/dns/${id}`, { method: 'DELETE' });
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				deleteError = body.error ?? `Delete failed (${res.status})`;
+				deletingRecordId = null;
+				return;
+			}
+			dns = dns.filter((r) => r.id !== id);
+			showDeleteDnsConfirm = null;
+		} catch {
+			deleteError = 'Network error — delete failed';
+			deletingRecordId = null;
+		}
+	}
+
+	// ── Environment variables ──────────────────────────────────────────────────
+	let envVars: EnvVar[] = [];
+	let envLoading = false;
+	let envLoadError = '';
+
+	let showAddEnv = false;
+	let editingEnv: EnvVar | null = null;
+	let newEnv = { key: '', value: '', is_runtime: true, is_buildtime: false, is_shown_once: false };
+	let envFormSaving = false;
+	let envFormError = '';
+	let showDeleteEnvConfirm: string | null = null;
+	let deletingEnvUuid: string | null = null;
+	let deleteEnvError: string | null = null;
+
+	async function loadEnvVars(): Promise<void> {
+		envLoading = true;
+		envLoadError = '';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/envs`);
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				envLoadError = body.error ?? `Failed to load env vars (${res.status})`;
+				return;
+			}
+			envVars = await res.json();
+		} catch {
+			envLoadError = 'Network error — could not load env vars';
+		} finally {
+			envLoading = false;
+		}
+	}
+
+	function resetEnvForm(): void {
+		newEnv = { key: '', value: '', is_runtime: true, is_buildtime: false, is_shown_once: false };
+		editingEnv = null;
+		envFormError = '';
+		showAddEnv = false;
+	}
+
+	function startEditEnv(env: EnvVar): void {
+		editingEnv = env;
+		newEnv = {
+			key: env.key,
+			value: '',
+			is_runtime: env.is_runtime,
+			is_buildtime: env.is_buildtime,
+			is_shown_once: env.is_shown_once
+		};
+		showAddEnv = true;
+	}
+
+	async function saveEnv(): Promise<void> {
+		envFormSaving = true;
+		envFormError = '';
+		const isEditing = editingEnv !== null;
+		const url = isEditing
+			? `/api/sites/${site.slug}/envs/${editingEnv!.uuid}`
+			: `/api/sites/${site.slug}/envs`;
+		const method = isEditing ? 'PATCH' : 'POST';
+		const payload: Record<string, string | boolean> = {
+			key: newEnv.key,
+			is_runtime: newEnv.is_runtime,
+			is_buildtime: newEnv.is_buildtime
+		};
+		if (newEnv.value) payload.value = newEnv.value;
+		if (!isEditing) payload.is_shown_once = newEnv.is_shown_once;
+		try {
+			const res = await fetch(url, {
+				method,
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				envFormError = body.error ?? `Failed to save env var (${res.status})`;
+				envFormSaving = false;
+				return;
+			}
+			await loadEnvVars();
+			resetEnvForm();
+		} catch {
+			envFormError = 'Network error — could not save env var';
+		} finally {
+			envFormSaving = false;
+		}
+	}
+
+	async function deleteEnv(uuid: string): Promise<void> {
+		deletingEnvUuid = uuid;
+		deleteEnvError = null;
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/envs/${uuid}`, { method: 'DELETE' });
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				deleteEnvError = body.error ?? `Delete failed (${res.status})`;
+				deletingEnvUuid = null;
+				return;
+			}
+			await loadEnvVars();
+			showDeleteEnvConfirm = null;
+		} catch {
+			deleteEnvError = 'Network error — delete failed';
+			deletingEnvUuid = null;
+		}
+	}
+
+	// ── Compose env vars (new API: GET/PUT /api/sites/:slug/env) ─────────────
+	let composeEnvVars: ComposeEnvVar[] = [];
+	let composeEnvLoading = false;
+	let composeEnvLoadError = '';
+	// Per-row edit drafts: key → draft value string
+	let composeEnvDrafts: Record<string, string> = {};
+	// Per-row save state
+	let composeEnvSaving: Record<string, boolean> = {};
+	let composeEnvSaveError: Record<string, string> = {};
+	let composeEnvSaveOk: Record<string, boolean> = {};
+	// Per-row show/hide for secrets
+	let composeEnvVisible: Record<string, boolean> = {};
+	// Whether the site is docker-compose (env tab meaningful)
+	$: isDockerCompose = site.build_pack === 'dockercompose';
+
+	async function loadComposeEnvVars(): Promise<void> {
+		if (!isDockerCompose) return;
+		composeEnvLoading = true;
+		composeEnvLoadError = '';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/env`);
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				composeEnvLoadError = body.error ?? `Failed to load env vars (${res.status})`;
+				return;
+			}
+			const data: { envs: ComposeEnvVar[] } = await res.json();
+			composeEnvVars = data.envs;
+			// Initialize drafts with current values
+			composeEnvDrafts = {};
+			for (const v of data.envs) {
+				composeEnvDrafts[v.key] = v.value;
+			}
+		} catch {
+			composeEnvLoadError = 'Network error — could not load env vars';
+		} finally {
+			composeEnvLoading = false;
+		}
+	}
+
+	function generateSecret(): string {
+		const bytes = new Uint8Array(16);
+		crypto.getRandomValues(bytes);
+		return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+	}
+
+	async function saveComposeEnvRow(key: string): Promise<void> {
+		composeEnvSaving = { ...composeEnvSaving, [key]: true };
+		composeEnvSaveError = { ...composeEnvSaveError, [key]: '' };
+		composeEnvSaveOk = { ...composeEnvSaveOk, [key]: false };
+		try {
+			// Build full payload — send all current drafts so server has full picture
+			const envs = composeEnvVars.map(v => ({
+				key: v.key,
+				value: composeEnvDrafts[v.key] ?? v.value
+			}));
+			const res = await fetch(`/api/sites/${site.slug}/env`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ envs })
+			});
+			if (!res.ok) {
+				const body: { error?: string } = await res.json().catch(() => ({}));
+				composeEnvSaveError = { ...composeEnvSaveError, [key]: body.error ?? `Save failed (${res.status})` };
+				return;
+			}
+			const updated: { envs: ComposeEnvVar[] } = await res.json();
+			composeEnvVars = updated.envs;
+			// Refresh drafts from server response
+			for (const v of updated.envs) {
+				composeEnvDrafts[v.key] = v.value;
+			}
+			composeEnvSaveOk = { ...composeEnvSaveOk, [key]: true };
+			setTimeout(() => { composeEnvSaveOk = { ...composeEnvSaveOk, [key]: false }; }, 2500);
+		} catch {
+			composeEnvSaveError = { ...composeEnvSaveError, [key]: 'Network error — could not save' };
+		} finally {
+			composeEnvSaving = { ...composeEnvSaving, [key]: false };
+		}
+	}
+
+	// ── Preflight modal ────────────────────────────────────────────────────────
+	let preflightMissing: string[] = [];
+	let showPreflightModal = false;
+
+	function closePreflightModal(): void {
+		showPreflightModal = false;
+		preflightMissing = [];
+	}
+
+	function goToEnvTab(): void {
+		closePreflightModal();
+		setTab('environment');
+		// Focus first missing field after DOM update
+		setTimeout(() => {
+			if (preflightMissing.length > 0) {
+				const firstKey = preflightMissing[0];
+				const el = document.getElementById(`compose-env-input-${firstKey}`);
+				el?.focus();
+			}
+		}, 50);
+	}
+
+	function openLog(deploy: Deploy) {
+		logModal = deploy;
+	}
+
+	function closeLog() {
+		logModal = null;
+	}
+
+	function deployStatusClass(status: string): string {
+		const map: Record<string, string> = {
+			success: 'text-success',
+			failed: 'text-danger',
+			running: 'text-pending',
+			pending: 'text-pending'
+		};
+		return map[status] ?? 'text-secondary';
+	}
+
+	function deployStatusIcon(status: string): string {
+		const map: Record<string, string> = {
+			success: '✓',
+			failed: '✗',
+			running: '◎',
+			pending: '◷'
+		};
+		return map[status] ?? '?';
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			logModal = null;
+			showDeleteDnsConfirm = null;
+			showDeleteSiteConfirm = false;
+			showAddDns = false;
+			editingRecord = null;
+			showAddEnv = false;
+			editingEnv = null;
+			showDeleteEnvConfirm = null;
+			if (showPreflightModal) closePreflightModal();
+		}
+	}
+
+	// ── Traffic stats ─────────────────────────────────────────────────────────
+	type StatRange = '24h' | '7d' | '30d';
+	const statRanges: StatRange[] = ['24h', '7d', '30d'];
+	let statsRange: StatRange = '24h';
+	let statsLoading = false;
+
+	interface SiteStats {
+		range: StatRange;
+		requests: number;
+		human_requests: number;
+		bot_requests: number;
+		bandwidth_bytes: number;
+		error_rate: number;
+		avg_ms: number | null;
+		sparkline: Array<{ ts: number; requests: number }>;
+	}
+
+	let stats: SiteStats | null = null;
+	let statsError = false;
+
+	async function loadStats(range: StatRange): Promise<void> {
+		statsLoading = true;
+		statsError = false;
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/stats?range=${range}`);
+			if (res.ok) {
+				stats = await res.json();
+			} else {
+				statsError = true;
+			}
+		} catch {
+			statsError = true;
+		} finally {
+			statsLoading = false;
+		}
+	}
+
+	function setStatsRange(r: StatRange): void {
+		statsRange = r;
+		loadStats(r);
+		loadPageStats(r);
+	}
+
+	// ── Page analytics ─────────────────────────────────────────────────────────
+	interface TopPage {
+		path: string;
+		requests: number;
+		human_requests: number;
+		avg_ms: number | null;
+		error_rate: number;
+		trend: number | null;
+	}
+	interface PageStatsData {
+		range: StatRange;
+		top_pages: TopPage[];
+		top_referrers: Array<{ referrer_domain: string; requests: number }>;
+	}
+	let pageStats: PageStatsData | null = null;
+
+	async function loadPageStats(range: StatRange): Promise<void> {
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/stats/pages?range=${range}`);
+			if (res.ok) pageStats = await res.json();
+		} catch { /* silently fail */ }
+	}
+
+	function formatBytes(bytes: number): string {
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+		if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+		return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+	}
+
+	function sparklinePath(points: Array<{ ts: number; requests: number }>, w: number, h: number): string {
+		if (points.length < 2) return '';
+		const maxReq = Math.max(...points.map(p => p.requests), 1);
+		const xs = points.map((_, i) => (i / (points.length - 1)) * w);
+		const ys = points.map(p => h - (p.requests / maxReq) * (h - 2) - 1);
+		return xs.map((x, i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
+	}
+
+	function sparklineAreaPoints(
+		points: Array<{ ts: number; requests: number }>,
+		w: number,
+		h: number
+	): string {
+		if (points.length < 2) return '';
+		const maxReq = Math.max(...points.map(p => p.requests), 1);
+		const xs = points.map((_, i) => (i / (points.length - 1)) * w);
+		const ys = points.map(p => h - (p.requests / maxReq) * (h - 2) - 1);
+		return xs.map((x, i) => `${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ') +
+			` ${w},${h} `;
+	}
+
+	let tooltipVisible = false;
+	let tooltipX: number | null = null;
+	let tooltipLeft = 0;
+	let tooltipData: { ts: number; requests: number } | null = null;
+
+	function handleSparklineMousemove(e: MouseEvent): void {
+		const svg = e.currentTarget as SVGSVGElement;
+		const rect = svg.getBoundingClientRect();
+		const svgX = ((e.clientX - rect.left) / rect.width) * 200;
+		tooltipX = svgX;
+		tooltipLeft = e.clientX - rect.left;
+		const points = stats?.sparkline ?? [];
+		if (points.length < 2) return;
+		const idx = Math.round((svgX / 200) * (points.length - 1));
+		const clamped = Math.max(0, Math.min(points.length - 1, idx));
+		tooltipData = points[clamped];
+		tooltipVisible = true;
+	}
+
+	function handleSparklineMouseleave(): void {
+		tooltipVisible = false;
+		tooltipX = null;
+		tooltipData = null;
+	}
+
+	function formatTooltipTime(ts: number): string {
+		return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+	}
+
+	// Deploy key
+	let deployPublicKey = '';
+	let deployKeyCopied = false;
+
+	function parseGithubOwnerRepo(url: string): string | null {
+		if (!url) return null;
+		// SSH: git@github.com:owner/repo[.git]
+		const sshMatch = url.match(/^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/);
+		if (sshMatch) return sshMatch[1];
+		// HTTPS: https://github.com/owner/repo[.git]
+		const httpsMatch = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?(?:\/.*)?$/);
+		if (httpsMatch) return httpsMatch[1];
+		// Short-form: owner/repo[.git]
+		const shortMatch = url.match(/^([^/\s:]+\/[^/\s]+?)(?:\.git)?$/);
+		if (shortMatch) return shortMatch[1];
+		return null;
+	}
+
+	async function copyDeployKey(): Promise<void> {
+		if (!deployPublicKey) return;
+		try {
+			await navigator.clipboard.writeText(deployPublicKey);
+			deployKeyCopied = true;
+			setTimeout(() => { deployKeyCopied = false; }, 2000);
+		} catch {
+			// clipboard write failed silently
+		}
+	}
+
+	function openGithubDeployKeys(): void {
+		// Use the live form value so the button works without requiring a save first
+		const ownerRepo = parseGithubOwnerRepo(settingsRepo);
+		if (!ownerRepo) return;
+		window.open(`https://github.com/${ownerRepo}/settings/keys/new`, '_blank');
+	}
+
+	// ── Disable / Enable toggle ───────────────────────────────────────────────
+	let toggleDisabledState: 'idle' | 'loading' = 'idle';
+
+	async function toggleDisabled(): Promise<void> {
+		if (toggleDisabledState === 'loading') return;
+		toggleDisabledState = 'loading';
+		const action = site.disabled ? 'enable' : 'disable';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/${action}`, { method: 'POST' });
+			if (res.ok) {
+				// Re-fetch full site data (toggle endpoints return summary, not full Site)
+				const siteRes = await fetch(`/api/sites/${site.slug}`);
+				if (siteRes.ok) {
+					const fresh: Site = await siteRes.json();
+					data = { ...data, site: fresh };
+				}
+			}
+		} catch {
+			// silently fail — state stays as-is
+		} finally {
+			toggleDisabledState = 'idle';
+		}
+	}
+
+	// ── Live stats (SSE) ──────────────────────────────────────────────────────
+	let liveConnected = false;
+	let liveReqPerSec = 0;
+	let liveBandwidthOutBps = 0;
+	let liveBandwidthInBps = 0;
+	let liveActiveConnections = 0;
+	let liveAvgLatencyMs: number | null = null;
+
+	function formatBps(bps: number): string {
+		if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} MB/s`;
+		if (bps >= 1_000) return `${(bps / 1_000).toFixed(1)} KB/s`;
+		return `${Math.round(bps)} B/s`;
+	}
+
+	onMount(() => {
+		// Fetch deploy key (async, fire-and-forget)
+		fetch('/api/config/deploy-key')
+			.then(res => res.ok ? res.json() : null)
+			.then((body: { public_key: string } | null) => {
+				if (body) deployPublicKey = body.public_key;
+			})
+			.catch(() => { /* silently fail */ });
+
+		// Load stats for overview tab
+		loadStats(statsRange);
+		loadPageStats(statsRange);
+
+		// Poll stats every 60s
+		const statsPollTimer = setInterval(() => loadStats(statsRange), 60_000);
+
+		// Live stats via SSE
+		const es = new EventSource(`/api/sites/${site.slug}/stats/live`);
+		es.onopen = () => { liveConnected = true; };
+		es.onmessage = (e: MessageEvent) => {
+			const snap = JSON.parse(e.data);
+			liveReqPerSec = snap.reqPerSec;
+			liveBandwidthOutBps = snap.bandwidthOutBps;
+			liveBandwidthInBps = snap.bandwidthInBps;
+			liveActiveConnections = snap.activeConnections;
+			liveAvgLatencyMs = snap.avgLatencyMs;
+			liveConnected = true;
+		};
+		es.onerror = () => { liveConnected = false; };
+
+		return () => {
+			clearInterval(statsPollTimer);
+			es.close();
+		};
+	});
+</script>
+
+<svelte:window on:keydown={handleKeydown} />
+
+<div class="page">
+	<!-- Breadcrumb -->
+	<div class="breadcrumb">
+		<a href="/" class="breadcrumb-link">Sites</a>
+		<span class="breadcrumb-sep">/</span>
+		<span class="breadcrumb-current">{site.name}</span>
+	</div>
+
+	<!-- Page header -->
+	<header class="page-header">
+		<div class="header-left">
+			<div class="site-title-row">
+				<span class="status-dot status-{site.overallStatus}"></span>
+				<h1 class="page-title">{site.name}</h1>
+			</div>
+			<div class="site-meta">
+				<span class="mono">{site.domain}</span>
+				<span class="sep">·</span>
+				<span class="mono">{site.repository}</span>
+				<span class="sep">·</span>
+				<span class="mono">{site.server}</span>
+			</div>
+		</div>
+		<div class="header-actions">
+			<!-- Enabled / Disabled toggle -->
+			<button
+				class="toggle-btn"
+				class:toggle-btn-loading={toggleDisabledState === 'loading'}
+				disabled={toggleDisabledState === 'loading'}
+				on:click={toggleDisabled}
+				title={site.disabled ? 'Click to enable site' : 'Click to disable site'}
+				aria-label={site.disabled ? 'Enable site' : 'Disable site'}
+			>
+				<span class="toggle-track" class:toggle-track-off={site.disabled}>
+					<span class="toggle-thumb" class:toggle-thumb-off={site.disabled}></span>
+				</span>
+				<span class="toggle-label">
+					{#if toggleDisabledState === 'loading'}
+						<span class="spinner spinner-sm" aria-hidden="true"></span>{site.disabled ? 'Enabling…' : 'Disabling…'}
+					{:else}
+						{site.disabled ? 'Disabled' : 'Enabled'}
+					{/if}
+				</span>
+			</button>
+			<button
+				class="btn btn-ghost"
+				class:btn-loading={refreshState === 'loading'}
+				disabled={refreshState === 'loading'}
+				on:click={refreshChecks}
+			>
+				{#if refreshState === 'loading'}
+					<span class="spinner" aria-hidden="true"></span>Refreshing…
+				{:else}
+					Refresh checks
+				{/if}
+			</button>
+			<div class="deploy-wrapper">
+				<button
+					class="btn btn-primary"
+					class:btn-loading={deployState === 'loading'}
+					class:btn-disabled={site.disabled}
+					disabled={deployState === 'loading' || !!site.disabled}
+					title={site.disabled ? 'Site is disabled' : undefined}
+					on:click={triggerDeploy}
+				>
+					{deployState === 'loading' ? 'Deploying…' : 'Deploy'}
+				</button>
+				{#if deployMessage}
+					<span
+						class="deploy-status"
+						class:deploy-status-success={deployState === 'success'}
+						class:deploy-status-error={deployState === 'error'}
+						class:deploy-status-unavailable={deployState === 'unavailable'}
+					>{deployMessage}</span>
+				{/if}
+			</div>
+		</div>
+	</header>
+
+	<!-- Disabled banner -->
+	{#if site.disabled}
+		<div class="disabled-banner" role="status">
+			This site is disabled. Containers are stopped.
+		</div>
+	{/if}
+
+	<!-- Tabs -->
+	<div class="tabs">
+		<button class="tab" class:tab-active={activeTab === 'overview'} on:click={() => setTab('overview')}>Overview</button>
+		<button class="tab" class:tab-active={activeTab === 'dns'} on:click={() => setTab('dns')}>DNS Records <span class="tab-count">{dns.length}</span></button>
+		<button class="tab" class:tab-active={activeTab === 'deployments'} on:click={() => setTab('deployments')}>Deployments <span class="tab-count">{deploys.length}</span></button>
+		<button class="tab" class:tab-active={activeTab === 'environment'} on:click={() => setTab('environment')}>Environment <span class="tab-count">{envVars.length}</span></button>
+		<button class="tab" class:tab-active={activeTab === 'settings'} on:click={() => setTab('settings')}>Settings</button>
+	</div>
+
+	<!-- Overview Tab -->
+	{#if activeTab === 'overview'}
+		<div class="tab-content">
+			<div class="status-grid">
+				<!-- HTTP -->
+				<div class="status-card" class:card-danger={!site.http.reachable || (site.http.statusCode ?? 0) >= 500} class:card-warning={(site.http.statusCode ?? 0) >= 400 && (site.http.statusCode ?? 0) < 500}>
+					<div class="status-card-header">
+						<span class="status-card-label">HTTP</span>
+						{#if site.http.reachable && (site.http.statusCode ?? 0) < 400}
+							<span class="status-badge badge-success">Reachable</span>
+						{:else if (site.http.statusCode ?? 0) >= 500}
+							<span class="status-badge badge-danger">Server Error</span>
+						{:else if !site.http.reachable}
+							<span class="status-badge badge-danger">Unreachable</span>
+						{:else}
+							<span class="status-badge badge-warning">Client Error</span>
+						{/if}
+					</div>
+					<div class="status-card-value mono">
+						{#if site.http.statusCode !== null}
+							HTTP {site.http.statusCode}
+						{:else}
+							—
+						{/if}
+					</div>
+					{#if site.http.responseTimeMs !== null}
+						<div class="status-card-detail text-secondary">{site.http.responseTimeMs}ms response</div>
+					{/if}
+					<div class="status-card-time text-muted">checked {formatRelativeTime(site.http.checkedAt)}</div>
+				</div>
+
+				<!-- SSL -->
+				<div class="status-card"
+					class:card-danger={!site.ssl.valid}
+					class:card-warning={site.ssl.valid && site.ssl.daysUntilExpiry !== null && site.ssl.daysUntilExpiry <= 14}>
+					<div class="status-card-header">
+						<span class="status-card-label">SSL / TLS</span>
+						{#if !site.ssl.valid}
+							<span class="status-badge badge-danger">Invalid</span>
+						{:else if site.ssl.daysUntilExpiry !== null && site.ssl.daysUntilExpiry <= 14}
+							<span class="status-badge badge-warning">Expiring soon</span>
+						{:else}
+							<span class="status-badge badge-success">Valid</span>
+						{/if}
+					</div>
+					{#if site.ssl.expiresAt}
+						<div class="status-card-value mono">
+							{site.ssl.daysUntilExpiry}d remaining
+						</div>
+						<div class="status-card-detail text-secondary">
+							Issuer: {site.ssl.issuer}
+						</div>
+						<div class="status-card-detail text-secondary">
+							Expires: {new Date(site.ssl.expiresAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+						</div>
+					{:else}
+						<div class="status-card-value mono text-muted">No certificate</div>
+					{/if}
+					<div class="status-card-time text-muted">checked {formatRelativeTime(site.ssl.checkedAt)}</div>
+				</div>
+
+				<!-- DNS -->
+				<div class="status-card" class:card-danger={!site.dns.resolving} class:card-warning={site.dns.resolving && !site.dns.propagated}>
+					<div class="status-card-header">
+						<span class="status-card-label">DNS</span>
+						{#if !site.dns.resolving && !site.dns.propagated}
+							<span class="status-badge badge-pending">Propagating</span>
+						{:else if !site.dns.resolving}
+							<span class="status-badge badge-danger">Not Resolving</span>
+						{:else}
+							<span class="status-badge badge-success">Resolving</span>
+						{/if}
+					</div>
+					<div class="status-card-value mono">
+						{#if site.dns.resolving}
+							Resolves OK
+						{:else}
+							Not resolving
+						{/if}
+					</div>
+					<div class="status-card-detail text-secondary">
+						Propagation: {site.dns.propagated ? 'Complete' : 'In progress'}
+					</div>
+					<div class="status-card-time text-muted">checked {formatRelativeTime(site.dns.checkedAt)}</div>
+				</div>
+
+				<!-- Last Deploy -->
+				<div class="status-card" class:card-danger={deploys[0]?.status === 'failed'}>
+					<div class="status-card-header">
+						<span class="status-card-label">Last Deploy</span>
+						{#if deploys.length === 0}
+							<span class="status-badge badge-pending">None</span>
+						{:else if deploys[0].status === 'success'}
+							<span class="status-badge badge-success">Success</span>
+						{:else if deploys[0].status === 'failed'}
+							<span class="status-badge badge-danger">Failed</span>
+						{:else if deploys[0].status === 'running' || deploys[0].status === 'pending'}
+							<span class="status-badge badge-pending">In Progress</span>
+						{/if}
+					</div>
+					{#if deploys.length > 0}
+						{@const latest = deploys[0]}
+						<div class="status-card-value mono">{latest.commitRef}</div>
+						<div class="status-card-detail text-secondary truncate" title={latest.commitMessage}>
+							{latest.commitMessage}
+						</div>
+						<div class="status-card-detail text-secondary">
+							{latest.branch} · {formatRelativeTime(latest.startedAt)}
+							{#if latest.durationSeconds !== null}
+								· {formatDuration(latest.durationSeconds)}
+							{/if}
+						</div>
+						<button class="btn btn-ghost btn-sm mt-8" on:click={() => openLog(latest)}>View log</button>
+					{:else}
+						<div class="status-card-value mono text-muted">Never deployed</div>
+					{/if}
+				</div>
+			</div>
+
+			<!-- Live Zone -->
+			<div class="live-zone" class:live-zone-active={liveConnected}>
+				<div class="live-zone-header">
+					<div class="live-zone-label">
+						<span class="live-dot" class:live-dot-connected={liveConnected}></span>
+						<span class="live-badge-text">{liveConnected ? 'LIVE' : 'OFFLINE'}</span>
+					</div>
+					<span class="live-zone-sub">Real-time · aggregate across all connections</span>
+				</div>
+				<div class="live-zone-metrics">
+					<div class="live-metric">
+						<span class="live-metric-value">{liveReqPerSec.toFixed(1)}</span>
+						<span class="live-metric-label">req/s</span>
+					</div>
+					<div class="live-metric-divider"></div>
+					<div class="live-metric">
+						<span
+							class="live-metric-value"
+							class:text-warning={liveAvgLatencyMs !== null && liveAvgLatencyMs > 500 && liveAvgLatencyMs <= 2000}
+							class:text-danger={liveAvgLatencyMs !== null && liveAvgLatencyMs > 2000}
+						>{liveAvgLatencyMs !== null ? `${Math.round(liveAvgLatencyMs)}ms` : '—'}</span>
+						<span class="live-metric-label">latency</span>
+					</div>
+					<div class="live-metric-divider"></div>
+					<div class="live-metric">
+						<span class="live-metric-value">{formatBps(liveBandwidthOutBps)}</span>
+						<span class="live-metric-label">out</span>
+					</div>
+					<div class="live-metric">
+						<span class="live-metric-value">{formatBps(liveBandwidthInBps)}</span>
+						<span class="live-metric-label">in</span>
+					</div>
+					<div class="live-metric-divider"></div>
+					<div class="live-metric">
+						<span class="live-metric-value">{liveActiveConnections}</span>
+						<span class="live-metric-label">connections (total)</span>
+					</div>
+				</div>
+			</div>
+
+			<!-- Traffic Stats Panel -->
+			<div class="stats-panel">
+				<div class="stats-panel-header">
+					<h2 class="stats-panel-title">Traffic</h2>
+					<div class="stat-tabs" role="tablist" aria-label="Stats time range">
+						{#each statRanges as r}
+							<button
+								class="stat-tab"
+								class:stat-tab-active={statsRange === r}
+								role="tab"
+								aria-selected={statsRange === r}
+								on:click={() => setStatsRange(r)}
+							>{r}</button>
+						{/each}
+					</div>
+				</div>
+
+				{#if statsError}
+					<p class="stats-empty">No traffic data yet — starts collecting once Traefik access logging is active.</p>
+				{:else if stats !== null}
+					<div class="metric-grid">
+					<!-- Requests -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Requests</span>
+						</div>
+						<span class="metric-card-value">{stats.requests.toLocaleString()}</span>
+						{#if stats.sparkline.length >= 2}
+							<div class="metric-card-sparkline-wrap">
+								<svg
+									class="metric-sparkline"
+									width="100%"
+									height="36"
+									viewBox="0 0 200 36"
+									preserveAspectRatio="none"
+									aria-hidden="true"
+									on:mousemove={handleSparklineMousemove}
+									on:mouseleave={handleSparklineMouseleave}
+								>
+									<defs>
+										<linearGradient id="sparkline-fill-requests" x1="0" y1="0" x2="0" y2="1">
+											<stop offset="0%" stop-color="var(--accent-teal)" stop-opacity="0.5" />
+											<stop offset="100%" stop-color="var(--accent-teal)" stop-opacity="0" />
+										</linearGradient>
+									</defs>
+									<polygon
+										points="{sparklineAreaPoints(stats.sparkline, 200, 34)}0,34"
+										fill="url(#sparkline-fill-requests)"
+									/>
+									<path
+										d={sparklinePath(stats.sparkline, 200, 34)}
+										fill="none"
+										stroke="var(--accent-teal)"
+										stroke-width="1.5"
+										stroke-linejoin="round"
+										stroke-linecap="round"
+									/>
+									{#if tooltipX !== null}
+										<line class="sparkline-crosshair" x1={tooltipX} y1="0" x2={tooltipX} y2="36" />
+									{/if}
+								</svg>
+								{#if tooltipVisible && tooltipData}
+									<div class="sparkline-tooltip" style="left: {tooltipLeft}px;">
+										<span class="sparkline-tooltip-val">{tooltipData.requests.toLocaleString()}</span>
+										<span class="sparkline-tooltip-ts">{formatTooltipTime(tooltipData.ts)}</span>
+									</div>
+								{/if}
+							</div>
+						{/if}
+					</div>
+
+					<!-- Visitors -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Visitors</span>
+							{#if stats.bot_requests > 0}
+								<span class="metric-card-badge">{stats.bot_requests.toLocaleString()} bots</span>
+							{/if}
+						</div>
+						<span class="metric-card-value">{stats.human_requests.toLocaleString()}</span>
+					</div>
+
+					<!-- Avg Latency -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Avg Latency</span>
+						</div>
+						<span
+							class="metric-card-value"
+							class:text-warning={stats.avg_ms !== null && stats.avg_ms > 500 && stats.avg_ms <= 2000}
+							class:text-danger={stats.avg_ms !== null && stats.avg_ms > 2000}
+						>{stats.avg_ms !== null ? `${Math.round(stats.avg_ms)}ms` : '—'}</span>
+						{#if stats.avg_ms !== null && stats.avg_ms > 500}
+							<span class="metric-card-threshold-label">
+								{stats.avg_ms > 2000 ? 'Critical (>2s)' : 'Elevated (>500ms)'}
+							</span>
+						{/if}
+					</div>
+
+					<!-- Error Rate -->
+					<div class="metric-card">
+						<div class="metric-card-header">
+							<span class="metric-card-label">Error Rate</span>
+						</div>
+						<span
+							class="metric-card-value"
+							class:text-warning={stats.error_rate > 0.01 && stats.error_rate <= 0.05}
+							class:text-danger={stats.error_rate > 0.05}
+						>{stats.requests > 0 ? `${(stats.error_rate * 100).toFixed(1)}%` : '—'}</span>
+					</div>
+				</div>
+
+				<div class="stats-bandwidth-row">
+					<span class="stats-bandwidth-label">Data served</span>
+					<span class="stats-bandwidth-value mono">{formatBytes(stats.bandwidth_bytes)}</span>
+				</div>
+				{:else if statsLoading}
+					<p class="stats-loading text-secondary">Loading…</p>
+				{/if}
+			</div>
+
+			{#if site.overallStatus === 'warning' || site.overallStatus === 'error'}
+				<div class="alert-banner" class:alert-danger={site.overallStatus === 'error'} class:alert-warning={site.overallStatus === 'warning'}>
+					<span class="alert-icon">{site.overallStatus === 'error' ? '✗' : '⚠'}</span>
+					<div>
+						{#if site.overallStatus === 'error' && deploys[0]?.status === 'failed'}
+							<strong>Last deploy failed.</strong> The site is running the previous build. Check the deploy log for details and fix the underlying issue before re-deploying.
+						{:else if site.overallStatus === 'warning' && site.ssl.daysUntilExpiry !== null && site.ssl.daysUntilExpiry <= 14}
+							<strong>SSL certificate expires in {site.ssl.daysUntilExpiry} days.</strong> Auto-renewal should have triggered by now. Verify certbot is running: <code>systemctl status certbot.timer</code>
+						{/if}
+					</div>
+				</div>
+			{/if}
+
+			<!-- Top Pages Panel -->
+			<div class="stats-panel">
+				<div class="stats-panel-header">
+					<h2 class="stats-panel-title">Top Pages</h2>
+				</div>
+				{#if pageStats === null}
+					<p class="stats-empty">Page analytics will appear here once traffic is recorded.</p>
+				{:else if pageStats.top_pages.length === 0}
+					<p class="stats-empty">No page data for this period yet.</p>
+				{:else}
+					<div class="top-pages-list">
+						{#each pageStats.top_pages as page, i}
+							{@const pct = pageStats.top_pages[0].requests > 0
+								? (page.requests / pageStats.top_pages[0].requests) * 100 : 0}
+							<div class="top-page-row">
+								<span class="page-rank text-muted mono">{i + 1}</span>
+								<div class="page-bar-wrap">
+									<div class="page-bar" style="width: {pct}%"></div>
+									<span class="page-path mono" title={page.path}>{page.path}</span>
+								</div>
+								<span class="page-count mono">{page.requests.toLocaleString()}</span>
+								{#if page.trend !== null}
+									<span class="page-trend" class:trend-up={page.trend > 0} class:trend-down={page.trend < 0}>
+										{page.trend > 0 ? '▲' : '▼'} {Math.abs(page.trend)}%
+									</span>
+								{/if}
+								{#if page.avg_ms !== null}
+									<span class="page-ms text-muted mono">{Math.round(page.avg_ms)}ms</span>
+								{/if}
+								<span
+									class="page-error mono"
+									class:text-warning={page.error_rate > 0.01 && page.error_rate <= 0.05}
+									class:text-danger={page.error_rate > 0.05}
+								>{(page.error_rate * 100).toFixed(1)}% err</span>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+
+			<!-- Top Referrers Panel -->
+			<div class="stats-panel">
+				<div class="stats-panel-header">
+					<h2 class="stats-panel-title">Top Referrers</h2>
+				</div>
+				{#if pageStats === null || pageStats.top_referrers.length === 0}
+					<p class="stats-empty">No referrer data for this period yet.</p>
+				{:else}
+					<div class="referrers-list">
+						{#each pageStats.top_referrers.slice(0, 10) as ref}
+							<div class="referrer-row">
+								<span class="referrer-domain mono">{ref.referrer_domain || 'direct'}</span>
+								<span class="mono text-secondary">{ref.requests.toLocaleString()}</span>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- DNS Tab -->
+	{#if activeTab === 'dns'}
+		<div class="tab-content">
+			<div class="section-header">
+				<div>
+					<h2 class="section-title">DNS Records</h2>
+					<p class="section-sub mono">{site.domain}</p>
+				</div>
+				<button
+					class="btn btn-primary btn-sm"
+					disabled={showAddDns && editingRecord !== null}
+					on:click={() => { if (showAddDns) { resetDnsForm(); } else { showAddDns = true; } }}
+				>
+					{showAddDns ? 'Cancel' : '+ Add Record'}
+				</button>
+			</div>
+
+			{#if showAddDns}
+				<div class="add-record-form">
+					<div class="form-title">{editingRecord ? 'Edit Record' : 'New DNS Record'}</div>
+					<div class="form-row">
+						<div class="form-field">
+							<label for="dns-type">Type</label>
+							<select id="dns-type" bind:value={newRecord.type} class="input">
+								{#each ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'CAA'] as t}
+									<option value={t}>{t}</option>
+								{/each}
+							</select>
+						</div>
+						<div class="form-field">
+							<label for="dns-name">Name</label>
+							<input id="dns-name" bind:value={newRecord.name} placeholder="@ or subdomain" class="input mono" />
+							<p class="dns-preview mono text-secondary">{newRecord.name === '@' || newRecord.name === '' ? site.domain : `${newRecord.name}.${site.domain}`}</p>
+						</div>
+						<div class="form-field form-field-wide">
+							<label for="dns-value">Value</label>
+							<input id="dns-value" bind:value={newRecord.value} placeholder="IP address or hostname" class="input mono" />
+						</div>
+						<div class="form-field form-field-narrow">
+							<label for="dns-ttl">TTL</label>
+							<input id="dns-ttl" bind:value={newRecord.ttl} type="number" class="input mono" />
+						</div>
+						{#if newRecord.type === 'MX' || newRecord.type === 'SRV'}
+							<div class="form-field form-field-narrow">
+								<label for="dns-priority">Priority</label>
+								<input id="dns-priority" bind:value={newRecord.priority} type="number" class="input mono" />
+							</div>
+						{/if}
+					</div>
+					<div class="form-actions">
+						<button class="btn btn-primary btn-sm" disabled={dnsFormSaving} on:click={addRecord}>
+							{dnsFormSaving ? 'Saving…' : editingRecord ? 'Update Record' : 'Save Record'}
+						</button>
+						<button class="btn btn-ghost btn-sm" on:click={resetDnsForm}>Cancel</button>
+						{#if dnsFormError}
+							<span class="text-danger">{dnsFormError}</span>
+						{/if}
+					</div>
+				</div>
+			{/if}
+
+			{#if dns.length === 0 && !showAddDns}
+				<div class="dns-empty">
+					<p class="text-secondary">No DNS records yet.</p>
+					<button class="btn btn-ghost btn-sm" on:click={() => showAddDns = true}>+ Add first record</button>
+				</div>
+			{:else if dns.length > 0}
+				<div class="table-wrapper">
+					<table class="dns-table">
+						<thead>
+							<tr>
+								<th>Type</th>
+								<th>Name</th>
+								<th>Value</th>
+								<th>TTL</th>
+								<th>Priority</th>
+								<th></th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each dns as record}
+								<tr style={deletingRecordId === record.id ? 'opacity: 0.4' : ''}>
+									<td>
+										<span class="dns-type-badge dns-type-{record.type.toLowerCase()}">{record.type}</span>
+									</td>
+									<td class="mono">{record.name}</td>
+									<td class="mono dns-value">{record.value}</td>
+									<td class="mono text-secondary">{record.ttl}</td>
+									<td class="mono text-secondary">{record.priority ?? '—'}</td>
+									<td class="cell-actions">
+										{#if deletingRecordId === record.id}
+											<span class="text-secondary">Deleting…</span>
+										{:else if deleteError && showDeleteDnsConfirm === record.id}
+											<span class="text-danger">{deleteError} <button class="btn btn-ghost btn-xs" on:click={() => deleteRecord(record.id)}>Retry?</button></span>
+										{:else if showDeleteDnsConfirm === record.id}
+											<div class="delete-confirm">
+												<span class="text-danger">Delete {record.type} {record.name}?</span>
+												<button class="btn btn-danger btn-xs" on:click={() => deleteRecord(record.id)}>Confirm delete</button>
+												<button class="btn btn-ghost btn-xs" on:click={() => { showDeleteDnsConfirm = null; deleteError = null; }}>Cancel</button>
+											</div>
+										{:else}
+											<div class="row-actions">
+												<button class="btn btn-ghost btn-xs" on:click={() => startEditRecord(record)}>Edit</button>
+												<button class="btn btn-ghost btn-xs text-danger" on:click={() => { showDeleteDnsConfirm = record.id; deleteError = null; }}>Delete</button>
+											</div>
+										{/if}
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{/if}
+		</div>
+	{/if}
+
+	<!-- Deployments Tab -->
+	{#if activeTab === 'deployments'}
+		<div class="tab-content">
+			<div class="section-header">
+				<div>
+					<h2 class="section-title">Deployments</h2>
+					<p class="section-sub">{deploys.length} deploy{deploys.length !== 1 ? 's' : ''}</p>
+				</div>
+				<button
+					class="btn btn-primary btn-sm"
+					class:btn-loading={deployState === 'loading'}
+					disabled={deployState === 'loading'}
+					on:click={triggerDeploy}
+				>{deployState === 'loading' ? 'Deploying…' : 'Deploy HEAD'}</button>
+			</div>
+
+			<div class="deploys-list">
+				{#each deploys as deploy}
+					<div class="deploy-row" class:deploy-failed={deploy.status === 'failed'}>
+						<div class="deploy-status-icon {deployStatusClass(deploy.status)}">
+							{deployStatusIcon(deploy.status)}
+						</div>
+						<div class="deploy-main">
+							<div class="deploy-top-row">
+								<span class="mono deploy-commit">{deploy.commitRef}</span>
+								<span class="mono deploy-branch text-secondary">{deploy.branch}</span>
+								<span class="deploy-message" title={deploy.commitMessage}>{deploy.commitMessage}</span>
+							</div>
+							<div class="deploy-meta">
+								<span class="text-secondary">{formatRelativeTime(deploy.startedAt)}</span>
+								{#if deploy.durationSeconds !== null}
+									<span class="sep">·</span>
+									<span class="text-secondary">{formatDuration(deploy.durationSeconds)}</span>
+								{/if}
+								<span class="sep">·</span>
+								<span class="text-secondary">by {deploy.triggeredBy}</span>
+							</div>
+						</div>
+						<div class="deploy-actions">
+							<span class="deploy-status-label {deployStatusClass(deploy.status)}">{deploy.status}</span>
+							<button class="btn btn-ghost btn-sm" on:click={() => openLog(deploy)}>Log</button>
+						</div>
+					</div>
+				{/each}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Environment Tab -->
+	{#if activeTab === 'environment'}
+		<div class="tab-content">
+
+			<!-- ── Compose env vars section (docker-compose sites only) ── -->
+			{#if isDockerCompose}
+				<div class="section-header" style="margin-bottom: 12px;">
+					<div>
+						<h2 class="section-title">Compose Variables</h2>
+						<p class="section-sub">Variables detected from docker-compose.yml — required vars must be set before deploy.</p>
+					</div>
+					<button class="btn btn-ghost btn-sm" on:click={loadComposeEnvVars} disabled={composeEnvLoading}>
+						{composeEnvLoading ? 'Loading…' : 'Refresh'}
+					</button>
+				</div>
+
+				{#if composeEnvLoading && composeEnvVars.length === 0}
+					<div class="dns-empty" style="margin-bottom: 24px;">
+						<p class="text-secondary">Loading…</p>
+					</div>
+				{:else if composeEnvLoadError}
+					<div class="dns-empty" style="margin-bottom: 24px;">
+						<p class="text-danger">{composeEnvLoadError}</p>
+						<button class="btn btn-ghost btn-sm" on:click={loadComposeEnvVars}>Retry</button>
+					</div>
+				{:else if composeEnvVars.length === 0}
+					<div class="dns-empty" style="margin-bottom: 24px;">
+						<p class="text-secondary">No compose variables detected. Make sure the site has a docker-compose.yml with environment references.</p>
+					</div>
+				{:else}
+					<div class="table-wrapper" style="margin-bottom: 32px;">
+						<table class="dns-table compose-env-table">
+							<thead>
+								<tr>
+									<th>Key</th>
+									<th>Value</th>
+									<th>Status</th>
+									<th></th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each composeEnvVars as env (env.key)}
+									{@const draft = composeEnvDrafts[env.key] ?? env.value}
+									{@const isSaving = composeEnvSaving[env.key] ?? false}
+									{@const saveErr = composeEnvSaveError[env.key] ?? ''}
+									{@const saveOk = composeEnvSaveOk[env.key] ?? false}
+									{@const visible = composeEnvVisible[env.key] ?? false}
+									<tr class:compose-env-required={env.isRequired}>
+										<td class="mono compose-env-key">
+											{env.key}
+											{#if env.isRequired}
+												<span class="compose-required-marker" aria-label="required">*</span>
+											{/if}
+										</td>
+										<td class="compose-env-value-cell">
+											<div class="compose-env-input-wrap">
+												<input
+													id="compose-env-input-{env.key}"
+													class="input mono compose-env-input"
+													class:compose-env-input-required={env.isRequired}
+													type={env.isSecret && !visible ? 'password' : 'text'}
+													placeholder={env.isRequired ? 'required' : env.hasDefault ? 'has default' : ''}
+													value={draft}
+													on:input={(e) => { const t = e.currentTarget; if (t instanceof HTMLInputElement) composeEnvDrafts = { ...composeEnvDrafts, [env.key]: t.value }; }}
+												/>
+												{#if env.isSecret}
+													<button
+														class="btn btn-ghost btn-xs compose-env-toggle-vis"
+														type="button"
+														on:click={() => { composeEnvVisible = { ...composeEnvVisible, [env.key]: !visible }; }}
+														aria-label={visible ? 'Hide value' : 'Show value'}
+													>{visible ? 'Hide' : 'Show'}</button>
+												{/if}
+											</div>
+										</td>
+										<td class="compose-env-status-cell">
+											{#if env.isRequired}
+												<span class="env-badge compose-badge-required">required</span>
+											{:else if env.isSecret}
+												<span class="env-badge compose-badge-secret">secret</span>
+											{:else if env.hasDefault}
+												<span class="env-badge compose-badge-default">has default</span>
+											{/if}
+										</td>
+										<td class="cell-actions compose-env-actions">
+											{#if env.isSecret}
+												<button
+													class="btn btn-ghost btn-xs"
+													type="button"
+													disabled={isSaving}
+													on:click={() => {
+														const secret = generateSecret();
+														composeEnvDrafts = { ...composeEnvDrafts, [env.key]: secret };
+														composeEnvVisible = { ...composeEnvVisible, [env.key]: true };
+													}}
+												>Regenerate</button>
+											{/if}
+											<button
+												class="btn btn-primary btn-xs"
+												type="button"
+												disabled={isSaving || draft === env.value}
+												on:click={() => saveComposeEnvRow(env.key)}
+											>{isSaving ? 'Saving…' : 'Save'}</button>
+											{#if saveOk}
+												<span class="text-success compose-env-save-ok">Saved</span>
+											{/if}
+											{#if saveErr}
+												<span class="text-danger" title={saveErr}>Error</span>
+											{/if}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+
+				<hr class="env-section-divider" />
+			{/if}
+
+			<!-- ── Coolify env vars section ── -->
+			<div class="section-header">
+				<div>
+					<h2 class="section-title">Additional Variables</h2>
+					<p class="section-sub mono">{site.domain}</p>
+				</div>
+				<button
+					class="btn btn-primary btn-sm"
+					on:click={() => { if (showAddEnv) { resetEnvForm(); } else { showAddEnv = true; editingEnv = null; } }}
+				>
+					{showAddEnv ? 'Cancel' : '+ Add Variable'}
+				</button>
+			</div>
+
+			{#if showAddEnv}
+				<div class="add-record-form">
+					<div class="form-title">{editingEnv ? 'Edit Variable' : 'New Environment Variable'}</div>
+					<div class="form-row">
+						<div class="form-field">
+							<label for="env-key">Key</label>
+							<input id="env-key" bind:value={newEnv.key} placeholder="VARIABLE_NAME" class="input mono" />
+						</div>
+						<div class="form-field form-field-wide">
+							<label for="env-value">{editingEnv ? 'Value (leave blank to keep existing)' : 'Value'}</label>
+							{#if newEnv.is_shown_once}
+								<input id="env-value" bind:value={newEnv.value} placeholder={editingEnv ? '(unchanged)' : 'value'} class="input mono" type="password" />
+							{:else}
+								<input id="env-value" bind:value={newEnv.value} placeholder={editingEnv ? '(unchanged)' : 'value'} class="input mono" type="text" />
+							{/if}
+						</div>
+					</div>
+					<div class="form-row env-toggles">
+						<label class="env-toggle-label">
+							<input type="checkbox" bind:checked={newEnv.is_runtime} />
+							Runtime
+						</label>
+						<label class="env-toggle-label">
+							<input type="checkbox" bind:checked={newEnv.is_buildtime} />
+							Build time
+						</label>
+						{#if !editingEnv}
+							<label class="env-toggle-label">
+								<input type="checkbox" bind:checked={newEnv.is_shown_once} />
+								Sensitive (mask value)
+							</label>
+						{/if}
+					</div>
+					<div class="form-actions">
+						<button class="btn btn-primary btn-sm" disabled={envFormSaving || !newEnv.key.trim()} on:click={saveEnv}>
+							{envFormSaving ? 'Saving…' : editingEnv ? 'Update Variable' : 'Save Variable'}
+						</button>
+						<button class="btn btn-ghost btn-sm" on:click={resetEnvForm}>Cancel</button>
+						{#if envFormError}
+							<span class="text-danger">{envFormError}</span>
+						{/if}
+					</div>
+				</div>
+			{/if}
+
+			{#if envLoading}
+				<div class="dns-empty">
+					<p class="text-secondary">Loading…</p>
+				</div>
+			{:else if envLoadError}
+				<div class="dns-empty">
+					<p class="text-danger">{envLoadError}</p>
+					<button class="btn btn-ghost btn-sm" on:click={loadEnvVars}>Retry</button>
+				</div>
+			{:else if envVars.length === 0 && !showAddEnv}
+				<div class="dns-empty">
+					<p class="text-secondary">No additional variables yet.</p>
+					<button class="btn btn-ghost btn-sm" on:click={() => showAddEnv = true}>+ Add first variable</button>
+				</div>
+			{:else if envVars.length > 0}
+				<div class="table-wrapper">
+					<table class="dns-table">
+						<thead>
+							<tr>
+								<th>Key</th>
+								<th>Value</th>
+								<th>Type</th>
+								<th></th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each envVars as env}
+								<tr style={deletingEnvUuid === env.uuid ? 'opacity: 0.4' : ''}>
+									<td class="mono">{env.key}</td>
+									<td class="mono dns-value">{env.is_shown_once ? '••••••••' : env.value}</td>
+									<td>
+										{#if env.is_runtime}
+											<span class="env-badge env-badge-runtime">Runtime</span>
+										{/if}
+										{#if env.is_buildtime}
+											<span class="env-badge env-badge-build">Build</span>
+										{/if}
+										{#if env.is_preview}
+											<span class="env-badge env-badge-preview">Preview</span>
+										{/if}
+									</td>
+									<td class="cell-actions">
+										{#if deletingEnvUuid === env.uuid}
+											<span class="text-secondary">Deleting…</span>
+										{:else if deleteEnvError && showDeleteEnvConfirm === env.uuid}
+											<span class="text-danger">{deleteEnvError} <button class="btn btn-ghost btn-xs" on:click={() => deleteEnv(env.uuid)}>Retry?</button></span>
+										{:else if showDeleteEnvConfirm === env.uuid}
+											<div class="delete-confirm">
+												<span class="text-danger">Delete {env.key}?</span>
+												<button class="btn btn-danger btn-xs" on:click={() => deleteEnv(env.uuid)}>Confirm delete</button>
+												<button class="btn btn-ghost btn-xs" on:click={() => { showDeleteEnvConfirm = null; deleteEnvError = null; }}>Cancel</button>
+											</div>
+										{:else}
+											<div class="row-actions">
+												<button class="btn btn-ghost btn-xs" on:click={() => startEditEnv(env)}>Edit</button>
+												<button class="btn btn-ghost btn-xs text-danger" on:click={() => { showDeleteEnvConfirm = env.uuid; deleteEnvError = null; }}>Delete</button>
+											</div>
+										{/if}
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{/if}
+		</div>
+	{/if}
+
+	<!-- Settings Tab -->
+	{#if activeTab === 'settings'}
+		<div class="tab-content">
+			<div class="settings-grid">
+				<div class="settings-section">
+					<h2 class="section-title">Site Configuration</h2>
+					<div class="settings-form">
+						<div class="form-field">
+							<label for="cfg-domain">Domain</label>
+							<input id="cfg-domain" bind:value={settingsDomain} class="input mono" readonly />
+						</div>
+						<div class="form-field">
+							<label for="cfg-repo">Repository</label>
+							<input id="cfg-repo" bind:value={settingsRepo} class="input mono" />
+						</div>
+						<div class="form-field">
+							<label for="cfg-branch">Branch</label>
+							<input id="cfg-branch" bind:value={settingsBranch} class="input mono" placeholder="main" />
+						</div>
+						<div class="form-field">
+							<label for="cfg-build-pack">Build Pack</label>
+							<select id="cfg-build-pack" bind:value={settingsBuildPack} class="input">
+								<option value="nixpacks">nixpacks</option>
+								<option value="dockerfile">dockerfile</option>
+								<option value="dockercompose">dockercompose</option>
+								<option value="static">static</option>
+							</select>
+						</div>
+						{#if settingsBuildPack === 'dockercompose'}
+							<div class="form-field">
+								<label for="cfg-compose-loc">Docker Compose File</label>
+								<input id="cfg-compose-loc" bind:value={settingsDockerComposeLoc} class="input mono" placeholder="/docker-compose.yml" />
+								<span class="field-hint">Path within the repo, appended to Base Directory. Use <code>/docker-compose.yml</code> or <code>/docker-compose.yaml</code> for files at repo root.</span>
+							</div>
+							<div class="form-field">
+								<label for="cfg-base-dir">Base Directory</label>
+								<input id="cfg-base-dir" bind:value={settingsBaseDir} class="input mono" placeholder="/" />
+								<span class="field-hint">Repo subdirectory to use as working directory. <code>/</code> = repo root. For monorepos use e.g. <code>/services/web</code>.</span>
+							</div>
+						{/if}
+						<div class="form-field">
+							<label for="cfg-server">Server</label>
+							<input id="cfg-server" bind:value={settingsServer} class="input mono" />
+						</div>
+						<div class="form-field">
+							<label for="cfg-desc">Description</label>
+							<input id="cfg-desc" bind:value={settingsDesc} class="input" />
+						</div>
+						<div class="form-actions">
+							<button
+								class="btn btn-primary btn-sm"
+								disabled={saveState === 'saving'}
+								on:click={saveSettings}
+							>
+								{saveState === 'saving' ? 'Saving…' : 'Save Changes'}
+							</button>
+							{#if saveMessage}
+								<span
+									class="save-feedback"
+									class:save-feedback-success={saveState === 'saved'}
+									class:save-feedback-error={saveState === 'error'}
+								>{saveMessage}</span>
+							{/if}
+						</div>
+					</div>
+				</div>
+
+				<div class="settings-section">
+					<h2 class="section-title">Deploy Authentication</h2>
+					<div class="settings-form">
+						<div class="form-field">
+							<label for="cfg-deploy-auth">Method</label>
+							<select id="cfg-deploy-auth" bind:value={settingsDeployAuth} class="input">
+								<option value="ssh_key">SSH Key</option>
+								<option value="pat">Personal Access Token (PAT)</option>
+							</select>
+						</div>
+						{#if settingsDeployAuth === 'pat'}
+							<div class="form-field">
+								<label for="cfg-deploy-token">
+									Access Token
+									{#if site.deploy_auth === 'pat'}<span class="text-secondary"> (leave blank to keep current)</span>{/if}
+								</label>
+								<input
+									id="cfg-deploy-token"
+									type="password"
+									bind:value={settingsDeployToken}
+									class="input mono"
+									placeholder="ghp_..."
+								/>
+							</div>
+						{/if}
+						{#if settingsDeployAuth === 'ssh_key'}
+							<div class="form-field">
+								<label>Deploy Key</label>
+								<p class="deploy-key-hint text-secondary">Add this public key to your GitHub repository as a deploy key so HermitHost can pull your code.</p>
+								{#if deployPublicKey}
+									<div class="deploy-key-block">
+										<code class="deploy-key-text mono">{deployPublicKey}</code>
+									</div>
+									<div class="form-actions" style="margin-top:8px">
+										<button class="btn btn-ghost btn-sm" on:click={copyDeployKey}>
+											{deployKeyCopied ? 'Copied!' : 'Copy Key'}
+										</button>
+										{#if parseGithubOwnerRepo(settingsRepo)}
+											<button class="btn btn-primary btn-sm" on:click={openGithubDeployKeys}>
+												Add to GitHub →
+											</button>
+										{/if}
+									</div>
+								{:else}
+									<p class="text-secondary" style="font-size:12px">Loading deploy key…</p>
+								{/if}
+							</div>
+						{/if}
+						<div class="form-actions">
+							<button
+								class="btn btn-primary btn-sm"
+								disabled={
+									authSaveState === 'saving'
+									|| (settingsDeployAuth === site.deploy_auth && settingsDeployAuth === 'ssh_key')
+									|| (settingsDeployAuth === 'pat' && !settingsDeployToken.trim() && site.deploy_auth === 'pat')
+								}
+								on:click={saveDeployAuth}
+							>
+								{authSaveState === 'saving' ? 'Updating…' : 'Update Auth'}
+							</button>
+							{#if authSaveMessage}
+								<span
+									class="save-feedback"
+									class:save-feedback-success={authSaveState === 'saved'}
+									class:save-feedback-error={authSaveState === 'error'}
+								>{authSaveMessage}</span>
+							{/if}
+						</div>
+					</div>
+				</div>
+
+				<div class="settings-section danger-zone">
+					<h2 class="section-title text-danger">Danger Zone</h2>
+					<div class="danger-item">
+						<div>
+							<div class="danger-label">Remove site from HermitHost</div>
+							<div class="danger-desc text-secondary">Removes the site from this dashboard. Does not delete files from the server or DNS records.</div>
+						</div>
+						{#if !showDeleteSiteConfirm}
+							<button class="btn btn-danger-outline" on:click={() => { showDeleteSiteConfirm = true; deleteSiteError = ''; }}>Remove site…</button>
+						{:else}
+							<div class="delete-site-confirm">
+								<span class="danger-desc">Remove <strong class="mono">{site.domain}</strong>?</span>
+								<button
+									class="btn btn-danger btn-sm"
+									disabled={deleteSiteState === 'deleting'}
+									on:click={deleteSite}
+								>{deleteSiteState === 'deleting' ? 'Removing…' : 'Yes, remove'}</button>
+								<button class="btn btn-ghost btn-sm" on:click={() => { showDeleteSiteConfirm = false; deleteSiteError = ''; }}>Cancel</button>
+								{#if deleteSiteError}<span class="save-feedback save-feedback-error">{deleteSiteError}</span>{/if}
+							</div>
+						{/if}
+					</div>
+				</div>
+			</div>
+		</div>
+	{/if}
+</div>
+
+<!-- Deploy Preflight Modal -->
+{#if showPreflightModal}
+	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+	<div class="modal-backdrop" on:click={closePreflightModal} role="presentation">
+		<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+		<div class="modal preflight-modal" on:click|stopPropagation role="dialog" aria-modal="true" aria-labelledby="preflight-title">
+			<div class="modal-header">
+				<div class="modal-title-row">
+					<span id="preflight-title" class="preflight-title">Missing required environment variables</span>
+				</div>
+				<div class="modal-meta text-secondary">The following must be set before deploy:</div>
+				<button class="modal-close" on:click={closePreflightModal} aria-label="Close">✕</button>
+			</div>
+			<div class="preflight-body">
+				<ul class="preflight-list">
+					{#each preflightMissing as key}
+						<li class="preflight-item mono">{key}</li>
+					{/each}
+				</ul>
+				<div class="preflight-actions">
+					<button class="btn btn-ghost btn-sm" on:click={closePreflightModal}>Cancel</button>
+					<button class="btn btn-primary btn-sm" on:click={goToEnvTab}>Go to Env Tab</button>
+				</div>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Deploy Log Modal -->
+{#if logModal !== null}
+	{@const deploy = logModal}
+	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+	<div class="modal-backdrop" on:click={closeLog} role="presentation">
+		<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+		<div class="modal" on:click|stopPropagation role="dialog" aria-modal="true" aria-label="Deploy log">
+			<div class="modal-header">
+				<div class="modal-title-row">
+					<span class="mono deploy-commit">{deploy.commitRef}</span>
+					<span class="mono text-secondary">{deploy.branch}</span>
+					<span class="deploy-status-label {deployStatusClass(deploy.status)}">{deploy.status}</span>
+				</div>
+				<div class="modal-meta text-secondary">
+					{deploy.commitMessage} · {formatRelativeTime(deploy.startedAt)}
+					{#if deploy.durationSeconds !== null}
+						· {formatDuration(deploy.durationSeconds)}
+					{/if}
+				</div>
+				<button class="modal-close" on:click={closeLog} aria-label="Close log">✕</button>
+			</div>
+			<div class="log-output" role="log" aria-label="Deploy log output">
+				{#each deploy.logLines as line}
+					<div class="log-line" class:log-error={line.includes('ERROR') || line.includes('FAILED') || line.includes('✗')} class:log-success={line.includes('✓')}>
+						{line}
+					</div>
+				{/each}
+				{#if deploy.status === 'pending' || deploy.status === 'running'}
+					<div class="log-cursor">▌</div>
+				{/if}
+			</div>
+		</div>
+	</div>
+{/if}
+
+<style>
+	.page {
+		padding: 28px 40px 60px;
+		max-width: 1300px;
+	}
+
+	.breadcrumb {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-bottom: 20px;
+		font-size: 12px;
+	}
+
+	.breadcrumb-link {
+		color: var(--text-secondary);
+		transition: color 0.1s;
+	}
+
+	.breadcrumb-link:hover {
+		color: var(--text-primary);
+	}
+
+	.breadcrumb-sep {
+		color: var(--text-muted);
+	}
+
+	.breadcrumb-current {
+		color: var(--text-primary);
+	}
+
+	.page-header {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		margin-bottom: 24px;
+		gap: 16px;
+	}
+
+	.site-title-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		margin-bottom: 6px;
+	}
+
+	.page-title {
+		font-size: 20px;
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+
+	.site-meta {
+		font-size: 12px;
+		color: var(--text-secondary);
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+
+	.sep { color: var(--text-muted); }
+
+	.header-actions {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-shrink: 0;
+	}
+
+	.status-dot {
+		width: 9px;
+		height: 9px;
+		border-radius: 50%;
+		flex-shrink: 0;
+	}
+
+	.status-healthy { background: var(--success); }
+	.status-warning { background: var(--warning); box-shadow: 0 0 6px rgba(212,168,67,0.4); }
+	.status-error { background: var(--danger); box-shadow: 0 0 6px rgba(207,92,92,0.4); }
+	.status-pending { background: var(--pending); animation: pulse 2s infinite; }
+
+	@keyframes pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.4; }
+	}
+
+	/* Tabs */
+	.tabs {
+		display: flex;
+		border-bottom: 1px solid var(--border);
+		gap: 0;
+		margin-bottom: 24px;
+	}
+
+	.tab {
+		background: none;
+		border: none;
+		border-bottom: 2px solid transparent;
+		margin-bottom: -1px;
+		padding: 10px 16px;
+		color: var(--text-secondary);
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: color 0.1s, border-color 0.1s;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.tab:hover {
+		color: var(--text-primary);
+	}
+
+	.tab-active {
+		color: var(--text-primary);
+		border-bottom-color: var(--accent-teal);
+	}
+
+	.tab-count {
+		background: var(--bg-elevated);
+		color: var(--text-secondary);
+		font-size: 10px;
+		padding: 1px 5px;
+		border-radius: 10px;
+		border: 1px solid var(--border);
+	}
+
+	/* Status cards */
+	.status-grid {
+		display: grid;
+		grid-template-columns: repeat(4, 1fr);
+		gap: 12px;
+		margin-bottom: 20px;
+	}
+
+	.status-card {
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 16px;
+	}
+
+	.card-danger {
+		border-color: rgba(207, 92, 92, 0.4);
+		background: rgba(207, 92, 92, 0.05);
+	}
+
+	.card-warning {
+		border-color: rgba(212, 168, 67, 0.4);
+		background: rgba(212, 168, 67, 0.04);
+	}
+
+	.status-card-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 12px;
+	}
+
+	.status-card-label {
+		font-size: 11px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-secondary);
+	}
+
+	.status-badge {
+		font-size: 10px;
+		font-weight: 500;
+		padding: 2px 7px;
+		border-radius: 3px;
+	}
+
+	.badge-success {
+		background: rgba(76,175,130,0.15);
+		color: var(--success);
+		border: 1px solid rgba(76,175,130,0.25);
+	}
+
+	.badge-danger {
+		background: rgba(207,92,92,0.15);
+		color: var(--danger);
+		border: 1px solid rgba(207,92,92,0.25);
+	}
+
+	.badge-warning {
+		background: rgba(212,168,67,0.15);
+		color: var(--warning);
+		border: 1px solid rgba(212,168,67,0.25);
+	}
+
+	.badge-pending {
+		background: rgba(139,157,195,0.15);
+		color: var(--pending);
+		border: 1px solid rgba(139,157,195,0.25);
+	}
+
+	.status-card-value {
+		font-size: 20px;
+		font-weight: 500;
+		color: var(--text-primary);
+		margin-bottom: 4px;
+	}
+
+	.status-card-detail {
+		font-size: 12px;
+		margin-bottom: 2px;
+	}
+
+	.status-card-time {
+		font-size: 11px;
+		margin-top: 8px;
+	}
+
+	.truncate {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 200px;
+	}
+
+	/* Alert banner */
+	.alert-banner {
+		display: flex;
+		align-items: flex-start;
+		gap: 12px;
+		padding: 14px 16px;
+		border-radius: 7px;
+		font-size: 13px;
+	}
+
+	.alert-danger {
+		background: rgba(207,92,92,0.12);
+		border: 1px solid rgba(207,92,92,0.35);
+		color: #e8a0a0;
+	}
+
+	.alert-warning {
+		background: rgba(212,168,67,0.1);
+		border: 1px solid rgba(212,168,67,0.3);
+		color: #dfc07a;
+	}
+
+	.alert-icon {
+		font-size: 14px;
+		margin-top: 1px;
+		flex-shrink: 0;
+	}
+
+	.alert-banner code {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		background: rgba(0,0,0,0.2);
+		padding: 1px 5px;
+		border-radius: 3px;
+	}
+
+	/* Section headers */
+	.section-header {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		margin-bottom: 16px;
+	}
+
+	.section-title {
+		font-size: 15px;
+		font-weight: 600;
+		color: var(--text-primary);
+		margin-bottom: 2px;
+	}
+
+	.section-sub {
+		font-size: 12px;
+		color: var(--text-secondary);
+	}
+
+	/* DNS table */
+	.table-wrapper {
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		overflow: hidden;
+	}
+
+	.dns-table td:last-child {
+		text-align: right;
+	}
+
+	.dns-value {
+		font-size: 12px;
+		max-width: 400px;
+		word-break: break-all;
+	}
+
+	.dns-type-badge {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		font-weight: 500;
+		padding: 2px 7px;
+		border-radius: 3px;
+		border: 1px solid var(--border-bright);
+		background: var(--bg-elevated);
+	}
+
+	.dns-type-a { color: #7ab5e8; border-color: rgba(122,181,232,0.3); background: rgba(122,181,232,0.08); }
+	.dns-type-aaaa { color: #7ab5e8; border-color: rgba(122,181,232,0.3); background: rgba(122,181,232,0.08); }
+	.dns-type-cname { color: #a8e6a3; border-color: rgba(168,230,163,0.3); background: rgba(168,230,163,0.08); }
+	.dns-type-mx { color: #e8c87a; border-color: rgba(232,200,122,0.3); background: rgba(232,200,122,0.08); }
+	.dns-type-txt { color: #c8a8e8; border-color: rgba(200,168,232,0.3); background: rgba(200,168,232,0.08); }
+	.dns-type-ns { color: var(--text-secondary); }
+	.dns-type-srv { color: #e87a9a; border-color: rgba(232,122,154,0.3); background: rgba(232,122,154,0.08); }
+	.dns-type-caa { color: var(--accent-amber); border-color: rgba(212,168,67,0.3); background: rgba(212,168,67,0.08); }
+
+	/* Environment variable badges */
+	.env-badge {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		font-weight: 500;
+		padding: 2px 6px;
+		border-radius: 3px;
+		border: 1px solid transparent;
+		display: inline-block;
+		margin-right: 4px;
+	}
+
+	.env-badge-runtime {
+		color: #a8e6a3;
+		border-color: rgba(168,230,163,0.3);
+		background: rgba(168,230,163,0.08);
+	}
+
+	.env-badge-build {
+		color: #e8c87a;
+		border-color: rgba(232,200,122,0.3);
+		background: rgba(232,200,122,0.08);
+	}
+
+	.env-badge-preview {
+		color: #a8c8e6;
+		border-color: rgba(168,200,230,0.3);
+		background: rgba(168,200,230,0.08);
+	}
+
+	.env-toggles {
+		display: flex;
+		gap: 20px;
+		align-items: center;
+		flex-wrap: wrap;
+	}
+
+	.env-toggle-label {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 13px;
+		color: var(--text-secondary);
+		cursor: pointer;
+		user-select: none;
+	}
+
+	.env-toggle-label input[type='checkbox'] {
+		accent-color: var(--accent-primary, #7ab5e8);
+		width: 14px;
+		height: 14px;
+	}
+
+	.row-actions {
+		display: flex;
+		gap: 6px;
+		justify-content: flex-end;
+	}
+
+	.delete-confirm {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		justify-content: flex-end;
+	}
+
+	/* Deploy list */
+	.deploys-list {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		background: var(--border);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		overflow: hidden;
+	}
+
+	.deploy-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 14px 16px;
+		background: var(--bg-surface);
+		transition: background 0.1s;
+	}
+
+	.deploy-row:hover {
+		background: var(--bg-hover);
+	}
+
+	.deploy-failed {
+		border-left: 2px solid var(--danger);
+	}
+
+	.deploy-status-icon {
+		font-size: 16px;
+		font-family: var(--font-mono);
+		width: 20px;
+		text-align: center;
+		flex-shrink: 0;
+	}
+
+	.deploy-main {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.deploy-top-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		margin-bottom: 4px;
+	}
+
+	.deploy-commit {
+		font-size: 13px;
+		font-weight: 500;
+		color: var(--accent-teal);
+	}
+
+	.deploy-branch {
+		font-size: 11px;
+		background: var(--bg-elevated);
+		padding: 1px 6px;
+		border-radius: 3px;
+		border: 1px solid var(--border-bright);
+	}
+
+	.deploy-message {
+		font-size: 13px;
+		color: var(--text-primary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		min-width: 0;
+	}
+
+	.deploy-meta {
+		font-size: 12px;
+		color: var(--text-secondary);
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.deploy-actions {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		flex-shrink: 0;
+	}
+
+	.deploy-status-label {
+		font-size: 11px;
+		font-family: var(--font-mono);
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+
+	/* Add DNS form */
+	.add-record-form {
+		background: var(--bg-surface);
+		border: 1px solid var(--border-bright);
+		border-radius: 8px;
+		padding: 16px;
+		margin-bottom: 16px;
+	}
+
+	.form-title {
+		font-size: 13px;
+		font-weight: 500;
+		color: var(--text-primary);
+		margin-bottom: 14px;
+	}
+
+	.form-row {
+		display: flex;
+		gap: 10px;
+		align-items: flex-end;
+		flex-wrap: wrap;
+	}
+
+	.form-field {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+		min-width: 120px;
+	}
+
+	.form-field-wide {
+		flex: 1;
+		min-width: 200px;
+	}
+
+	.field-hint {
+		font-size: 11px;
+		color: var(--text-secondary);
+		margin-top: 2px;
+	}
+
+	.form-field-narrow {
+		min-width: 80px;
+		max-width: 100px;
+	}
+
+	label {
+		font-size: 11px;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-secondary);
+	}
+
+	.input {
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-bright);
+		border-radius: 5px;
+		color: var(--text-primary);
+		font-size: 13px;
+		padding: 7px 10px;
+		outline: none;
+		transition: border-color 0.1s;
+		width: 100%;
+	}
+
+	.input:focus {
+		border-color: var(--accent-teal);
+	}
+
+	.input[readonly] {
+		opacity: 0.6;
+		cursor: default;
+	}
+
+	select.input {
+		cursor: pointer;
+	}
+
+	.form-actions {
+		display: flex;
+		gap: 8px;
+		margin-top: 14px;
+	}
+
+	/* Buttons */
+	.btn {
+		border: none;
+		border-radius: 5px;
+		font-size: 13px;
+		font-weight: 500;
+		padding: 7px 14px;
+		transition: background 0.1s, opacity 0.1s;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		white-space: nowrap;
+		color: var(--text-primary);
+		cursor: pointer;
+		font-family: var(--font-ui);
+	}
+
+	.btn-primary {
+		background: var(--accent-teal);
+		color: #fff;
+	}
+
+	.btn-primary:hover { background: var(--accent-teal-dim); }
+
+	.btn-ghost {
+		background: transparent;
+		color: var(--text-secondary);
+		border: 1px solid var(--border-bright);
+	}
+
+	.btn-ghost:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.btn-danger-outline {
+		background: transparent;
+		color: var(--danger);
+		border: 1px solid rgba(207,92,92,0.4);
+	}
+
+	.btn-danger-outline:hover {
+		background: rgba(207,92,92,0.1);
+	}
+
+	.btn-danger {
+		background: var(--danger);
+		color: #fff;
+	}
+
+	.btn-sm {
+		font-size: 12px;
+		padding: 5px 10px;
+	}
+
+	.btn-xs {
+		font-size: 11px;
+		padding: 3px 8px;
+	}
+
+	.mt-8 { margin-top: 8px; }
+
+	/* Settings */
+	.settings-grid {
+		display: flex;
+		flex-direction: column;
+		gap: 32px;
+		max-width: 560px;
+	}
+
+	.settings-section {
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 20px;
+	}
+
+	.settings-section .section-title {
+		margin-bottom: 16px;
+		padding-bottom: 12px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.settings-form {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.danger-zone {
+		border-color: rgba(207,92,92,0.3);
+	}
+
+	.danger-item {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+	}
+
+	.delete-site-confirm {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.danger-label {
+		font-size: 13px;
+		font-weight: 500;
+		color: var(--text-primary);
+		margin-bottom: 4px;
+	}
+
+	.danger-desc {
+		font-size: 12px;
+	}
+
+	/* Modal */
+	.modal-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(0,0,0,0.7);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 100;
+		padding: 24px;
+	}
+
+	.modal {
+		background: var(--bg-surface);
+		border: 1px solid var(--border-bright);
+		border-radius: 10px;
+		width: 100%;
+		max-width: 820px;
+		max-height: 80vh;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+
+	.modal-header {
+		padding: 16px 20px;
+		border-bottom: 1px solid var(--border);
+		position: relative;
+		flex-shrink: 0;
+	}
+
+	.modal-title-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		margin-bottom: 4px;
+	}
+
+	.modal-meta {
+		font-size: 12px;
+	}
+
+	.modal-close {
+		position: absolute;
+		top: 14px;
+		right: 16px;
+		background: none;
+		border: none;
+		color: var(--text-secondary);
+		font-size: 14px;
+		cursor: pointer;
+		padding: 4px;
+		line-height: 1;
+		transition: color 0.1s;
+	}
+
+	.modal-close:hover {
+		color: var(--text-primary);
+	}
+
+	.log-output {
+		flex: 1;
+		overflow-y: auto;
+		padding: 16px 20px;
+		background: #070d18;
+		font-family: var(--font-mono);
+		font-size: 12px;
+		line-height: 1.7;
+	}
+
+	.log-line {
+		color: #8fa3c0;
+		white-space: pre-wrap;
+		word-break: break-all;
+	}
+
+	.log-error {
+		color: #e88080;
+	}
+
+	.log-success {
+		color: #7dd3a8;
+	}
+
+	.log-cursor {
+		color: var(--accent-teal);
+		animation: blink 1s step-end infinite;
+	}
+
+	@keyframes blink {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0; }
+	}
+
+	/* Deploy button */
+	.deploy-wrapper {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+
+	.btn-loading {
+		opacity: 0.7;
+		cursor: not-allowed;
+	}
+
+	.deploy-status {
+		font-size: 12px;
+		font-weight: 500;
+	}
+
+	.deploy-status-success {
+		color: var(--accent-teal);
+	}
+
+	.deploy-status-error {
+		color: var(--danger);
+	}
+
+	.deploy-status-unavailable {
+		color: var(--accent-amber);
+	}
+
+	/* Spinner */
+	.spinner {
+		display: inline-block;
+		width: 12px;
+		height: 12px;
+		border: 2px solid var(--border-bright);
+		border-top-color: var(--text-secondary);
+		border-radius: 50%;
+		animation: spin 0.6s linear infinite;
+		flex-shrink: 0;
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
+	}
+
+	/* Save feedback */
+	.save-feedback {
+		font-size: 12px;
+		font-weight: 500;
+	}
+
+	.save-feedback-success {
+		color: var(--accent-teal);
+	}
+
+	.save-feedback-error {
+		color: var(--danger);
+	}
+
+	/* DNS empty state */
+	.dns-empty {
+		text-align: center;
+		padding: 2rem;
+		border: 1px dashed var(--border);
+		border-radius: 6px;
+	}
+
+	/* DNS domain preview */
+	.dns-preview {
+		font-size: 0.75rem;
+		margin-top: 0.25rem;
+		margin-bottom: 0;
+	}
+
+	/* Deploy key */
+	.deploy-key-hint {
+		font-size: 12px;
+		margin: 0;
+	}
+
+	.deploy-key-block {
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-bright);
+		border-radius: 5px;
+		padding: 10px 12px;
+		overflow-x: auto;
+	}
+
+	.deploy-key-text {
+		font-size: 11px;
+		color: var(--text-secondary);
+		word-break: break-all;
+		white-space: pre-wrap;
+		display: block;
+	}
+
+	/* Traffic stats panel */
+	.stats-panel {
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 16px 20px;
+		margin-bottom: 20px;
+	}
+
+	.stats-panel-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 16px;
+	}
+
+	.stats-panel-title {
+		font-size: 13px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-secondary);
+	}
+
+	.stats-empty {
+		font-size: 12px;
+		color: var(--text-secondary);
+		padding: 8px 0;
+		margin: 0;
+	}
+
+	.stats-loading {
+		font-size: 12px;
+		padding: 8px 0;
+		margin: 0;
+	}
+
+	/* ── Live Zone ─────────────────────────────────────────────────────────── */
+	.live-zone {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		background: var(--bg-surface);
+		border: 1px solid var(--border);
+		border-left: 3px solid var(--live-disconnected);
+		border-radius: 8px;
+		padding: 12px 16px;
+		margin-bottom: 12px;
+		opacity: 0.55;
+		transition: opacity 0.3s ease, border-color 0.3s ease;
+	}
+	.live-zone-active {
+		opacity: 1;
+		border-left-color: var(--live-connected);
+		background: color-mix(in srgb, var(--live-connected) 4%, var(--bg-surface));
+	}
+	.live-zone-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+	.live-zone-label {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+	}
+	.live-badge-text {
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.1em;
+		color: var(--live-disconnected);
+		font-family: var(--font-mono);
+	}
+	.live-zone-active .live-badge-text {
+		color: var(--live-connected);
+	}
+	.live-zone-sub {
+		font-size: 11px;
+		color: var(--text-muted);
+	}
+	.live-zone-metrics {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		row-gap: 8px;
+	}
+	.live-metric {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 0 16px 0 0;
+	}
+	.live-metric-value {
+		font-family: var(--font-mono);
+		font-size: 20px;
+		font-weight: 600;
+		color: var(--text-primary);
+		line-height: 1;
+	}
+	.live-metric-label {
+		font-size: 10px;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-muted);
+	}
+	.live-metric-divider {
+		width: 1px;
+		height: 28px;
+		background: var(--border-bright);
+		margin: 0 16px 0 0;
+		flex-shrink: 0;
+		align-self: center;
+	}
+	.live-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--live-disconnected);
+		flex-shrink: 0;
+		transition: background 0.3s;
+	}
+	.live-dot-connected {
+		background: var(--live-connected);
+		animation: live-pulse 1.8s ease-in-out infinite;
+	}
+	@keyframes live-pulse {
+		0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--live-connected) 70%, transparent); }
+		60%  { box-shadow: 0 0 0 6px color-mix(in srgb, var(--live-connected) 0%, transparent); }
+		100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--live-connected) 0%, transparent); }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.live-dot-connected { animation: none; }
+	}
+
+	/* ── Metric Grid ─────────────────────────────────────────────────────────── */
+	.metric-grid {
+		display: grid;
+		grid-template-columns: repeat(4, 1fr);
+		gap: 10px;
+		margin-bottom: 12px;
+	}
+	.metric-card {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 12px 14px 10px;
+		min-height: 100px;
+		position: relative;
+		overflow: hidden;
+	}
+	.metric-card-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 6px;
+	}
+	.metric-card-label {
+		font-size: 10px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.09em;
+		color: var(--text-muted);
+	}
+	.metric-card-badge {
+		font-size: 10px;
+		font-family: var(--font-mono);
+		color: var(--text-secondary);
+		background: var(--bg-hover);
+		border-radius: 3px;
+		padding: 1px 5px;
+	}
+	.metric-card-value {
+		font-family: var(--font-mono);
+		font-size: 26px;
+		font-weight: 600;
+		color: var(--text-primary);
+		line-height: 1.1;
+		letter-spacing: -0.01em;
+	}
+	.metric-card-threshold-label {
+		font-size: 10px;
+		color: var(--text-muted);
+		font-family: var(--font-mono);
+	}
+	.metric-card-sparkline-wrap {
+		margin-top: auto;
+		padding-top: 8px;
+		position: relative;
+	}
+	.metric-sparkline {
+		display: block;
+		width: 100%;
+		height: 36px;
+		cursor: crosshair;
+	}
+	.sparkline-crosshair {
+		stroke: var(--text-muted);
+		stroke-width: 1;
+		stroke-dasharray: 2 2;
+		pointer-events: none;
+	}
+	.sparkline-tooltip {
+		position: absolute;
+		bottom: calc(100% + 4px);
+		transform: translateX(-50%);
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-bright);
+		border-radius: 5px;
+		padding: 4px 8px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 1px;
+		pointer-events: none;
+		white-space: nowrap;
+		z-index: 10;
+	}
+	.sparkline-tooltip-val {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+	.sparkline-tooltip-ts {
+		font-size: 10px;
+		color: var(--text-secondary);
+	}
+
+	/* ── Bandwidth row ───────────────────────────────────────────────────────── */
+	.stats-bandwidth-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px 0 4px;
+		border-top: 1px solid var(--border);
+		margin-top: 4px;
+	}
+	.stats-bandwidth-label {
+		font-size: 11px;
+		color: var(--text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+	}
+	.stats-bandwidth-value {
+		font-size: 13px;
+		color: var(--text-secondary);
+	}
+
+	/* ── Top Pages + Referrers ───────────────────────────────────────────────── */
+	.top-pages-list { display: flex; flex-direction: column; gap: 6px; }
+	.top-page-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+	.page-rank { width: 16px; text-align: right; color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
+	.page-bar-wrap { flex: 1; position: relative; min-width: 0; }
+	.page-bar { position: absolute; left: 0; top: 0; bottom: 0; background: color-mix(in srgb, var(--accent-teal) 20%, transparent); border-radius: 2px; pointer-events: none; }
+	.page-path { position: relative; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; padding: 3px 6px; color: var(--text-primary); }
+	.page-count { color: var(--text-secondary); white-space: nowrap; flex-shrink: 0; }
+	.page-ms { font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+	.page-error { font-size: 11px; white-space: nowrap; flex-shrink: 0; color: var(--text-muted); }
+	.page-trend { font-size: 10px; font-family: var(--font-mono); white-space: nowrap; flex-shrink: 0; }
+	.trend-up { color: var(--success); }
+	.trend-down { color: var(--danger); }
+	.referrers-list { display: flex; flex-direction: column; gap: 4px; }
+	.referrer-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 2px 0; }
+	.referrer-domain { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+	/* ── Range Tabs ──────────────────────────────────────────────────────────── */
+	.stat-tabs {
+		display: flex;
+		gap: 2px;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-bright);
+		border-radius: 6px;
+		padding: 3px;
+	}
+	.stat-tab {
+		background: transparent;
+		border: none;
+		border-radius: 4px;
+		color: var(--text-secondary);
+		font-size: 11px;
+		font-weight: 500;
+		font-family: var(--font-mono);
+		padding: 4px 10px;
+		min-height: 36px;
+		cursor: pointer;
+		transition: background 0.15s, color 0.15s;
+		line-height: 1;
+	}
+	.stat-tab:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+	.stat-tab-active {
+		background: var(--accent-teal);
+		color: #fff;
+	}
+	.stat-tab-active:hover {
+		background: var(--accent-teal-dim);
+		color: #fff;
+	}
+	.stat-tab:focus-visible {
+		outline: 2px solid var(--accent-teal);
+		outline-offset: 1px;
+	}
+
+	/* ── Mobile ──────────────────────────────────────────────────────────────── */
+	@media (max-width: 768px) {
+		.live-zone-metrics {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 8px;
+		}
+		.live-metric-divider {
+			width: 100%;
+			height: 1px;
+			margin: 0;
+		}
+		.live-zone-header {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 2px;
+		}
+		.metric-grid {
+			grid-template-columns: repeat(2, 1fr);
+		}
+		.metric-card-value {
+			font-size: 22px;
+		}
+		.stat-tabs {
+			flex-wrap: wrap;
+		}
+	}
+	@media (max-width: 480px) {
+		.metric-grid {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	/* ── Status dot: disabled ────────────────────────────────────────────────── */
+	.status-disabled { background: #4a5568; }
+
+	/* ── Disabled / Enabled toggle ───────────────────────────────────────────── */
+	.toggle-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		background: transparent;
+		border: 1px solid var(--border-bright);
+		border-radius: 5px;
+		padding: 5px 10px;
+		cursor: pointer;
+		font-size: 12px;
+		font-weight: 500;
+		color: var(--text-secondary);
+		transition: border-color 0.15s, color 0.15s, opacity 0.15s;
+		white-space: nowrap;
+	}
+	.toggle-btn:hover:not(:disabled) {
+		border-color: var(--accent-teal);
+		color: var(--text-primary);
+	}
+	.toggle-btn:disabled,
+	.toggle-btn-loading {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+	.toggle-track {
+		position: relative;
+		display: inline-block;
+		width: 28px;
+		height: 16px;
+		border-radius: 8px;
+		background: var(--accent-teal);
+		transition: background 0.2s;
+		flex-shrink: 0;
+	}
+	.toggle-track-off {
+		background: #4a5568;
+	}
+	.toggle-thumb {
+		position: absolute;
+		top: 2px;
+		left: 14px;
+		width: 12px;
+		height: 12px;
+		border-radius: 50%;
+		background: #fff;
+		transition: left 0.2s;
+	}
+	.toggle-thumb-off {
+		left: 2px;
+	}
+	.toggle-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+	}
+	.spinner-sm {
+		width: 10px;
+		height: 10px;
+		border-width: 1.5px;
+	}
+
+	/* ── Disabled deploy button ──────────────────────────────────────────────── */
+	.btn-disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	/* ── Disabled site banner ────────────────────────────────────────────────── */
+	.disabled-banner {
+		margin-bottom: 16px;
+		padding: 10px 16px;
+		background: rgba(74, 85, 104, 0.15);
+		border: 1px solid rgba(74, 85, 104, 0.35);
+		border-radius: 6px;
+		font-size: 13px;
+		color: var(--text-secondary);
+	}
+
+	/* ── Compose env vars table ──────────────────────────────────────────────── */
+	.env-section-divider {
+		border: none;
+		border-top: 1px solid var(--border);
+		margin: 0 0 24px;
+	}
+
+	.compose-env-table .compose-env-key {
+		white-space: nowrap;
+		font-size: 13px;
+	}
+
+	.compose-required-marker {
+		color: var(--danger, #e87a7a);
+		margin-left: 3px;
+		font-weight: 700;
+	}
+
+	.compose-env-value-cell {
+		width: 45%;
+	}
+
+	.compose-env-input-wrap {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.compose-env-input {
+		flex: 1;
+		padding: 5px 8px;
+		font-size: 12px;
+		min-width: 0;
+	}
+
+	.compose-env-input-required {
+		border-color: rgba(232, 122, 122, 0.5);
+	}
+
+	.compose-env-input-required:focus {
+		border-color: rgba(232, 122, 122, 0.9);
+		outline-color: rgba(232, 122, 122, 0.4);
+	}
+
+	.compose-env-toggle-vis {
+		flex-shrink: 0;
+	}
+
+	.compose-env-status-cell {
+		white-space: nowrap;
+	}
+
+	.compose-env-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		white-space: nowrap;
+	}
+
+	.compose-env-save-ok {
+		font-size: 12px;
+	}
+
+	tr.compose-env-required td {
+		background: rgba(232, 122, 122, 0.04);
+	}
+
+	/* Compose env status badges */
+	.compose-badge-required {
+		color: #e87a7a;
+		border-color: rgba(232, 122, 122, 0.3);
+		background: rgba(232, 122, 122, 0.08);
+	}
+
+	.compose-badge-secret {
+		color: #c8a8e8;
+		border-color: rgba(200, 168, 232, 0.3);
+		background: rgba(200, 168, 232, 0.08);
+	}
+
+	.compose-badge-default {
+		color: var(--text-muted);
+		border-color: var(--border);
+		background: transparent;
+	}
+
+	/* ── Preflight modal ─────────────────────────────────────────────────────── */
+	.preflight-modal {
+		max-width: 460px;
+	}
+
+	.preflight-title {
+		font-size: 15px;
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+
+	.preflight-body {
+		padding: 20px;
+	}
+
+	.preflight-list {
+		list-style: none;
+		padding: 0;
+		margin: 0 0 20px;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.preflight-item {
+		padding: 6px 10px;
+		background: rgba(232, 122, 122, 0.08);
+		border: 1px solid rgba(232, 122, 122, 0.2);
+		border-radius: 4px;
+		font-size: 13px;
+		color: #e87a7a;
+	}
+
+	.preflight-item::before {
+		content: '• ';
+	}
+
+	.preflight-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
+	}
+</style>

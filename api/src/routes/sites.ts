@@ -1,0 +1,1672 @@
+import { Router, Request, Response } from 'express';
+import { readFileSync, writeFileSync, unlinkSync } from 'fs';
+import * as path from 'path';
+import * as yaml from 'js-yaml';
+import { dockerGet, dockerPost, dockerNetworkConnect } from '../services/docker';
+import { DnsRecord } from '../types';
+import {
+  createCoolifyClient,
+  CoolifyClient,
+  CoolifyApplication,
+  CoolifyCreateApplicationPayload,
+  CoolifyUpdateApplicationPayload,
+  CoolifyEnv,
+  CoolifyEnvVar,
+  CreateEnvPayload,
+  UpdateEnvPayload,
+} from '../services/coolify';
+import { extractEnvVars, generateSecretValue } from '../lib/composeEnv';
+import { FQDN_RE, SLUG_RE, domainHasDangerousChars } from '../lib/validation';
+import { mapSite, mapDeploy, resolveRouteDomain } from '../services/mapper';
+import { probeSite } from '../services/healthProbe';
+import { createDnsProvider, DnsOperationError } from '../services/dns';
+import { createTechnitiumClient, TechnitiumClient } from '../services/technitium';
+import { readNsHostname, readNsServerIp, readNetworkMode } from './config';
+
+const router = Router();
+
+// ── Docker Compose domain helper ──────────────────────────────────────────────
+// After creating a dockercompose app, Coolify parses the compose file async.
+// We poll getApplication() until docker_compose_raw is populated, then PATCH
+// docker_compose_domains to wire the primary service to the requested FQDN.
+
+const COMPOSE_POLL_INTERVAL_MS = 200;
+const COMPOSE_POLL_MAX_ATTEMPTS = 300; // ~60s total
+const COMPOSE_PRIMARY_SERVICE_NAMES = ['web', 'app', 'frontend', 'api', 'nginx'];
+
+async function setDockerComposeDomain(
+  client: CoolifyClient,
+  app: CoolifyApplication,
+  fqdn: string,
+): Promise<CoolifyApplication> {
+  console.log(`[coolify] dockercompose flow: waiting for compose parse (uuid=${app.uuid})...`);
+
+  let composedApp: CoolifyApplication | null = null;
+  for (let attempt = 0; attempt < COMPOSE_POLL_MAX_ATTEMPTS; attempt++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, COMPOSE_POLL_INTERVAL_MS));
+    const polled = await client.getApplication(app.uuid).catch(() => null);
+    if (polled?.docker_compose_raw) {
+      composedApp = polled;
+      break;
+    }
+  }
+
+  if (!composedApp?.docker_compose_raw) {
+    console.warn(
+      `[coolify] dockercompose flow: timed out waiting for docker_compose_raw (uuid=${app.uuid}). ` +
+      'Domain assignment skipped — retry by updating the application manually.',
+    );
+    return composedApp ?? app;
+  }
+
+  // Parse service names from compose YAML
+  let serviceNames: string[] = [];
+  try {
+    const parsed = yaml.load(composedApp.docker_compose_raw) as Record<string, unknown>;
+    const services = (parsed?.services ?? {}) as Record<string, unknown>;
+    serviceNames = Object.keys(services);
+  } catch (parseErr) {
+    console.warn(`[coolify] dockercompose flow: failed to parse docker_compose_raw:`, (parseErr as Error).message);
+    return composedApp;
+  }
+
+  // Pick primary service: prefer well-known names, else first in iteration order
+  const primaryService =
+    COMPOSE_PRIMARY_SERVICE_NAMES.find((name) => serviceNames.includes(name)) ?? serviceNames[0];
+
+  if (!primaryService) {
+    console.warn(`[coolify] dockercompose flow: no services found in compose YAML — domain assignment skipped`);
+    return composedApp;
+  }
+
+  console.log(
+    `[coolify] discovered services: [${serviceNames.join(', ')}]; using primary: ${primaryService}`,
+  );
+
+  const domainEntry = { name: primaryService, domain: fqdn };
+  try {
+    await client.updateApplication(app.uuid, {
+      docker_compose_domains: [domainEntry],
+    });
+    console.log(
+      `[coolify] PATCH docker_compose_domains success: service=${primaryService} domain=${fqdn} uuid=${app.uuid}`,
+    );
+  } catch (patchErr) {
+    console.warn(
+      `[coolify] PATCH docker_compose_domains failed: service=${primaryService} domain=${fqdn} uuid=${app.uuid}:`,
+      (patchErr as Error).message,
+    );
+    return composedApp;
+  }
+
+  // Fix 1: Coolify v4.3.5 rejects PATCH { domains } for dockercompose apps with HTTP 422:
+  // "The domains field cannot be used for dockercompose applications."
+  // The fqdn column will remain the sslip.io placeholder — this is a Coolify API constraint.
+  // Domain display is derived from docker_compose_domains in the GET handler (see displayDomain below).
+  // Re-fetch to return the updated application state (docker_compose_domains now populated).
+  const refreshed = await client.getApplication(app.uuid).catch(() => null);
+  return refreshed ?? composedApp;
+}
+
+// ── Deploy auth sidecar ───────────────────────────────────────────────────────
+// Coolify may strip embedded PAT credentials from stored git_repository URLs,
+// making URL-based auth detection unreliable after page refresh.
+// We persist deploy_auth to a small sidecar file so it survives across requests.
+const SITES_DIR = process.env.SITES_DIR ?? '/app/sites';
+
+function readStoredDeployAuth(uuid: string): 'ssh_key' | 'pat' | null {
+  try {
+    const { mkdirSync } = require('fs') as typeof import('fs');
+    mkdirSync(SITES_DIR, { recursive: true });
+    const val = readFileSync(path.join(SITES_DIR, `${uuid}.auth`), 'utf8').trim();
+    if (val === 'pat' || val === 'ssh_key') return val;
+  } catch { /* not stored yet */ }
+  return null;
+}
+
+function writeStoredDeployAuth(uuid: string, auth: 'ssh_key' | 'pat'): void {
+  try {
+    const { mkdirSync } = require('fs') as typeof import('fs');
+    mkdirSync(SITES_DIR, { recursive: true });
+    writeFileSync(path.join(SITES_DIR, `${uuid}.auth`), auth, 'utf8');
+  } catch (err) {
+    console.warn(`[deploy-auth] Could not write auth sidecar for ${uuid}:`, (err as Error).message);
+  }
+}
+
+// ── Visibility sidecar (Option C stub) ────────────────────────────────────────
+// Persists per-site visibility so Option C (dual-mode) can be added without
+// changing site creation logic. Default matches current network_mode.
+// Values now: 'internal' | 'external'. Option C adds: 'both'.
+function readStoredVisibility(uuid: string): 'internal' | 'external' {
+  try {
+    const { mkdirSync: _mkdir } = require('fs') as typeof import('fs');
+    _mkdir(SITES_DIR, { recursive: true });
+    const val = readFileSync(path.join(SITES_DIR, `${uuid}.visibility`), 'utf8').trim();
+    if (val === 'internal' || val === 'external') return val;
+  } catch { /* not stored yet — fall through to default */ }
+  return readNetworkMode() === 'internal' ? 'internal' : 'external';
+}
+
+function writeStoredVisibility(uuid: string, visibility: 'internal' | 'external'): void {
+  try {
+    const { mkdirSync: _mkdir } = require('fs') as typeof import('fs');
+    _mkdir(SITES_DIR, { recursive: true });
+    writeFileSync(path.join(SITES_DIR, `${uuid}.visibility`), visibility, 'utf8');
+  } catch (err) {
+    console.warn(`[visibility] Could not write visibility sidecar for ${uuid}:`, (err as Error).message);
+  }
+}
+
+// ── Disabled state sidecar ────────────────────────────────────────────────────
+// Persists per-site disabled flag as a presence file: {uuid}.disabled exists → site is disabled.
+function readDisabledState(uuid: string): boolean {
+  try {
+    const { mkdirSync: _mkdir, existsSync } = require('fs') as typeof import('fs');
+    _mkdir(SITES_DIR, { recursive: true });
+    return existsSync(path.join(SITES_DIR, `${uuid}.disabled`));
+  } catch { return false; }
+}
+
+function writeDisabledState(uuid: string, disabled: boolean): void {
+  try {
+    const { mkdirSync: _mkdir, unlinkSync: _unlink } = require('fs') as typeof import('fs');
+    _mkdir(SITES_DIR, { recursive: true });
+    const filePath = path.join(SITES_DIR, `${uuid}.disabled`);
+    if (disabled) {
+      writeFileSync(filePath, 'true', 'utf8');
+    } else {
+      try { _unlink(filePath); } catch { /* already gone */ }
+    }
+  } catch (err) {
+    console.warn(`[disabled-state] Could not write disabled sidecar for ${uuid}:`, (err as Error).message);
+  }
+}
+
+function mapSiteWithStoredAuth(
+  app: Parameters<typeof mapSite>[0],
+  deployments: Parameters<typeof mapSite>[1],
+  probe?: Parameters<typeof mapSite>[2]
+): ReturnType<typeof mapSite> {
+  const site = mapSite(app, deployments, probe ?? null);
+  const stored = readStoredDeployAuth(app.uuid);
+  if (stored) site.deploy_auth = stored;
+  const disabled = readDisabledState(app.uuid);
+  if (disabled) {
+    site.disabled = true;
+    site.overallStatus = 'disabled';
+  }
+  return site;
+}
+
+// ── DNS auto-provisioning ─────────────────────────────────────────────────────
+// Creates a zone + A record for the given domain pointing at NS_SERVER_IP.
+// In internal mode: uses Technitium directly; zone is under .hh TLD.
+// Non-fatal: logs warnings but never throws — site ops should not fail due to DNS.
+export async function provisionDns(fqdn: string): Promise<void> {
+  const serverIp = readNsServerIp();
+  if (!serverIp) {
+    console.warn('[dns-provision] NS_SERVER_IP not set — skipping DNS provisioning');
+    return;
+  }
+  // Strip protocol and trailing slashes to get bare domain
+  const domain = fqdn.replace(/^https?:\/\//, '').replace(/\/.*$/, '').trim();
+  if (!domain) return;
+
+  const isInternal = readNetworkMode() === 'internal';
+
+  if (isInternal) {
+    // Internal mode: always use Technitium; ensure .hh root zone exists first
+    const technitium = createTechnitiumClient();
+    if (!technitium) {
+      console.warn('[dns-provision] Technitium not configured — skipping internal DNS provisioning');
+      return;
+    }
+    // Ensure .hh root zone exists (idempotent)
+    try {
+      await technitium.createZone('hh', 'Primary');
+      console.log('[dns-provision] .hh root zone ensured');
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      if (!msg.toLowerCase().includes('already exists')) {
+        console.warn('[dns-provision] .hh root zone create warning:', msg);
+      }
+    }
+    // Create zone for this site (e.g. mysite.hh)
+    try {
+      await technitium.createZone(domain, 'Primary');
+      console.log(`[dns-provision] Internal zone created: ${domain}`);
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      if (!msg.toLowerCase().includes('already exists')) {
+        console.warn(`[dns-provision] Internal zone create warning for ${domain}:`, msg);
+      }
+    }
+    // Add A record
+    try {
+      const params = new URLSearchParams();
+      params.set('type', 'A');
+      params.set('ttl', '3600');
+      params.set('ipAddress', serverIp);
+      await technitium.addRecord(domain, params);
+      console.log(`[dns-provision] Internal A record created: ${domain} → ${serverIp}`);
+    } catch (err) {
+      console.warn(`[dns-provision] Internal A record warning for ${domain}:`, (err as Error).message);
+    }
+    return;
+  }
+
+  const provider = createDnsProvider();
+
+  try {
+    await provider.createZone(domain);
+    console.log(`[dns-provision] Zone created: ${domain}`);
+  } catch (err) {
+    // Zone may already exist — that's fine
+    const msg = (err as Error).message ?? '';
+    if (!msg.includes('already exists') && !msg.toLowerCase().includes('already exists')) {
+      console.warn(`[dns-provision] Zone create warning for ${domain}:`, msg);
+    }
+  }
+
+  try {
+    await provider.addRecord(domain, { type: 'A', name: '@', value: serverIp, ttl: 3600 });
+    console.log(`[dns-provision] A record created: ${domain} @ → ${serverIp}`);
+  } catch (err) {
+    console.warn(`[dns-provision] A record create warning for ${domain}:`, (err as Error).message);
+  }
+}
+
+// ── DNS glue record provisioning ─────────────────────────────────────────────
+// Creates A record: nsHostname → serverIp in the parent zone.
+// e.g. ns1.example.com → 1.2.3.4 in the example.com zone.
+export async function ensureNsGlueRecords(
+  client: TechnitiumClient,
+  nsHostname: string,
+  serverIp: string
+): Promise<void> {
+  try {
+    const parts = nsHostname.split('.');
+    if (parts.length < 2) return;
+    const zone = parts.slice(1).join('.');
+    try {
+      await client.createZone(zone, 'Primary');
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      if (!msg.toLowerCase().includes('already exists')) {
+        console.warn(`[dns-init] Zone create warning for ${zone}:`, msg);
+      }
+    }
+    const params = new URLSearchParams();
+    params.set('type', 'A');
+    params.set('ipAddress', serverIp);
+    params.set('ttl', '3600');
+    await client.addRecord(nsHostname, params);
+    console.log(`[dns-init] Glue A record: ${nsHostname} → ${serverIp}`);
+  } catch (err) {
+    console.warn('[dns-init] ensureNsGlueRecords failed:', (err as Error).message);
+  }
+}
+
+// ── Bad NS record cleanup ─────────────────────────────────────────────────────
+// Removes NS records whose value is a bare label (no dots) — Docker container IDs
+// leaked into zones when Technitium dnsServerDomain was not configured.
+export async function cleanBadNsRecords(client: TechnitiumClient): Promise<void> {
+  try {
+    const zones = await client.listZones();
+    for (const zone of zones) {
+      if (zone.internal || zone.type !== 'Primary') continue;
+      const { records } = await client.getRecords(zone.name);
+      for (const rec of records) {
+        if (rec.type !== 'NS') continue;
+        const ns: string = (rec.rData as { nameServer?: string }).nameServer ?? '';
+        const bare = ns.replace(/\.$/, '');
+        if (!bare.includes('.')) {
+          const params = new URLSearchParams();
+          params.set('type', 'NS');
+          params.set('nameServer', ns);
+          await client.deleteRecord(zone.name, params);
+          console.log(`[dns-init] Removed bad NS record: ${zone.name} NS ${ns}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[dns-init] cleanBadNsRecords failed:', (err as Error).message);
+  }
+}
+
+// ── GitHub key linking ────────────────────────────────────────────────────────
+// Coolify's create API ignores private_key_uuid — link via DB instead.
+// Non-fatal: deployment will fail gracefully if key not linked.
+export async function linkGithubKey(appUuid: string): Promise<void> {
+  try {
+    const { readFileSync } = require('fs') as typeof import('fs');
+    const keyUuid = readFileSync('/coolify-api-token/github_key_uuid', 'utf8').trim();
+    if (!keyUuid) return;
+    const { Client } = require('pg') as typeof import('pg');
+    const pg = new Client({
+      host: process.env.PGHOST ?? 'coolify-db',
+      port: Number(process.env.PGPORT ?? 5432),
+      database: process.env.PGDATABASE ?? 'coolify',
+      user: process.env.PGUSER ?? 'coolify',
+      password: process.env.PGPASSWORD,
+    });
+    await pg.connect();
+    await pg.query(
+      `UPDATE applications SET private_key_id = (SELECT id FROM private_keys WHERE uuid=$1 LIMIT 1) WHERE uuid=$2`,
+      [keyUuid, appUuid]
+    );
+    await pg.end();
+    console.log(`[github-key] Linked github-deploy key to app ${appUuid}`);
+  } catch (err) {
+    console.warn(`[github-key] Could not link key to app ${appUuid}:`, (err as Error).message);
+  }
+}
+
+// ── GitHub key unlinking ──────────────────────────────────────────────────────
+// Sets private_key_id = NULL in Coolify DB — used when switching to PAT auth.
+// Non-fatal: logs warnings but never throws.
+export async function unlinkGithubKey(appUuid: string): Promise<void> {
+  try {
+    const { Client } = require('pg') as typeof import('pg');
+    const pg = new Client({
+      host: process.env.PGHOST ?? 'coolify-db',
+      port: Number(process.env.PGPORT ?? 5432),
+      database: process.env.PGDATABASE ?? 'coolify',
+      user: process.env.PGUSER ?? 'coolify',
+      password: process.env.PGPASSWORD,
+    });
+    await pg.connect();
+    // Clear private_key_id, source_type, AND source_id — source_type = 'App\Models\GithubApp'
+    // causes Coolify to route clones through GitHub App flow which double-prefixes the URL.
+    // NULL source_type + NULL source_id required: if source_id is non-null with source_type=NULL,
+    // Coolify's morphTo eager-loads via the parent query builder with a null ownerKey,
+    // generating "WHERE "" = source_id" which is a PostgreSQL syntax error (zero-length identifier).
+    await pg.query(
+      `UPDATE applications SET private_key_id = NULL, source_type = NULL, source_id = NULL WHERE uuid=$1`,
+      [appUuid]
+    );
+    await pg.end();
+    console.log(`[github-key] Unlinked github-deploy key from app ${appUuid}`);
+  } catch (err) {
+    console.warn(`[github-key] Could not unlink key from app ${appUuid}:`, (err as Error).message);
+  }
+}
+
+// ── Traefik route provisioning ────────────────────────────────────────────────
+// Queries Docker API for the running Coolify container for a given slug,
+// then writes (or removes) a Traefik conf.d route file so the site domain
+// is proxied to the correct container. Non-fatal.
+const TRAEFIK_CONF_DIR = process.env.TRAEFIK_CONF_DIR ?? '/app/traefik-conf.d';
+
+export async function provisionTraefikRoute(
+  slug: string,
+  domain: string,
+  port: number | string = 3000,
+  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt'
+): Promise<{ ok: boolean; reason?: string }> {
+  // H2 Layer 2 — defensive domain safety check before writing yml
+  if (domainHasDangerousChars(domain)) {
+    const reason = `domain contains dangerous characters: ${JSON.stringify(domain)}`;
+    console.warn(`[traefik-route] BLOCKED — ${reason}`);
+    return { ok: false, reason };
+  }
+  const confDir = TRAEFIK_CONF_DIR;
+  const filePath = path.join(confDir, `site-${slug}.yml`);
+  try {
+    // Find container with coolify.name=slug label (any state — stopped containers still have valid names)
+    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
+    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<{ Names: string[] }>;
+    if (!containers.length) {
+      console.warn(`[traefik-route] No container found for slug ${slug} — route not written`);
+      return { ok: false, reason: `no container for slug ${slug}` };
+    }
+    const containerName = containers[0].Names[0].replace(/^\//, '');
+    const yml = `http:
+  routers:
+    site-${slug}-http:
+      rule: "Host(\`${domain}\`)"
+      entryPoints:
+        - http
+      middlewares:
+        - redirect-to-https
+      service: site-${slug}
+
+    site-${slug}:
+      rule: "Host(\`${domain}\`)"
+      entryPoints:
+        - https
+      tls:
+        certResolver: ${resolver}
+      service: site-${slug}
+
+  services:
+    site-${slug}:
+      loadBalancer:
+        servers:
+          - url: "http://${containerName}:${port}"
+`;
+    writeFileSync(filePath, yml, 'utf8');
+    console.log(`[traefik-route] Route written for ${domain} → ${containerName}:${port}`);
+    return { ok: true };
+  } catch (err) {
+    const reason = (err as Error).message;
+    console.warn(`[traefik-route] Failed to provision route for ${slug}:`, reason);
+    return { ok: false, reason };
+  }
+}
+
+function removeTraefikRoute(slug: string): void {
+  try {
+    unlinkSync(path.join(TRAEFIK_CONF_DIR, `site-${slug}.yml`));
+    console.log(`[traefik-route] Route removed for slug ${slug}`);
+  } catch {
+    // File may not exist — that's fine
+  }
+}
+
+// ── Traefik route provisioning — dockercompose build pack ─────────────────────
+// Mirrors provisionTraefikRoute() but handles compose-specific container
+// discovery, port detection, and network attachment.
+//
+// Steps:
+//   1. Wait for docker_compose_raw to be populated (compose parse is async).
+//   2. Pick the primary service using COMPOSE_PRIMARY_SERVICE_NAMES preference list.
+//   3. Discover the running container via com.docker.compose.project/service labels.
+//   4. Detect the exposed port (Traefik label → ExposedPorts → 80 fallback).
+//   5. Attach the primary container to the "coolify" network (idempotent).
+//   6. Write site-${slug}.yml — same filename convention so removeTraefikRoute() works.
+export async function provisionTraefikRouteForCompose(
+  client: CoolifyClient,
+  app: CoolifyApplication,
+  domain: string,
+  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt',
+): Promise<{ ok: boolean; reason?: string }> {
+  // H2 Layer 2 — defensive domain safety check before writing yml
+  if (domainHasDangerousChars(domain)) {
+    const reason = `domain contains dangerous characters: ${JSON.stringify(domain)}`;
+    console.warn(`[traefik-route-compose] BLOCKED — ${reason}`);
+    return { ok: false, reason };
+  }
+  const slug = app.uuid;
+  const confDir = TRAEFIK_CONF_DIR;
+  const filePath = path.join(confDir, `site-${slug}.yml`);
+
+  try {
+    // ── Step 1: Wait for compose parse ─────────────────────────────────────────
+    console.log(`[traefik-route-compose] Waiting for compose parse (uuid=${slug})...`);
+    let composedApp: CoolifyApplication | null = app.docker_compose_raw ? app : null;
+    if (!composedApp) {
+      for (let attempt = 0; attempt < COMPOSE_POLL_MAX_ATTEMPTS; attempt++) {
+        await new Promise<void>((resolve) => setTimeout(resolve, COMPOSE_POLL_INTERVAL_MS));
+        const polled = await client.getApplication(slug).catch(() => null);
+        if (polled?.docker_compose_raw) {
+          composedApp = polled;
+          break;
+        }
+      }
+    }
+    if (!composedApp?.docker_compose_raw) {
+      console.warn(
+        `[traefik-route-compose] Timed out waiting for docker_compose_raw (uuid=${slug}) — route not written`,
+      );
+      return { ok: false, reason: `timed out waiting for docker_compose_raw (uuid=${slug})` };
+    }
+
+    // ── Step 2: Pick primary service ────────────────────────────────────────────
+    let serviceNames: string[] = [];
+    try {
+      const parsed = yaml.load(composedApp.docker_compose_raw) as Record<string, unknown>;
+      const services = (parsed?.services ?? {}) as Record<string, unknown>;
+      serviceNames = Object.keys(services);
+    } catch (parseErr) {
+      const reason = (parseErr as Error).message;
+      console.warn(
+        `[traefik-route-compose] Failed to parse docker_compose_raw (uuid=${slug}):`,
+        reason,
+      );
+      return { ok: false, reason: `compose parse error: ${reason}` };
+    }
+
+    const primaryService =
+      COMPOSE_PRIMARY_SERVICE_NAMES.find((name) => serviceNames.includes(name)) ?? serviceNames[0];
+
+    if (!primaryService) {
+      console.warn(`[traefik-route-compose] No services in compose YAML (uuid=${slug}) — route not written`);
+      return { ok: false, reason: `no services in compose YAML (uuid=${slug})` };
+    }
+
+    // Warn about non-primary services that have domain assignments (MVP: skip them)
+    const nonPrimary = serviceNames.filter((s) => s !== primaryService);
+    if (nonPrimary.length > 0) {
+      console.log(
+        `[traefik-route-compose] Multi-service compose: using primary="${primaryService}", ` +
+        `not routing: [${nonPrimary.join(', ')}] (MVP — primary service only)`,
+      );
+    }
+
+    // ── Step 3: Discover container ──────────────────────────────────────────────
+    console.log(`[traefik-route-compose] Discovering container for project=${slug} service=${primaryService}...`);
+    const filter = encodeURIComponent(
+      JSON.stringify({
+        label: [
+          `com.docker.compose.project=${slug}`,
+          `com.docker.compose.service=${primaryService}`,
+        ],
+      }),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Docker inspect shape varies; use any for raw response
+    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<any>;
+    if (!containers.length) {
+      console.warn(
+        `[traefik-route-compose] No container found for project=${slug} service=${primaryService} — route not written`,
+      );
+      return { ok: false, reason: `no container for project=${slug} service=${primaryService}` };
+    }
+    const container = containers[0];
+    const containerId: string = container.Id as string;
+    const containerName: string = (container.Names as string[])[0].replace(/^\//, '');
+
+    // ── Step 4: Discover port ───────────────────────────────────────────────────
+    // Priority: Traefik label on container → image ExposedPorts → 80
+    let port: number | string = 80;
+    const labels: Record<string, string> = (container.Labels as Record<string, string>) ?? {};
+
+    // Traefik label: traefik.http.services.<anything>-${primaryService}.loadbalancer.server.port
+    const traefikPortLabelPattern = new RegExp(
+      `^traefik\\.http\\.services\\.[^.]*${primaryService}\\.loadbalancer\\.server\\.port$`,
+      'i',
+    );
+    const traefikPortEntry = Object.entries(labels).find(([k]) => traefikPortLabelPattern.test(k));
+    if (traefikPortEntry) {
+      port = traefikPortEntry[1];
+      console.log(`[traefik-route-compose] Port from Traefik label: ${port}`);
+    } else {
+      // Inspect container for ExposedPorts
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Docker inspect response shape
+        const inspected = await dockerGet(`/containers/${containerId}/json`) as any;
+        const exposedPorts: Record<string, unknown> = inspected?.Config?.ExposedPorts ?? {};
+        const firstPort = Object.keys(exposedPorts)[0]; // e.g. "3000/tcp"
+        if (firstPort) {
+          port = firstPort.split('/')[0]; // strip "/tcp"
+          console.log(`[traefik-route-compose] Port from ExposedPorts: ${port}`);
+        } else {
+          console.warn(`[traefik-route-compose] No port hint found for ${containerName} — defaulting to 80`);
+        }
+      } catch (inspectErr) {
+        console.warn(
+          `[traefik-route-compose] Container inspect failed for ${containerId}:`,
+          (inspectErr as Error).message,
+          '— defaulting to port 80',
+        );
+      }
+    }
+
+    // ── Step 5: Attach container to coolify network (idempotent) ───────────────
+    console.log(`[traefik-route-compose] Attaching ${containerName} to coolify network...`);
+    await dockerNetworkConnect('coolify', containerId);
+    console.log(`[traefik-route-compose] ${containerName} is on coolify network`);
+
+    // ── Step 6: Write Traefik yml (same structure as provisionTraefikRoute) ─────
+    const yml = `http:
+  routers:
+    site-${slug}-http:
+      rule: "Host(\`${domain}\`)"
+      entryPoints:
+        - http
+      middlewares:
+        - redirect-to-https
+      service: site-${slug}
+
+    site-${slug}:
+      rule: "Host(\`${domain}\`)"
+      entryPoints:
+        - https
+      tls:
+        certResolver: ${resolver}
+      service: site-${slug}
+
+  services:
+    site-${slug}:
+      loadBalancer:
+        servers:
+          - url: "http://${containerName}:${port}"
+`;
+    writeFileSync(filePath, yml, 'utf8');
+    console.log(`[traefik-route-compose] Route written for ${domain} → ${containerName}:${port}`);
+    return { ok: true };
+  } catch (err) {
+    const reason = (err as Error).message;
+    console.warn(`[traefik-route-compose] Failed to provision route for ${slug}:`, reason);
+    return { ok: false, reason };
+  }
+}
+
+// ── GET /api/sites — list all sites ──────────────────────────────────────────
+router.get('/', async (_req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const applications = await client.listApplications();
+    const sites = await Promise.all(
+      applications.map(async (app) => {
+        const domain = resolveRouteDomain(app) ?? '';
+        const [deployments, probe] = await Promise.all([
+          client.listDeployments(app.uuid).catch(() => []),
+          domain ? probeSite(domain).catch(() => null) : Promise.resolve(null),
+        ]);
+        return mapSiteWithStoredAuth(app, deployments, probe);
+      })
+    );
+    res.status(200).json(sites);
+  } catch (err) {
+    console.error('[coolify] GET /applications failed:', (err as Error).message);
+    res.status(502).json({ error: 'Failed to retrieve sites from Coolify' });
+  }
+});
+
+// ── GET /api/sites/:slug — single site detail ─────────────────────────────────
+router.get('/:slug', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    const domain = resolveRouteDomain(app) ?? '';
+
+    const [deployments, probe] = await Promise.all([
+      client.listDeployments(app.uuid).catch(() => []),
+      domain
+        ? probeSite(domain).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    res.status(200).json(mapSiteWithStoredAuth(app, deployments, probe));
+  } catch (err) {
+    console.error(`[coolify] GET /applications/${req.params.slug} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to retrieve site from Coolify' });
+  }
+});
+
+// ── SSH → HTTPS URL conversion ────────────────────────────────────────────────
+// Converts git@github.com:owner/repo.git → https://github.com/owner/repo.git
+// Required before embedding a PAT — PAT auth uses HTTPS, not SSH transport.
+function sshUrlToHttps(url: string): string {
+  const m = url.match(/^git@([^:]+):(.+?)(?:\.git)?$/);
+  if (m) return `https://${m[1]}/${m[2]}.git`;
+  return url;
+}
+
+// ── HTTPS / short-form → SSH URL conversion ───────────────────────────────────
+// Converts any repo reference to git@github.com:owner/repo.git format.
+// Required when using SSH key auth — Coolify needs the SSH transport URL.
+function httpsToSshUrl(url: string): string {
+  if (/^git@/.test(url)) return url.endsWith('.git') ? url : `${url}.git`;
+  try {
+    const u = new URL(url.startsWith('http') ? url : `https://github.com/${url}`);
+    const path = u.pathname.replace(/^\//, '').replace(/\.git$/, '');
+    return `git@${u.host}:${path}.git`;
+  } catch {
+    // short-form: owner/repo or owner/repo.git
+    return `git@github.com:${url.replace(/\.git$/, '')}.git`;
+  }
+}
+
+// ── Embed PAT into a GitHub HTTPS clone URL ───────────────────────────────────
+// Converts https://github.com/org/repo to https://TOKEN@github.com/org/repo.
+// Handles SSH-format URLs (git@github.com:...) by converting to HTTPS first.
+// Handles URLs that already have auth embedded (idempotent).
+export function embedPatInRepoUrl(repoUrl: string, token: string): string {
+  // Normalize to a full HTTPS URL first:
+  // 1. SSH → HTTPS
+  // 2. short-form owner/repo[.git] → https://github.com/owner/repo.git
+  // 3. already HTTPS → leave as-is
+  let httpsUrl: string;
+  if (/^git@/.test(repoUrl)) {
+    httpsUrl = sshUrlToHttps(repoUrl);
+  } else if (/^https?:\/\//.test(repoUrl)) {
+    httpsUrl = repoUrl;
+  } else {
+    httpsUrl = `https://github.com/${repoUrl.replace(/\.git$/, '')}.git`;
+  }
+  try {
+    const url = new URL(httpsUrl);
+    url.username = token;
+    url.password = '';
+    return url.toString();
+  } catch {
+    return httpsUrl.replace(/^https?:\/\//, `https://${token}@`);
+  }
+}
+
+// ── POST /api/sites — create a new site ──────────────────────────────────────
+// Accepts: name, git_repository, git_branch, build_pack (default: nixpacks), port (default: 3000)
+// deploy_auth: 'ssh_key' (default) | 'pat'
+// deploy_token: required when deploy_auth === 'pat'
+router.post('/', async (req: Request, res: Response) => {
+  const body = req.body as {
+    name?: string;
+    git_repository?: string;
+    git_branch?: string;
+    build_pack?: string;
+    port?: number | string;
+    description?: string;
+    fqdn?: string;
+    domain?: string;       // alias for fqdn
+    deploy_auth?: 'ssh_key' | 'pat';
+    deploy_token?: string; // PAT value — only used when deploy_auth === 'pat'
+    docker_compose_location?: string;
+    base_directory?: string;
+  };
+  if (!body.name || !body.git_repository || !body.git_branch) {
+    res.status(400).json({
+      error: 'Missing required fields: name, git_repository, git_branch',
+    });
+    return;
+  }
+  const deployAuth = body.deploy_auth ?? 'ssh_key';
+  if (deployAuth === 'pat' && !body.deploy_token?.trim()) {
+    res.status(400).json({ error: 'deploy_token is required when deploy_auth is pat' });
+    return;
+  }
+  try {
+    const client = createCoolifyClient()!;
+
+    // Auto-discover server_uuid
+    const servers = await client.getServers();
+    if (!servers.length) {
+      res.status(502).json({ error: 'No Coolify servers found' });
+      return;
+    }
+    const server_uuid = servers[0].uuid;
+
+    // Auto-discover destination_uuid from file written by coolify-setup.sh
+    let destination_uuid: string;
+    try {
+      destination_uuid = readFileSync('/coolify-api-token/destination_uuid', 'utf8').trim();
+    } catch {
+      res.status(500).json({ error: 'destination_uuid not available — ensure coolify-setup.sh has run' });
+      return;
+    }
+    if (!destination_uuid) {
+      res.status(500).json({ error: 'destination_uuid file is empty — ensure coolify-setup.sh has run' });
+      return;
+    }
+
+    // Auto-discover or create project
+    let projects = await client.getProjects();
+    let project_uuid: string;
+    if (projects.length > 0) {
+      project_uuid = projects[0].uuid;
+    } else {
+      const created = await client.createProject('hermithost-sites');
+      project_uuid = created.uuid;
+    }
+
+    // Resolve clone URL — embed PAT for pat auth, SSH format for ssh_key
+    const resolvedRepoUrl = deployAuth === 'pat'
+      ? embedPatInRepoUrl(body.git_repository, body.deploy_token!.trim())
+      : httpsToSshUrl(body.git_repository);
+
+    // Resolve fqdn BEFORE creating the app — Coolify v4.3.5 PATCH /applications/{uuid}
+    // silently ignores the 'domains' field, but POST /applications/public accepts fqdn at creation time.
+    // In internal mode, override domain to ${slug}.hh regardless of user input.
+    const nameSlug = body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const internalDomain = readNetworkMode() === 'internal' ? `${nameSlug}.hh` : null;
+    const resolvedFqdn = internalDomain ?? (body.fqdn ?? body.domain);
+    // Coolify requires full URL format — add https:// if no protocol present
+    const coolifyFqdn = resolvedFqdn
+      ? (/^https?:\/\//i.test(resolvedFqdn) ? resolvedFqdn : `https://${resolvedFqdn}`)
+      : undefined;
+
+    const payload: CoolifyCreateApplicationPayload = {
+      type: deployAuth === 'pat' ? 'public' : 'private',
+      name: body.name,
+      git_repository: resolvedRepoUrl,
+      git_branch: body.git_branch,
+      build_pack: body.build_pack ?? 'nixpacks',
+      ports_exposes: String(body.port ?? 3000),
+      server_uuid,
+      destination_uuid,
+      project_uuid,
+      environment_name: 'production',
+      instant_deploy: false,
+      ...(body.description !== undefined ? { description: body.description } : {}),
+      ...(body.docker_compose_location !== undefined ? { docker_compose_location: body.docker_compose_location } : (body.build_pack === 'dockercompose' ? { docker_compose_location: '/docker-compose.yml' } : {})),
+      ...(body.base_directory !== undefined ? { base_directory: body.base_directory } : {}),
+      // For dockercompose, do NOT set domains at creation — Coolify requires docker_compose_domains PATCH
+      // after it has parsed the compose file. Non-dockercompose path sets domains here as before.
+      ...(coolifyFqdn && body.build_pack !== 'dockercompose' ? { domains: coolifyFqdn } : {}),
+    };
+    let app = await client.createApplication(payload);
+
+    // SSH key auth: link the deploy key via DB
+    // PAT auth: clear source_type (Coolify defaults to GithubApp) and re-apply PAT URL
+    if (deployAuth !== 'pat') {
+      await linkGithubKey(app.uuid);
+    } else {
+      // unlinkGithubKey sets source_type = NULL so Coolify uses git_repository directly
+      await unlinkGithubKey(app.uuid);
+      // Re-apply PAT URL after source_type cleared — Coolify may have stripped it
+      await client.updateApplication(app.uuid, { git_repository: resolvedRepoUrl }).catch((e: Error) => {
+        console.warn(`[coolify] PAT url re-patch failed for ${app.uuid}:`, e.message);
+      });
+    }
+
+    if (resolvedFqdn) {
+      if (body.build_pack === 'dockercompose') {
+        // Async-poll for docker_compose_raw then PATCH docker_compose_domains
+        app = await setDockerComposeDomain(client, app, coolifyFqdn!);
+        // Prefill env vars extracted from compose YAML — non-fatal.
+        // Re-fetch to ensure docker_compose_raw is present (PATCH response may omit it).
+        const rawYaml = app.docker_compose_raw
+          ?? (await client.getApplication(app.uuid).catch(() => null))?.docker_compose_raw;
+        if (rawYaml) {
+          try {
+            const extracted = extractEnvVars(rawYaml);
+            const envs: CoolifyEnvVar[] = extracted.map((v) => {
+              if (v.required && v.isSecret) {
+                return { key: v.name, value: generateSecretValue(32) };
+              }
+              if (v.required && !v.isSecret) {
+                return { key: v.name, value: '' };
+              }
+              // optional — use defaultValue (may be undefined → empty string)
+              return { key: v.name, value: v.defaultValue ?? '' };
+            });
+            const required = extracted.filter((v) => v.required).length;
+            const optional = extracted.filter((v) => !v.required).length;
+            const secrets = extracted.filter((v) => v.isSecret).length;
+            const requiredKeys = new Set(extracted.filter((v) => v.required).map((v) => v.name));
+            // Use syncApplicationEnvs: waits for Coolify's async auto-extraction, then patches
+            // values into Coolify's own rows rather than creating duplicates.
+            await client.syncApplicationEnvs(app.uuid, envs, requiredKeys);
+            console.log(
+              `[coolify] synced ${envs.length} env vars for ${app.uuid}: required=${required}, optional=${optional}, secrets=${secrets}`,
+            );
+          } catch (envErr) {
+            console.warn(
+              `[coolify] env prefill failed for ${app.uuid} — continuing:`,
+              (envErr as Error).message,
+            );
+          }
+        }
+      } else {
+        // Non-dockercompose: verify domain was actually set by Coolify at creation time
+        const refreshed = await client.getApplication(app.uuid).catch(() => null);
+        if (refreshed) {
+          app = refreshed;
+          if (!refreshed.fqdn?.includes(resolvedFqdn)) {
+            console.warn(`[coolify] domain verification failed for ${app.uuid}: expected ${resolvedFqdn}, got ${refreshed.fqdn}`);
+          }
+        }
+      }
+      await provisionDns(resolvedFqdn);
+      // Route file written after first deploy (container doesn't exist yet at creation time)
+    }
+    writeStoredDeployAuth(app.uuid, deployAuth);
+    writeStoredVisibility(app.uuid, readNetworkMode() === 'internal' ? 'internal' : 'external');
+    res.status(201).json(mapSiteWithStoredAuth(app, []));
+  } catch (err) {
+    console.error('[coolify] POST /applications/public failed:', (err as Error).message);
+    res.status(502).json({ error: 'Failed to create application via Coolify' });
+  }
+});
+
+// ── DELETE /api/sites/:slug — delete a site ───────────────────────────────────
+router.delete('/:slug', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    // Fetch domain before deleting so we can clean up DNS
+    const app = await client.getApplication(req.params.slug).catch(() => null);
+    const domain = app ? resolveRouteDomain(app) ?? '' : '';
+
+    await client.deleteApplication(req.params.slug);
+    removeTraefikRoute(req.params.slug);
+
+    // Non-fatal DNS teardown — delete zone created by provisionDns
+    if (domain) {
+      const provider = createDnsProvider();
+      if (provider) {
+        provider.deleteZone(domain).catch((err: unknown) => {
+          console.warn(`[dns-teardown] Failed to delete zone ${domain}:`, (err as Error).message);
+        });
+      }
+    }
+
+    res.status(204).send();
+  } catch (err) {
+    console.error(`[coolify] DELETE /applications/${req.params.slug} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to delete application via Coolify' });
+  }
+});
+
+// ── PATCH /api/sites/:slug — update site settings ────────────────────────────
+//
+// Accepts both frontend Site fields (repository, description) and raw Coolify
+// fields (git_repository, build_pack, fqdn). repository → git_repository translation
+// keeps the frontend decoupled from Coolify internals.
+//
+// deploy_auth switching: accepts deploy_auth ('ssh_key'|'pat') + deploy_token (required for pat).
+// PAT is embedded in Coolify's git_repository transparently — never exposed to the frontend.
+// When updating repository URL on a PAT site, the existing PAT is re-embedded automatically.
+router.patch('/:slug', async (req: Request, res: Response) => {
+  // C — slug validation (Coolify UUIDs are alphanumeric)
+  if (!SLUG_RE.test(req.params.slug)) {
+    res.status(400).json({ error: 'Invalid slug' });
+    return;
+  }
+  const body = req.body as Partial<CoolifyUpdateApplicationPayload & {
+    fqdn?: string;    // alias — maps to domains
+    domain?: string;  // alias — maps to domains
+    repository?: string;
+    server?: string;
+    deploy_auth?: 'ssh_key' | 'pat';
+    deploy_token?: string;  // required when deploy_auth === 'pat'
+    docker_compose_location?: string;
+    base_directory?: string;
+  }>;
+  if (Object.keys(body).length === 0) {
+    res.status(400).json({ error: 'Request body must include at least one field to update' });
+    return;
+  }
+  // B Layer 1 — validate fqdn/domain at ingress
+  const incomingFqdnRaw = (body as any).fqdn ?? (body as any).domain ?? body.domains;
+  if (incomingFqdnRaw !== undefined) {
+    const bare = String(incomingFqdnRaw).replace(/^https?:\/\//i, '').replace(/\/.*$/, '').trim();
+    if (!FQDN_RE.test(bare)) {
+      res.status(400).json({ error: 'Invalid domain: must be a valid FQDN' });
+      return;
+    }
+  }
+  const switchingAuth = body.deploy_auth !== undefined;
+  if (switchingAuth && body.deploy_auth === 'pat' && !body.deploy_token?.trim()) {
+    res.status(400).json({ error: 'deploy_token required when deploy_auth is pat' });
+    return;
+  }
+  try {
+    const client = createCoolifyClient()!;
+    const payload: CoolifyUpdateApplicationPayload = {};
+    if (body.name !== undefined) payload.name = body.name;
+    if (body.description !== undefined) payload.description = body.description;
+    // fqdn/domain → 'domains' (Coolify PATCH field name); requires full URL with protocol
+    const incomingFqdn = (body as any).fqdn ?? (body as any).domain ?? body.domains;
+    if (incomingFqdn !== undefined) {
+      payload.domains = /^https?:\/\//i.test(incomingFqdn) ? incomingFqdn : `https://${incomingFqdn}`;
+    }
+    if (body.git_branch !== undefined) payload.git_branch = body.git_branch;
+    if (body.build_pack !== undefined) payload.build_pack = body.build_pack;
+    if (body.docker_compose_location !== undefined) payload.docker_compose_location = body.docker_compose_location;
+    if (body.base_directory !== undefined) payload.base_directory = body.base_directory;
+
+    // Auth-aware repository URL handling:
+    // - Always stores clean base URL in the frontend-facing Site response
+    // - Transparently re-embeds PAT in Coolify's git_repository when needed
+    const incomingRepo = (body as any).repository ?? body.git_repository;
+    const needCurrentApp = switchingAuth || incomingRepo !== undefined;
+    const currentApp = needCurrentApp ? await client.getApplication(req.params.slug) : null;
+
+    // Extract current PAT from Coolify (if site currently uses PAT auth)
+    let currentPat: string | null = null;
+    if (currentApp) {
+      try {
+        const url = new URL(currentApp.git_repository);
+        if (url.username) currentPat = url.username;
+      } catch { /* not a URL */ }
+    }
+
+    if (incomingRepo !== undefined || switchingAuth) {
+      // Resolve clean base URL from incoming field, or from current Coolify app
+      const rawBase = incomingRepo ?? currentApp?.git_repository ?? '';
+      let cleanBase: string;
+      try {
+        const u = new URL(rawBase);
+        u.username = '';
+        u.password = '';
+        cleanBase = u.toString();
+      } catch {
+        cleanBase = rawBase;
+      }
+
+      const effectiveAuth = switchingAuth ? body.deploy_auth! : (currentPat ? 'pat' : 'ssh_key');
+      const effectiveToken = (switchingAuth && body.deploy_auth === 'pat')
+        ? body.deploy_token!.trim()
+        : currentPat;
+
+      payload.git_repository = (effectiveAuth === 'pat' && effectiveToken)
+        ? embedPatInRepoUrl(cleanBase, effectiveToken)
+        : httpsToSshUrl(cleanBase);
+    }
+
+    let app = await client.updateApplication(req.params.slug, payload);
+
+    // Refetch to ensure git_repository is updated (especially for auth switches)
+    const refreshed = await client.getApplication(req.params.slug).catch(() => null);
+    if (refreshed) app = refreshed;
+
+    // Post-update auth side effects (link/unlink SSH deploy key)
+    if (switchingAuth) {
+      if (body.deploy_auth === 'pat') {
+        await unlinkGithubKey(req.params.slug);
+      } else {
+        await linkGithubKey(req.params.slug);
+      }
+    }
+
+    if (payload.domains) {
+      await provisionDns(payload.domains);
+    }
+    // Always attempt Traefik route provision on every PATCH — self-heals sites
+    // whose route file was never written (e.g. all prior deploys failed).
+    // Non-fatal: provisionTraefikRoute logs a warning if no container is running.
+    const currentDomain = resolveRouteDomain(app);
+    if (currentDomain === null) {
+      console.warn(`[traefik-route] PATCH ${req.params.slug}: no usable domain resolved — skipping route write`);
+    }
+    if (currentDomain) {
+      const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
+      let routeResult: { ok: boolean; reason?: string };
+      if (app.build_pack === 'dockercompose') {
+        const client2 = createCoolifyClient()!;
+        routeResult = await provisionTraefikRouteForCompose(client2, app, currentDomain, resolver);
+      } else {
+        const port = (app as any).ports_exposes ?? 3000;
+        routeResult = await provisionTraefikRoute(req.params.slug, currentDomain, port, resolver);
+      }
+      if (!routeResult.ok) {
+        console.error(`[traefik-route] PATCH ${req.params.slug}: route provision failed — ${routeResult.reason}`);
+      }
+    }
+    if (switchingAuth) writeStoredDeployAuth(req.params.slug, body.deploy_auth!);
+    const result = mapSiteWithStoredAuth(app, []);
+    res.status(200).json(result);
+  } catch (err) {
+    console.error(`[coolify] PATCH /applications/${req.params.slug} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to update application via Coolify' });
+  }
+});
+
+// ── GET /api/sites/:slug/dns — DNS records for a site ────────────────────────
+router.get('/:slug/dns', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    const domain = resolveRouteDomain(app) ?? '';
+    if (!domain) {
+      res.status(422).json({ error: 'Site has no domain configured' });
+      return;
+    }
+    const records = await createDnsProvider().getRecords(domain);
+    res.status(200).json(records);
+  } catch (err) {
+    if (err instanceof DnsOperationError) {
+      const msg = (err.originalCause as Error)?.message ?? '';
+      if (msg.includes('No such zone')) {
+        res.status(200).json([]);
+        return;
+      }
+      console.warn('[dns] getRecords failed:', err.originalCause);
+      res.status(500).json({ error: 'DNS operation failed' });
+    } else {
+      console.error(`[coolify] GET /applications/${req.params.slug} for DNS failed:`, (err as Error).message);
+      res.status(502).json({ error: 'Failed to retrieve site from Coolify' });
+    }
+  }
+});
+
+// ── POST /api/sites/:slug/dns — add a DNS record ─────────────────────────────
+router.post('/:slug/dns', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    const domain = resolveRouteDomain(app) ?? '';
+    if (!domain) {
+      res.status(422).json({ error: 'Site has no domain configured' });
+      return;
+    }
+    const body = req.body as Partial<DnsRecord>;
+    if (!body.type || !body.name || !body.value || !body.ttl) {
+      res.status(400).json({ error: 'Missing required fields: type, name, value, ttl' });
+      return;
+    }
+    const record = await createDnsProvider().addRecord(domain, {
+      type: body.type,
+      name: body.name,
+      value: body.value,
+      ttl: body.ttl,
+      ...(body.priority !== undefined ? { priority: body.priority } : {}),
+    });
+    res.status(201).json(record);
+  } catch (err) {
+    if (err instanceof DnsOperationError) {
+      console.warn('[dns] addRecord failed:', err.originalCause);
+      res.status(500).json({ error: 'DNS operation failed' });
+    } else {
+      console.error(`[coolify] GET /applications/${req.params.slug} for DNS failed:`, (err as Error).message);
+      res.status(502).json({ error: 'Failed to retrieve site from Coolify' });
+    }
+  }
+});
+
+// ── PUT /api/sites/:slug/dns/:id — update a DNS record ───────────────────────
+router.put('/:slug/dns/:id', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    const domain = resolveRouteDomain(app) ?? '';
+    if (!domain) {
+      res.status(422).json({ error: 'Site has no domain configured' });
+      return;
+    }
+    const updates = req.body as Partial<Omit<DnsRecord, 'id'>>;
+    const record = await createDnsProvider().updateRecord(domain, req.params.id, updates);
+    res.status(200).json(record);
+  } catch (err) {
+    if (err instanceof DnsOperationError) {
+      console.warn('[dns] updateRecord failed:', err.originalCause);
+      res.status(500).json({ error: 'DNS operation failed' });
+    } else {
+      console.error(`[coolify] GET /applications/${req.params.slug} for DNS failed:`, (err as Error).message);
+      res.status(502).json({ error: 'Failed to retrieve site from Coolify' });
+    }
+  }
+});
+
+// ── DELETE /api/sites/:slug/dns/:id — delete a DNS record ────────────────────
+router.delete('/:slug/dns/:id', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    const domain = resolveRouteDomain(app) ?? '';
+    if (!domain) {
+      res.status(422).json({ error: 'Site has no domain configured' });
+      return;
+    }
+    await createDnsProvider().deleteRecord(domain, req.params.id);
+    res.status(204).send();
+  } catch (err) {
+    if (err instanceof DnsOperationError) {
+      console.warn('[dns] deleteRecord failed:', err.originalCause);
+      res.status(500).json({ error: 'DNS operation failed' });
+    } else {
+      console.error(`[coolify] GET /applications/${req.params.slug} for DNS failed:`, (err as Error).message);
+      res.status(502).json({ error: 'Failed to retrieve site from Coolify' });
+    }
+  }
+});
+
+// ── GET /api/sites/:slug/envs — list environment variables ───────────────────
+// Values for is_shown_once=true are masked in the response — the real value
+// remains in Coolify and is never returned by this endpoint.
+router.get('/:slug/envs', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    const envs = await client.listEnvs(app.uuid);
+    const masked = envs.map((env: CoolifyEnv) => ({
+      ...env,
+      value: env.is_shown_once ? '••••••••' : env.value,
+    }));
+    res.status(200).json(masked);
+  } catch (err) {
+    console.error(`[coolify] GET /applications/${req.params.slug}/envs failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to retrieve environment variables from Coolify' });
+  }
+});
+
+// ── POST /api/sites/:slug/envs — create an environment variable ───────────────
+router.post('/:slug/envs', async (req: Request, res: Response) => {
+  const body = req.body as Partial<CreateEnvPayload>;
+  if (!body.key || body.value === undefined) {
+    res.status(400).json({ error: 'Missing required fields: key, value' });
+    return;
+  }
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    const existing = await client.listEnvs(app.uuid);
+    const match = existing.find((e) => e.key === body.key);
+    const payload = {
+      key: body.key,
+      value: body.value,
+      ...(body.is_runtime !== undefined ? { is_runtime: body.is_runtime } : {}),
+      ...(body.is_buildtime !== undefined ? { is_buildtime: body.is_buildtime } : {}),
+      ...(body.is_shown_once !== undefined ? { is_shown_once: body.is_shown_once } : {}),
+    };
+    if (match) {
+      await client.updateEnv(app.uuid, { uuid: match.uuid, ...payload });
+      res.status(200).json({ message: 'Environment variable updated (key already existed)' });
+    } else {
+      await client.createEnv(app.uuid, payload);
+      res.status(201).json({ message: 'Environment variable created' });
+    }
+  } catch (err) {
+    console.error(`[coolify] POST /applications/${req.params.slug}/envs failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to create environment variable via Coolify' });
+  }
+});
+
+// ── PATCH /api/sites/:slug/envs/:envUuid — update an environment variable ─────
+router.patch('/:slug/envs/:envUuid', async (req: Request, res: Response) => {
+  const body = req.body as Partial<Omit<UpdateEnvPayload, 'uuid'>>;
+  if (!body.key || body.value === undefined) {
+    res.status(400).json({ error: 'Missing required fields: key, value' });
+    return;
+  }
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    await client.updateEnv(app.uuid, {
+      uuid: req.params.envUuid,
+      key: body.key,
+      value: body.value,
+      ...(body.is_runtime !== undefined ? { is_runtime: body.is_runtime } : {}),
+      ...(body.is_buildtime !== undefined ? { is_buildtime: body.is_buildtime } : {}),
+      ...(body.is_shown_once !== undefined ? { is_shown_once: body.is_shown_once } : {}),
+    });
+    res.status(200).json({ message: 'Environment variable updated' });
+  } catch (err) {
+    console.error(`[coolify] PATCH /applications/${req.params.slug}/envs/${req.params.envUuid} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to update environment variable via Coolify' });
+  }
+});
+
+// ── DELETE /api/sites/:slug/envs/:envUuid — delete an environment variable ────
+router.delete('/:slug/envs/:envUuid', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    await client.deleteEnv(app.uuid, req.params.envUuid);
+    res.status(204).send();
+  } catch (err) {
+    console.error(`[coolify] DELETE /applications/${req.params.slug}/envs/${req.params.envUuid} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to delete environment variable via Coolify' });
+  }
+});
+
+// ── Shared env enrichment helper ─────────────────────────────────────────────
+// Returns enriched env var list cross-referenced against compose-extracted vars.
+// isRequired = compose says var is required with no default (authoritative, not value-dependent).
+// Deploy preflight uses isRequired && value==='' to identify unset required vars.
+const SECRET_PATTERN = /PASSWORD|SECRET|KEY|TOKEN/i;
+
+interface EnrichedEnv {
+  key: string;
+  value: string;
+  isRequired: boolean;
+  isSecret: boolean;
+  hasDefault: boolean;
+}
+
+async function buildEnvList(client: CoolifyClient, app: CoolifyApplication): Promise<EnrichedEnv[]> {
+  const rawYaml = app.docker_compose_raw
+    ?? (await client.getApplication(app.uuid).catch(() => null))?.docker_compose_raw
+    ?? null;
+
+  // Build a map of compose-extracted metadata, keyed by var name.
+  // For dockercompose sites this is the authoritative source for isRequired/isSecret/hasDefault —
+  // Coolify v4.3.5 silently rejects is_required PATCH so we never trust Coolify's is_required field.
+  const composeMap = new Map<string, { required: boolean; hasDefault: boolean; isSecret: boolean }>();
+  if (rawYaml) {
+    try {
+      const extracted = extractEnvVars(rawYaml);
+      for (const v of extracted) {
+        composeMap.set(v.name, {
+          required: v.required,
+          hasDefault: v.defaultValue !== undefined,
+          isSecret: v.isSecret,
+        });
+      }
+    } catch { /* malformed YAML — leave composeMap empty */ }
+  }
+
+  const coolifyEnvs = await client.listEnvs(app.uuid);
+
+  // Coolify may return the same key multiple times (once per compose service).
+  // Deduplicate: prefer the non-empty value if one exists.
+  const deduped = new Map<string, CoolifyEnv>();
+  for (const env of coolifyEnvs) {
+    const existing = deduped.get(env.key);
+    if (!existing || (existing.value === '' || existing.value === null)) {
+      deduped.set(env.key, env);
+    }
+  }
+
+  // Merge: start with all Coolify envs (value comes from Coolify; metadata from compose)
+  const result: EnrichedEnv[] = Array.from(deduped.values()).map((env: CoolifyEnv): EnrichedEnv => {
+    const meta = composeMap.get(env.key);
+    const currentValue = env.value ?? '';
+    // isRequired = compose says required with no default (authoritative; independent of current value)
+    const isRequired = meta ? (meta.required && !meta.hasDefault) : false;
+    // isSecret = compose-derived if available, else pattern-match fallback
+    const isSecret = meta ? meta.isSecret : SECRET_PATTERN.test(env.key);
+    return {
+      key: env.key,
+      value: currentValue,
+      isRequired,
+      isSecret,
+      hasDefault: meta?.hasDefault ?? false,
+    };
+  });
+
+  // Add compose vars that Coolify doesn't have yet (e.g. seeding race or lazy backfill gap)
+  for (const [name, meta] of composeMap.entries()) {
+    if (!deduped.has(name)) {
+      result.push({
+        key: name,
+        value: '',
+        isRequired: meta.required && !meta.hasDefault,
+        isSecret: meta.isSecret,
+        hasDefault: meta.hasDefault,
+      });
+    }
+  }
+
+  return result;
+}
+
+// ── GET /api/sites/:slug/env — enriched env var list ─────────────────────────
+// Lazy backfill: if site is dockercompose, Coolify returns zero envs, AND
+// docker_compose_raw is now populated — seed env vars from the compose file
+// before returning. Idempotent: only seeds when Coolify has zero existing envs.
+router.get('/:slug/env', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+
+    let app: CoolifyApplication;
+    try {
+      app = await client.getApplication(req.params.slug);
+    } catch (fetchErr) {
+      const msg = (fetchErr as Error).message ?? '';
+      if (msg.includes('429') || msg.toLowerCase().includes('too many requests')) {
+        console.warn(`[coolify] GET /env: rate limited for ${req.params.slug} — returning 503`);
+        res.status(503).json({ error: 'Coolify rate limit reached — please retry in a moment' });
+        return;
+      }
+      throw fetchErr;
+    }
+
+    // Lazy backfill for dockercompose sites where env seeding was skipped at create time
+    if (app.build_pack === 'dockercompose') {
+      let coolifyEnvCount = 0;
+      try {
+        const existingEnvs = await client.listEnvs(app.uuid);
+        coolifyEnvCount = existingEnvs.length;
+      } catch (listErr) {
+        const msg = (listErr as Error).message ?? '';
+        if (msg.includes('429') || msg.toLowerCase().includes('too many requests')) {
+          console.warn(`[coolify] GET /env: rate limited listing envs for ${req.params.slug} — returning 503`);
+          res.status(503).json({ error: 'Coolify rate limit reached — please retry in a moment' });
+          return;
+        }
+        // non-fatal — fall through to buildEnvList
+      }
+
+      if (coolifyEnvCount === 0) {
+        // Re-fetch to get latest docker_compose_raw (may have populated after create-time timeout)
+        const refreshed = await client.getApplication(app.uuid).catch(() => null);
+        const rawYaml = refreshed?.docker_compose_raw ?? app.docker_compose_raw ?? null;
+
+        if (rawYaml) {
+          try {
+            const extracted = extractEnvVars(rawYaml);
+            if (extracted.length > 0) {
+              const envs: CoolifyEnvVar[] = extracted.map((v) => {
+                if (v.required && v.isSecret) return { key: v.name, value: generateSecretValue(32) };
+                if (v.required && !v.isSecret) return { key: v.name, value: '' };
+                return { key: v.name, value: v.defaultValue ?? '' };
+              });
+              await client.setApplicationEnvs(app.uuid, envs);
+              const required = extracted.filter((v) => v.required).length;
+              const secrets = extracted.filter((v) => v.isSecret).length;
+              console.log(
+                `[coolify] lazy backfill: seeded ${envs.length} env vars for ${app.uuid} ` +
+                `(required=${required}, secrets=${secrets})`,
+              );
+              if (refreshed) app = refreshed;
+            }
+          } catch (seedErr) {
+            const msg = (seedErr as Error).message ?? '';
+            if (msg.includes('429') || msg.toLowerCase().includes('too many requests')) {
+              console.warn(`[coolify] GET /env: rate limited during backfill seed for ${app.uuid} — returning 503`);
+              res.status(503).json({ error: 'Coolify rate limit reached — please retry in a moment' });
+              return;
+            }
+            console.warn(`[coolify] lazy backfill: seed failed for ${app.uuid} — continuing:`, msg);
+          }
+        }
+      }
+    }
+
+    const envs = await buildEnvList(client, app);
+    res.status(200).json({ envs });
+  } catch (err) {
+    const msg = (err as Error).message ?? '';
+    if (msg.includes('429') || msg.toLowerCase().includes('too many requests')) {
+      console.warn(`[coolify] GET /env: rate limited for ${req.params.slug}`);
+      res.status(503).json({ error: 'Coolify rate limit reached — please retry in a moment' });
+      return;
+    }
+    console.error(`[coolify] GET /${req.params.slug}/env failed:`, msg);
+    res.status(502).json({ error: 'Failed to retrieve environment variables' });
+  }
+});
+
+// ── PUT /api/sites/:slug/env — bulk update env vars ──────────────────────────
+// Accepts { envs: Array<{ key, value }> }. Upserts each: updates if uuid found, creates if not.
+router.put('/:slug/env', async (req: Request, res: Response) => {
+  const body = req.body as { envs?: Array<{ key: string; value: string }> };
+  if (!Array.isArray(body.envs) || body.envs.length === 0) {
+    res.status(400).json({ error: 'Request body must include a non-empty envs array' });
+    return;
+  }
+  for (const item of body.envs) {
+    if (!item.key || item.value === undefined) {
+      res.status(400).json({ error: 'Each env entry must have key and value' });
+      return;
+    }
+  }
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    const existing = await client.listEnvs(app.uuid);
+    const existingByKey = new Map(existing.map((e: CoolifyEnv) => [e.key, e]));
+
+    for (const item of body.envs) {
+      const match = existingByKey.get(item.key);
+      if (match) {
+        // Coolify PATCH /applications/{uuid}/envs identifies by key — uuid must NOT be in the body
+        await client.patchEnvByKey(app.uuid, { key: item.key, value: item.value });
+      } else {
+        await client.createEnv(app.uuid, { key: item.key, value: item.value });
+      }
+    }
+
+    // Return updated enriched list
+    const refreshedApp = await client.getApplication(app.uuid).catch(() => app);
+    const envs = await buildEnvList(client, refreshedApp);
+    res.status(200).json({ envs });
+  } catch (err) {
+    console.error(`[coolify] PUT /${req.params.slug}/env failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to update environment variables' });
+  }
+});
+
+// ── GET /api/sites/:slug/deployments — deployment history ────────────────────
+router.get('/:slug/deployments', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+    const deployments = await client.listDeployments(app.uuid);
+    const deploys = deployments.map((d) => mapDeploy(d, app.git_branch));
+    res.status(200).json(deploys);
+  } catch (err) {
+    console.error(`[coolify] GET deployments for ${req.params.slug} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to retrieve deployments from Coolify' });
+  }
+});
+
+// ── POST /api/sites/:slug/disable — stop containers and persist disabled flag ─
+router.post('/:slug/disable', async (req: Request, res: Response) => {
+  const slug = req.params.slug;
+  try {
+    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
+    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<{ Id: string }>;
+    let count = 0;
+    for (const container of containers) {
+      try {
+        await dockerPost(`/containers/${container.Id}/stop?t=10`);
+      } catch (err) {
+        console.error(`[docker] disable: stop ${container.Id} failed (may already be stopped):`, (err as Error).message);
+      }
+      try {
+        await dockerPost(`/containers/${container.Id}/update`, { RestartPolicy: { Name: 'no' } });
+      } catch (err) {
+        console.error(`[docker] disable: update restart policy ${container.Id} failed:`, (err as Error).message);
+      }
+      count++;
+    }
+    writeDisabledState(slug, true);
+    res.status(200).json({ disabled: true, containersStop: count });
+  } catch (err) {
+    console.error(`[docker] POST /disable for ${slug} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to disable site via Docker' });
+  }
+});
+
+// ── POST /api/sites/:slug/enable — restore containers and clear disabled flag ─
+router.post('/:slug/enable', async (req: Request, res: Response) => {
+  const slug = req.params.slug;
+  try {
+    if (!readDisabledState(slug)) {
+      res.status(200).json({ disabled: false });
+      return;
+    }
+    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
+    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<{ Id: string }>;
+    let count = 0;
+    for (const container of containers) {
+      try {
+        await dockerPost(`/containers/${container.Id}/update`, { RestartPolicy: { Name: 'unless-stopped' } });
+      } catch (err) {
+        console.error(`[docker] enable: update restart policy ${container.Id} failed:`, (err as Error).message);
+      }
+      try {
+        await dockerPost(`/containers/${container.Id}/start`);
+      } catch (err) {
+        console.error(`[docker] enable: start ${container.Id} failed (may already be running):`, (err as Error).message);
+      }
+      count++;
+    }
+    writeDisabledState(slug, false);
+    res.status(200).json({ disabled: false, containersStarted: count });
+  } catch (err) {
+    console.error(`[docker] POST /enable for ${slug} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to enable site via Docker' });
+  }
+});
+
+// ── POST /api/sites/:slug/deploy — trigger a deploy ──────────────────────────
+router.post('/:slug/deploy', async (req: Request, res: Response) => {
+  // C — slug validation
+  if (!SLUG_RE.test(req.params.slug)) {
+    res.status(400).json({ error: 'Invalid slug' });
+    return;
+  }
+  try {
+    if (readDisabledState(req.params.slug)) {
+      res.status(409).json({ error: 'Site is disabled. Enable it before deploying.' });
+      return;
+    }
+    const client = createCoolifyClient()!;
+    const app = await client.getApplication(req.params.slug);
+
+    // ── Deploy preflight: block if any required env vars are empty ────────────
+    // Only applies to dockercompose sites — other build packs have no compose manifest.
+    if (app.build_pack === 'dockercompose') {
+      try {
+        const envList = await buildEnvList(client, app);
+        const missing = envList.filter((e) => e.isRequired && e.value === '').map((e) => e.key);
+        if (missing.length > 0) {
+          res.status(400).json({
+            error: 'Missing required environment variables',
+            missing,
+          });
+          return;
+        }
+      } catch (preflightErr) {
+        // Non-fatal: log and continue — don't block deploy on preflight failure
+        console.warn(`[deploy-preflight] env check failed for ${req.params.slug}:`, (preflightErr as Error).message);
+      }
+    }
+
+    const result = await client.triggerDeploy(req.params.slug);
+    const dep = result.deployments?.[0];
+    res.status(202).json({ jobId: dep?.deployment_uuid, message: dep?.message });
+
+    // Async: update Traefik route once the container is running.
+    // Poll up to 3 minutes for the new container to appear.
+    const _routeDomain = resolveRouteDomain(app);
+    if (_routeDomain === null) {
+      console.warn(`[traefik-route] deploy ${req.params.slug}: no usable domain resolved — skipping post-deploy route write`);
+    }
+    if (_routeDomain) {
+      const domain = _routeDomain;
+      const port = (app as any).ports_exposes ?? 3000;
+      const slug = req.params.slug;
+      const isCompose = app.build_pack === 'dockercompose';
+      (async () => {
+        const maxAttempts = 18; // 18 × 10s = 3 min
+        for (let i = 0; i < maxAttempts; i++) {
+          await new Promise(r => setTimeout(r, 10_000));
+          try {
+            const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
+            if (isCompose) {
+              // For compose: poll for any running service container in this project
+              const filter = encodeURIComponent(
+                JSON.stringify({ label: [`com.docker.compose.project=${slug}`] }),
+              );
+              const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ State: string }>;
+              const running = containers.find(c => c.State === 'running');
+              if (running) {
+                const freshApp = await createCoolifyClient()!.getApplication(slug).catch(() => null);
+                if (freshApp) {
+                  const r = await provisionTraefikRouteForCompose(createCoolifyClient()!, freshApp, domain, resolver);
+                  if (!r.ok) console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${r.reason}`);
+                }
+                break;
+              }
+            } else {
+              const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
+              const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; State: string }>;
+              const running = containers.find(c => c.State === 'running');
+              if (running) {
+                const r = await provisionTraefikRoute(slug, domain, port, resolver);
+                if (!r.ok) console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${r.reason}`);
+                break;
+              }
+            }
+          } catch {
+            // keep polling
+          }
+        }
+      })();
+    }
+  } catch (err) {
+    console.error(`[coolify] POST /deploy for ${req.params.slug} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to trigger deploy via Coolify' });
+  }
+});
+
+// ── GET /api/sites/:slug/deployments/:id/log — deploy log lines ───────────────
+router.get('/:slug/deployments/:id/log', async (req: Request, res: Response) => {
+  try {
+    const client = createCoolifyClient()!;
+    const deployment = await client.getDeployment(req.params.id);
+    const mapped = mapDeploy(deployment, '');
+    res.status(200).json(mapped.logLines);
+  } catch (err) {
+    console.error(`[coolify] GET deployment log for ${req.params.id} failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Failed to retrieve deployment log from Coolify' });
+  }
+});
+
+export default router;
