@@ -2,7 +2,8 @@ import { test, expect } from '@playwright/test';
 
 const BASE_URL = 'http://localhost:9080';
 const API_BASE = 'http://localhost:9080';
-const PASSWORD = '938xDTvcWnyk9TXbo9dlpbcvOuMsqUuwrIB+BPiNIMc=';
+// Set HERMITHOST_TEST_PASSWORD env var for local testing
+const PASSWORD = process.env.HERMITHOST_TEST_PASSWORD || 'changeme';
 
 test.describe('Full Authentication & Site Management Flow', () => {
   test.describe.configure({ timeout: 120000 });
@@ -136,7 +137,7 @@ test.describe('Full Authentication & Site Management Flow', () => {
     const timestamp = Date.now();
     const testSiteName = `test-qa-${timestamp}`;
     const testDomain = `test-qa-${timestamp}.hermithost.local`;
-    const testGitRepo = 'https://github.com/rdemeritt/probably-fine-publish';
+    const testGitRepo = 'https://github.com/coollabsio/coolify-examples';
     const testBranch = 'main';
 
     // Name field

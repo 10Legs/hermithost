@@ -8,7 +8,7 @@ jobs:
   # ── API: typecheck + build in one job (avoids double npm ci) ──────────────
   api:
     name: API — Typecheck & Build
-    runs-on: [self-hosted, hammer]
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: api
@@ -28,7 +28,7 @@ jobs:
   # ── Frontend: typecheck + svelte-check + build ───────────────────────────
   frontend:
     name: Frontend — Typecheck & Build
-    runs-on: [self-hosted, hammer]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -50,7 +50,7 @@ jobs:
   # ── Docker: validate both images build cleanly ───────────────────────────
   docker:
     name: Docker — Image Build
-    runs-on: [self-hosted, hammer]
+    runs-on: ubuntu-latest
     needs: [api, frontend]
     steps:
       - uses: actions/checkout@v4

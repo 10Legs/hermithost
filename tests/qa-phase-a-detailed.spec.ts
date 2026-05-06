@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test';
 
 const BASE_URL = 'http://localhost:9080';
-const PASSWORD = '938xDTvcWnyk9TXbo9dlpbcvOuMsqUuwrIB+BPiNIMc=';
+// Set HERMITHOST_TEST_PASSWORD env var for local testing
+const PASSWORD = process.env.HERMITHOST_TEST_PASSWORD || 'changeme';
 const TEST_SITE_SLUG = 'is5sad6ygoncu60nzroivvnw'; // qa-cantaconmigo-TEST
 
 test.describe('Phase A: Detailed Env Tab Validation', () => {

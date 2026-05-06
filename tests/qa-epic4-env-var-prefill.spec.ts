@@ -1,9 +1,10 @@
 import { test, expect } from '@playwright/test';
 
 const BASE_URL = 'http://localhost:9080';
-const PASSWORD = '938xDTvcWnyk9TXbo9dlpbcvOuMsqUuwrIB+BPiNIMc=';
-const TEST_REPO = 'https://github.com/10Legs/cantaconmigo';
-const GITHUB_PAT = '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';
+// Set HERMITHOST_TEST_PASSWORD env var for local testing
+const PASSWORD = process.env.HERMITHOST_TEST_PASSWORD || 'changeme';
+const TEST_REPO = 'https://github.com/coollabsio/coolify-examples';
+const GITHUB_PAT = process.env.HERMITHOST_TEST_GITHUB_PAT || '';
 
 test.describe('Epic 4: Env Tab + Deploy Preflight Modal', () => {
   test.describe.configure({ timeout: 180000 });
