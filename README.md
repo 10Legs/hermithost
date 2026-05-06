@@ -126,6 +126,12 @@ cd hermithost
 bash scripts/setup.sh
 ```
 
+`setup.sh` handles first-time git hook activation (`git config core.hooksPath .githooks`) in addition to secrets and config. If you skip `setup.sh`, activate the hooks manually:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 `setup.sh` will:
 - Generate all Coolify internal secrets automatically
 - Prompt for your **ACME email** (Let's Encrypt SSL notifications) — also used as the Coolify admin email

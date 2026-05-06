@@ -1,0 +1,76 @@
+#!/bin/sh
+# PII and private-data guard — blocks commits containing known sensitive patterns.
+# Patterns are intentionally specific to avoid false positives on generic terms.
+
+set -e
+
+STAGED=$(git diff --cached --name-only)
+if [ -z "$STAGED" ]; then
+  exit 0
+fi
+
+# Build a list of staged files excluding lockfiles and minified assets for
+# content checks. The base64 pattern in particular produces false positives on
+# package hashes, long CSS strings, etc. File-path checks (below) still apply
+# to the full STAGED list.
+CONTENT_STAGED=$(echo "$STAGED" | grep -vE '(package-lock\.json|yarn\.lock|\.lock$|dist/|\.min\.(js|css)$|^\.githooks/)' || true)
+
+FAIL=0
+
+check() {
+  LABEL="$1"
+  PATTERN="$2"
+  if [ -z "$CONTENT_STAGED" ]; then
+    return
+  fi
+  # Search only staged content for the filtered file set (not the whole working tree)
+  # shellcheck disable=SC2086
+  if git diff --cached -- $CONTENT_STAGED | grep -qE "$PATTERN"; then
+    echo "[pre-commit] BLOCKED: $LABEL"
+    echo "  Pattern: $PATTERN"
+    FAIL=1
+  fi
+}
+
+# Personal identifiers
+check "personal email"            "rdemeritt@gmail\.com"
+check "personal username path"    "/Users/rdemeritt"
+check "personal domain"           "shallowfordroad\.com"
+check "personal LAN subnet"       "192\.168\.3\."
+
+# Infrastructure leaks
+check "self-hosted runner label"  "runs-on:.*\[self-hosted.*hammer"
+check "personal server hostname"  "\bhammer\b.*(runner|runs-on|self-hosted)"
+
+# Credential patterns
+check "hardcoded password var"    "(PASSWORD|SECRET|TOKEN)\s*=\s*['\"][A-Za-z0-9+/]{20,}['\"]"
+check "base64 secret (long)"      "['\"][A-Za-z0-9+/]{40,}={0,2}['\"]"
+check "BEGIN PRIVATE KEY"         "BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY"
+check "session cookie value"      "hermithost_session=[a-zA-Z0-9%]{20,}"
+
+# Runtime-generated files that must not be committed
+for f in $STAGED; do
+  case "$f" in
+    cookies.txt|*.cookies.txt)
+      echo "[pre-commit] BLOCKED: cookies file staged: $f"
+      FAIL=1
+      ;;
+    traefik/conf.d/site-*.yml)
+      echo "[pre-commit] BLOCKED: runtime site config staged: $f"
+      FAIL=1
+      ;;
+    traefik/conf.d/routes.yml)
+      echo "[pre-commit] BLOCKED: generated routes.yml staged (use routes.yml.example)"
+      FAIL=1
+      ;;
+  esac
+done
+
+if [ "$FAIL" = "1" ]; then
+  echo ""
+  echo "[pre-commit] Commit blocked. Fix the above issues and re-stage."
+  echo "  To bypass in an emergency: git commit --no-verify (use sparingly)"
+  exit 1
+fi
+
+exit 0
