@@ -33,18 +33,16 @@ graph TD
   LetsEncrypt["Lets Encrypt (Internet Mode)"]
   
   Browser -->|HTTPS| Traefik
-  Traefik -->|Route /api/*| API
-  Traefik -->|Route /*| Frontend
-  Traefik -->|Verify DNS| Technitium
-  
-  API -->|Deploy/Status| Coolify
-  API -->|Create Records| Technitium
-  API -->|Query Container State| Docker
-  Coolify -->|Build/Run| Docker
-  
-  Traefik -->|DNS-01 Challenge| Technitium
-  Traefik -->|ACME (LAN)| StepCA
-  Traefik -->|ACME (Internet)| LetsEncrypt
+  Traefik -->|API routes| API
+  Traefik -->|Static routes| Frontend
+  Traefik -->|DNS-01 challenge| Technitium
+  Traefik -->|ACME LAN| StepCA
+  Traefik -->|ACME Internet| LetsEncrypt
+
+  API -->|Deploy and status| Coolify
+  API -->|Create records| Technitium
+  API -->|Container state| Docker
+  Coolify -->|Build and run| Docker
 ```
 
 ### LAN Mode SSL Certificate Issuance
@@ -91,7 +89,7 @@ sequenceDiagram
   Traefik->>Traefik: Request SSL certificate
   Traefik-->>Traefik: Cert issued + stored
   API-->>Dashboard: Deployment complete
-  User->>Traefik: https://myapp.hh (or public domain)
+  User->>Traefik: Visit myapp.hh
   Traefik-->>User: Site live with HTTPS
 ```
 
