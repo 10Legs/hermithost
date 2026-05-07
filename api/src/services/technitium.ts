@@ -312,15 +312,19 @@ export class TechnitiumClient {
         LanOnly:  'UseSpecifiedNetworkACL',
         Public:   'Allow',
       };
-      const technitiumAcl: Record<RecursionMode, string> = {
-        Disabled: '',
-        LanOnly:  SAFE_RECURSION_ACL_ENTRIES.join(','),
-        Public:   '',
+      const params: Record<string, string | number | boolean> = {
+        recursion: technitiumRecursion[mode],
       };
-      const body = this.buildParams({
-        recursion:           technitiumRecursion[mode],
-        recursionNetworkACL: technitiumAcl[mode],
-      });
+      // Only send recursionNetworkACL for LanOnly. For Public and Disabled, omitting the
+      // parameter leaves Technitium's stored ACL untouched, preventing a race where an empty
+      // ACL is written then UseSpecifiedNetworkACL is applied before the new ACL arrives.
+      // This is the root cause of the Public → LanOnly restore bug: sending recursionNetworkACL=""
+      // clears Technitium's ACL, and if the server processes UseSpecifiedNetworkACL against an
+      // empty ACL (even transiently), all recursive queries are refused.
+      if (mode === 'LanOnly') {
+        params.recursionNetworkACL = SAFE_RECURSION_ACL_ENTRIES.join(',');
+      }
+      const body = this.buildParams(params);
       const res = await fetch(`${this.baseUrl}/api/settings/set`, { method: 'POST', headers: this.postHeaders, body });
       await handleResponse<TechnitiumDeleteResponse>(res, 'POST /api/settings/set (recursion)');
     });
@@ -338,15 +342,16 @@ export class TechnitiumClient {
       };
       // Merge: safe baseline + caller-supplied extras, deduplicated.
       const merged = Array.from(new Set([...SAFE_RECURSION_ACL_ENTRIES, ...extraCidrs]));
-      const technitiumAcl: Record<RecursionMode, string> = {
-        Disabled: '',
-        LanOnly:  merged.join(','),
-        Public:   '',
+      const params: Record<string, string | number | boolean> = {
+        recursion: technitiumRecursion[mode],
       };
-      const body = this.buildParams({
-        recursion:           technitiumRecursion[mode],
-        recursionNetworkACL: technitiumAcl[mode],
-      });
+      // Only send recursionNetworkACL for LanOnly — same reasoning as setRecursion():
+      // sending an empty value for Public/Disabled clears Technitium's stored ACL, which
+      // causes REFUSED responses when UseSpecifiedNetworkACL is subsequently applied.
+      if (mode === 'LanOnly') {
+        params.recursionNetworkACL = merged.join(',');
+      }
+      const body = this.buildParams(params);
       const res = await fetch(`${this.baseUrl}/api/settings/set`, { method: 'POST', headers: this.postHeaders, body });
       await handleResponse<TechnitiumDeleteResponse>(res, 'POST /api/settings/set (recursion+acl)');
     });
