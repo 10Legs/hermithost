@@ -393,6 +393,31 @@ export async function unlinkGithubKey(appUuid: string): Promise<void> {
   }
 }
 
+// ── Direct Postgres write for git_repository ─────────────────────────────────
+// Coolify's PATCH /applications/{uuid} normalizes git_repository URLs, stripping
+// x-access-token:PAT@ credentials. We bypass the API and write directly to the DB,
+// mirroring the pattern used in unlinkGithubKey().
+export async function writeGitRepositoryUrl(appUuid: string, repoUrl: string): Promise<void> {
+  const { Client } = require('pg') as typeof import('pg');
+  const pg = new Client({
+    host: process.env.PGHOST ?? 'coolify-db',
+    port: Number(process.env.PGPORT ?? 5432),
+    database: process.env.PGDATABASE ?? 'coolify',
+    user: process.env.PGUSER ?? 'coolify',
+    password: process.env.PGPASSWORD,
+  });
+  await pg.connect();
+  try {
+    await pg.query(
+      'UPDATE applications SET git_repository = $1 WHERE uuid = $2',
+      [repoUrl, appUuid]
+    );
+    console.log(`[git-repo] Wrote git_repository directly to DB for app ${appUuid}`);
+  } finally {
+    await pg.end();
+  }
+}
+
 // ── Traefik route provisioning ────────────────────────────────────────────────
 // Queries Docker API for the running Coolify container for a given slug,
 // then writes (or removes) a Traefik conf.d route file so the site domain
@@ -852,15 +877,18 @@ router.post('/', async (req: Request, res: Response) => {
     let app = await client.createApplication(payload);
 
     // SSH key auth: link the deploy key via DB
-    // PAT auth: clear source_type (Coolify defaults to GithubApp) and re-apply PAT URL
+    // PAT auth: clear source_type (Coolify defaults to GithubApp) and write PAT URL directly to DB.
+    // Coolify's PATCH /applications/{uuid} normalizes git_repository and strips PAT credentials,
+    // so we bypass the API entirely and write directly to Postgres (same pattern as unlinkGithubKey).
     if (deployAuth !== 'pat') {
       await linkGithubKey(app.uuid);
     } else {
+      const pat = body.deploy_token!.trim();
       // unlinkGithubKey sets source_type = NULL so Coolify uses git_repository directly
       await unlinkGithubKey(app.uuid);
-      // Re-apply PAT URL after source_type cleared — Coolify may have stripped it
-      await client.updateApplication(app.uuid, { git_repository: resolvedRepoUrl }).catch((e: Error) => {
-        console.warn(`[coolify] PAT url re-patch failed for ${app.uuid}:`, e.message);
+      // Write PAT-embedded URL directly to DB — bypasses Coolify PATCH URL normalization
+      await writeGitRepositoryUrl(app.uuid, embedPatInRepoUrl(body.git_repository, pat)).catch((e: Error) => {
+        console.warn(`[git-repo] PAT url DB write failed for ${app.uuid}:`, e.message);
       });
     }
 
@@ -1011,20 +1039,28 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     if (body.base_directory !== undefined) payload.base_directory = body.base_directory;
 
     // Auth-aware repository URL handling:
-    // - Always stores clean base URL in the frontend-facing Site response
-    // - Transparently re-embeds PAT in Coolify's git_repository when needed
+    // - Always stores clean (credential-free) URL via Coolify PATCH
+    // - For PAT sites, writes PAT-embedded URL directly to Postgres after the PATCH
+    //   (Coolify PATCH normalizes git_repository and strips PAT credentials)
     const incomingRepo = (body as any).repository ?? body.git_repository;
     const needCurrentApp = switchingAuth || incomingRepo !== undefined;
     const currentApp = needCurrentApp ? await client.getApplication(req.params.slug) : null;
 
-    // Extract current PAT from Coolify (if site currently uses PAT auth)
+    // Extract current PAT from Coolify git_repository URL.
+    // Since we now write the PAT-embedded URL directly to Postgres (bypassing Coolify's PATCH
+    // normalization), the URL in the DB should still contain the credentials on re-read.
     let currentPat: string | null = null;
     if (currentApp) {
       try {
         const url = new URL(currentApp.git_repository);
-        if (url.username) currentPat = url.username;
-      } catch { /* not a URL */ }
+        if (url.password) currentPat = url.password;
+        else if (url.username) currentPat = url.username;
+      } catch { /* not a parseable URL — SSH format, no PAT */ }
     }
+
+    // patUrlToWrite: PAT-embedded URL to write directly to DB after the Coolify PATCH.
+    // null = no direct DB write needed (SSH key or no repo change on non-PAT site).
+    let patUrlToWrite: string | null = null;
 
     if (incomingRepo !== undefined || switchingAuth) {
       // Resolve clean base URL from incoming field, or from current Coolify app
@@ -1044,16 +1080,16 @@ router.patch('/:slug', async (req: Request, res: Response) => {
         ? body.deploy_token!.trim()
         : currentPat;
 
-      payload.git_repository = (effectiveAuth === 'pat' && effectiveToken)
-        ? embedPatInRepoUrl(cleanBase, effectiveToken)
-        : httpsToSshUrl(cleanBase);
+      if (effectiveAuth === 'pat' && effectiveToken) {
+        // Send clean URL to Coolify PATCH (avoids normalization stripping PAT); write PAT URL to DB below
+        payload.git_repository = httpsToSshUrl(cleanBase);
+        patUrlToWrite = embedPatInRepoUrl(cleanBase, effectiveToken);
+      } else {
+        payload.git_repository = httpsToSshUrl(cleanBase);
+      }
     }
 
     let app = await client.updateApplication(req.params.slug, payload);
-
-    // Refetch to ensure git_repository is updated (especially for auth switches)
-    const refreshed = await client.getApplication(req.params.slug).catch(() => null);
-    if (refreshed) app = refreshed;
 
     // Post-update auth side effects (link/unlink SSH deploy key)
     if (switchingAuth) {
@@ -1063,6 +1099,18 @@ router.patch('/:slug', async (req: Request, res: Response) => {
         await linkGithubKey(req.params.slug);
       }
     }
+
+    // Write PAT-embedded URL directly to DB — bypasses Coolify PATCH URL normalization.
+    // Must happen after unlinkGithubKey so source_type is already NULL.
+    if (patUrlToWrite) {
+      await writeGitRepositoryUrl(req.params.slug, patUrlToWrite).catch((e: Error) => {
+        console.warn(`[git-repo] PAT url DB write failed for ${req.params.slug}:`, e.message);
+      });
+    }
+
+    // Refetch to ensure we return latest state
+    const refreshed = await client.getApplication(req.params.slug).catch(() => null);
+    if (refreshed) app = refreshed;
 
     if (payload.domains) {
       await provisionDns(payload.domains);
