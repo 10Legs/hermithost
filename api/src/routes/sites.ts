@@ -1043,8 +1043,10 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     // - For PAT sites, writes PAT-embedded URL directly to Postgres after the PATCH
     //   (Coolify PATCH normalizes git_repository and strips PAT credentials)
     const incomingRepo = (body as any).repository ?? body.git_repository;
-    const needCurrentApp = switchingAuth || incomingRepo !== undefined;
+    const needCurrentApp = switchingAuth || incomingRepo !== undefined || payload.domains !== undefined;
     const currentApp = needCurrentApp ? await client.getApplication(req.params.slug) : null;
+    // dockercompose apps reject the domains field — Coolify uses docker_compose_domains instead
+    if (currentApp?.build_pack === 'dockercompose') delete payload.domains;
 
     // Extract current PAT from Coolify git_repository URL.
     // Since we now write the PAT-embedded URL directly to Postgres (bypassing Coolify's PATCH
