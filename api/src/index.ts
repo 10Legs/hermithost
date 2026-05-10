@@ -153,6 +153,10 @@ app.listen(PORT, () => {
         try {
           let result: { ok: boolean; reason?: string };
           if (app.build_pack === 'dockercompose') {
+            if (!app.docker_compose_raw) {
+              console.log(`[startup-sync] skipping ${slug}: docker_compose_raw not yet populated`);
+              continue;
+            }
             result = await provisionTraefikRouteForCompose(createCoolifyClient()!, app, domain, resolver);
           } else {
             const port = (app as any).ports_exposes ?? 3000;
