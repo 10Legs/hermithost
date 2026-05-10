@@ -663,14 +663,12 @@ router.get('/', async (_req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
     const applications = await client.listApplications();
+    // Deployments not fetched in list view — avoids N×Coolify calls; use GET /:slug for full deployment history
     const sites = await Promise.all(
       applications.map(async (app) => {
         const domain = resolveRouteDomain(app) ?? '';
-        const [deployments, probe] = await Promise.all([
-          client.listDeployments(app.uuid).catch(() => []),
-          domain ? probeSite(domain).catch(() => null) : Promise.resolve(null),
-        ]);
-        return mapSiteWithStoredAuth(app, deployments, probe);
+        const probe = domain ? await probeSite(domain).catch(() => null) : null;
+        return mapSiteWithStoredAuth(app, [], probe);
       })
     );
     res.status(200).json(sites);
