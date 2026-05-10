@@ -132,12 +132,20 @@ export async function dockerNetworkConnect(network: string, containerId: string)
     { Container: containerId },
   );
   if (result.statusCode >= 200 && result.statusCode < 300) return;
-  // Docker returns 409 when the container is already connected to the network.
+  // Docker returns 409 (or 403 on some versions) when the container is already connected.
   if (result.statusCode === 409) {
     console.log(`[docker] dockerNetworkConnect: container ${containerId} already on ${network} network — OK`);
     return;
   }
-  // Any other non-2xx (including 403 = proxy denied) must propagate.
+  if (result.statusCode === 403) {
+    let msg = '';
+    try { msg = (JSON.parse(result.body) as { message?: string }).message ?? ''; } catch {}
+    if (msg.includes('already exists in network')) {
+      console.log(`[docker] dockerNetworkConnect: container ${containerId} already on ${network} network — OK`);
+      return;
+    }
+  }
+  // Any other non-2xx (403 proxy-denied, 404, 500, …) must propagate.
   let message = `Docker proxy error ${result.statusCode}`;
   try { message = (JSON.parse(result.body) as { error?: string; message?: string }).error ?? message; } catch {}
   throw Object.assign(new Error(message), { statusCode: result.statusCode });
