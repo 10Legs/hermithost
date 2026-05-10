@@ -153,8 +153,7 @@ app.listen(PORT, () => {
         try {
           let result: { ok: boolean; reason?: string };
           if (app.build_pack === 'dockercompose') {
-            const freshApp = await coolifyClient.getApplication(slug).catch(() => app);
-            result = await provisionTraefikRouteForCompose(createCoolifyClient()!, freshApp, domain, resolver);
+            result = await provisionTraefikRouteForCompose(createCoolifyClient()!, app, domain, resolver);
           } else {
             const port = (app as any).ports_exposes ?? 3000;
             result = await provisionTraefikRoute(slug, domain, port, resolver);
