@@ -744,11 +744,11 @@ export function embedPatInRepoUrl(repoUrl: string, token: string): string {
   }
   try {
     const url = new URL(httpsUrl);
-    url.username = token;
-    url.password = '';
+    url.username = 'x-access-token';
+    url.password = token;
     return url.toString();
   } catch {
-    return httpsUrl.replace(/^https?:\/\//, `https://${token}@`);
+    return httpsUrl.replace(/^https?:\/\//, `https://x-access-token:${token}@`);
   }
 }
 
