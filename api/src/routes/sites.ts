@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { readFileSync, writeFileSync, unlinkSync } from 'fs';
 import * as path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import * as yaml from 'js-yaml';
 import { dockerGet, dockerPost, dockerNetworkConnect } from '../services/docker';
 import { DnsRecord } from '../types';
@@ -24,6 +26,34 @@ import { createTechnitiumClient, TechnitiumClient } from '../services/technitium
 import { readNsHostname, readNsServerIp, readNetworkMode } from './config';
 
 const router = Router();
+
+const execFileAsync = promisify(execFile);
+
+// ── Coolify compose loader ────────────────────────────────────────────────────
+// Triggers Coolify's LoadComposeFile action immediately via artisan tinker so
+// docker_compose_raw is populated before the polling loop runs.  Non-fatal —
+// if the exec fails we log a warning and fall back to the existing poll loop.
+
+async function triggerCoolifyComposeLoad(appUuid: string): Promise<void> {
+  const containerName = process.env.COOLIFY_CONTAINER_NAME ?? 'hermithost-coolify-1';
+  const phpScript = [
+    `$app = App\\Models\\Application::where('uuid', '${appUuid}')->first();`,
+    `App\\Actions\\Application\\LoadComposeFile::dispatchSync($app);`,
+    `echo 'ok';`,
+  ].join(' ');
+
+  try {
+    const { stdout } = await execFileAsync(
+      'docker',
+      ['exec', containerName, 'sh', '-c', `php /var/www/html/artisan tinker --execute="${phpScript}"`],
+      { timeout: 30_000 },
+    );
+    console.log(`[coolify] LoadComposeFile triggered for ${appUuid}: ${stdout.trim()}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[coolify] LoadComposeFile trigger failed for ${appUuid} (non-fatal): ${msg}`);
+  }
+}
 
 // ── Docker Compose domain helper ──────────────────────────────────────────────
 // After creating a dockercompose app, Coolify parses the compose file async.
@@ -894,6 +924,9 @@ router.post('/', async (req: Request, res: Response) => {
 
     if (resolvedFqdn) {
       if (body.build_pack === 'dockercompose') {
+        // Trigger LoadComposeFile immediately so docker_compose_raw is populated
+        // before the poll loop starts, avoiding the ~5-minute scheduler delay.
+        await triggerCoolifyComposeLoad(app.uuid);
         // Async-poll for docker_compose_raw then PATCH docker_compose_domains
         app = await setDockerComposeDomain(client, app, coolifyFqdn!);
         // Prefill env vars extracted from compose YAML — non-fatal.
