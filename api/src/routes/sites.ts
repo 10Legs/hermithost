@@ -892,6 +892,7 @@ router.post('/', async (req: Request, res: Response) => {
       git_branch: body.git_branch,
       build_pack: body.build_pack ?? 'nixpacks',
       ports_exposes: String(body.port ?? 3000),
+      ports_mappings: '',
       server_uuid,
       destination_uuid,
       project_uuid,
