@@ -90,6 +90,34 @@ if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
   # partial state, or a normal start with an existing TSIG secret.
   # Flags --bootstrap / --force / --no-bootstrap allow operator override.
   TSIG_VOLUME_NAME="${COMPOSE_PROJECT_NAME:-hermithost}_coolify-api-token"
+
+  # ── Volume migration guard ──────────────────────────────────────────────────
+  # Detects the pre-namespacing bare 'coolify-api-token' volume from older installs.
+  # If the new namespaced volume is missing but the bare one exists, the TSIG secret
+  # would otherwise be silently lost.
+  if ! docker volume inspect "$TSIG_VOLUME_NAME" >/dev/null 2>&1 \
+     && docker volume inspect "coolify-api-token" >/dev/null 2>&1; then
+    echo ""
+    echo "[start] ──────────────────────────────────────────────────────────────────"
+    echo "[start] MIGRATION REQUIRED: Legacy volume detected"
+    echo "[start]"
+    echo "[start] Found bare volume 'coolify-api-token' but expected '${TSIG_VOLUME_NAME}'."
+    echo "[start] This is a one-time migration from pre-namespacing HermitHost."
+    echo "[start]"
+    echo "[start] Run these commands to migrate, then re-run start.sh:"
+    echo "[start]"
+    echo "[start]   docker volume create ${TSIG_VOLUME_NAME}"
+    echo "[start]   docker run --rm \\"
+    echo "[start]     -v coolify-api-token:/src:ro \\"
+    echo "[start]     -v ${TSIG_VOLUME_NAME}:/dst \\"
+    echo "[start]     alpine sh -c 'cp -a /src/. /dst/'"
+    echo "[start]   docker volume rm coolify-api-token"
+    echo "[start]"
+    echo "[start] ──────────────────────────────────────────────────────────────────"
+    echo ""
+    exit 1
+  fi
+
   TSIG_VOLUME_PATH="${RFC2136_TSIG_SECRET_FILE:-/coolify-api-token/rfc2136_tsig.secret}"
 
   CONTAINER_COUNT=$(docker ps -a \
