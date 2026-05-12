@@ -167,6 +167,87 @@ prompt_port_mode() {
   done
 }
 
+# ── Instance naming ──────────────────────────────────────────────────────────
+# Sets COMPOSE_PROJECT_NAME in .env. Stable per host via hostname-hash seed.
+# Idempotent: re-runs detect and re-offer the existing name.
+ADJECTIVES=(cozy mossy sleepy foggy amber twilight hidden wandering bramble velvet copper drowsy woolen lantern ancient quiet crimson misty dusky hollow)
+NOUNS=(otter badger hedgehog owl fox mushroom kettle burrow thicket ember acorn brook cottage satchel rabbit fern candle feather stone willow)
+
+_generate_name() {
+  local hash
+  hash=$(printf '%s' "$(hostname)-hermithost" | sha256sum 2>/dev/null || printf '%s' "$(hostname)-hermithost" | shasum)
+  hash=$(echo "$hash" | cut -c1-8)
+  local adj_idx=$(( 0x${hash:0:4} % ${#ADJECTIVES[@]} ))
+  local noun_idx=$(( 0x${hash:4:4} % ${#NOUNS[@]} ))
+  echo "${ADJECTIVES[$adj_idx]}-${NOUNS[$noun_idx]}"
+}
+
+_reroll_name() {
+  local hash
+  hash=$(date +%s%N 2>/dev/null || date +%s)
+  hash=$(printf '%s' "$hash" | sha256sum 2>/dev/null || printf '%s' "$hash" | shasum)
+  hash=$(echo "$hash" | cut -c1-8)
+  local adj_idx=$(( 0x${hash:0:4} % ${#ADJECTIVES[@]} ))
+  local noun_idx=$(( 0x${hash:4:4} % ${#NOUNS[@]} ))
+  echo "${ADJECTIVES[$adj_idx]}-${NOUNS[$noun_idx]}"
+}
+
+# Detect existing name: container label first, .env fallback
+_EXISTING_NAME=""
+if command -v docker >/dev/null 2>&1; then
+  _EXISTING_NAME=$(docker ps -a \
+    --filter "label=com.docker.compose.project.working_dir=$(pwd)" \
+    --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | head -1 | tr -d '[:space:]')
+fi
+if [ -z "$_EXISTING_NAME" ] && [ -f "$ENV_FILE" ]; then
+  _EXISTING_NAME=$(grep -E '^COMPOSE_PROJECT_NAME=' "$ENV_FILE" | cut -d'=' -f2- | tr -d '[:space:]' || true)
+fi
+
+_SUGGESTED_NAME=""
+if [ -n "$_EXISTING_NAME" ]; then
+  _SUGGESTED_NAME="$_EXISTING_NAME"
+  _EXISTING_HINT="  ← current name (re-run is idempotent)"
+else
+  _SUGGESTED_NAME="$(_generate_name)"
+  _EXISTING_HINT=""
+fi
+
+while true; do
+  echo ""
+  echo "──────────────────────────────────────────"
+  echo "  Name this HermitHost instance"
+  echo ""
+  echo "  This name appears in docker ps output and CLI messages."
+  echo "  Use lowercase letters, numbers, and hyphens only."
+  echo ""
+  echo "  Suggested: ${_SUGGESTED_NAME}${_EXISTING_HINT}"
+  echo "  (Enter to accept, type a name, or 'r' to reroll)"
+  echo "──────────────────────────────────────────"
+  read -rp "> " _NAME_INPUT
+  _NAME_INPUT="${_NAME_INPUT:-${_SUGGESTED_NAME}}"
+  if [ "$_NAME_INPUT" = "r" ]; then
+    _SUGGESTED_NAME="$(_reroll_name)"
+    _EXISTING_HINT=""
+    continue
+  fi
+  # Auto-lowercase
+  _NAME_INPUT="$(echo "$_NAME_INPUT" | tr '[:upper:]' '[:lower:]')"
+  # Validate: ^[a-z][a-z0-9-]*$, max 63 chars
+  if [[ ! "$_NAME_INPUT" =~ ^[a-z][a-z0-9-]*$ ]] || [ "${#_NAME_INPUT}" -gt 63 ]; then
+    echo "[setup] Invalid name '${_NAME_INPUT}'. Use lowercase letters, numbers, hyphens; must start with a letter; max 63 chars."
+    continue
+  fi
+  break
+done
+
+# Upsert COMPOSE_PROJECT_NAME in .env
+if grep -qE '^COMPOSE_PROJECT_NAME=' "$ENV_FILE" 2>/dev/null; then
+  sed_i "s|^COMPOSE_PROJECT_NAME=.*|COMPOSE_PROJECT_NAME=${_NAME_INPUT}|" "$ENV_FILE"
+else
+  echo "COMPOSE_PROJECT_NAME=${_NAME_INPUT}" >> "$ENV_FILE"
+fi
+echo "[setup] Instance name set to '${_NAME_INPUT}'."
+
 # ── Generate Coolify internal secrets ────────────────────────────────────────
 echo "[setup] Checking Coolify secrets..."
 set_if_empty "COOLIFY_APP_ID"            "$(openssl rand -hex 16)"
@@ -295,8 +376,10 @@ if [ "$PORT_MODE_CURRENT" = "lan" ]; then
   # TECHNITIUM_TOKEN is NOT read from .env — the init script reads it directly
   # from the coolify-api-token volume (/coolify-api-token/technitium_token),
   # which coolify-setup.sh writes at startup. Operators never supply this token.
+  _PROJECT_NAME="$(grep -E '^COMPOSE_PROJECT_NAME=' "$ENV_FILE" | cut -d'=' -f2- | tr -d '[:space:]')"
+  _PROJECT_NAME="${_PROJECT_NAME:-hermithost}"
   docker run --rm \
-    --network hermithost_hermithost-net \
+    --network "${_PROJECT_NAME}_hermithost-net" \
     -v coolify-api-token:/coolify-api-token \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v "${SCRIPT_DIR}/conf.d:/scripts/conf.d:ro" \
