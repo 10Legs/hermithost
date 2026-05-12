@@ -27,8 +27,6 @@ services:
       ROOT_USER_EMAIL: "${COOLIFY_ADMIN_EMAIL}"
       ROOT_USER_PASSWORD: "${COOLIFY_ADMIN_PASSWORD}"
       PHP_MEMORY_LIMIT: "256M"
-    ports:
-      - "${COOLIFY_PORT:-8000}:8080"
     depends_on:
       coolify-db:
         condition: service_healthy

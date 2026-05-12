@@ -1,0 +1,24 @@
+# Coolify UI — routed via Traefik at coolify.hh (LAN mode only)
+#
+# Removes the need for a host port binding on the coolify service.
+# The wildcard *.hh cert is pre-fetched by wildcard-internal.yml using the
+# internal-ca resolver (step-ca DNS-01). This router reuses that cert.
+#
+# Coolify is reachable within the Docker network at coolify:8080.
+# Operators access the UI at https://coolify.hh — no host port required.
+
+http:
+  routers:
+    coolify-ui:
+      rule: "Host(`coolify.hh`)"
+      entryPoints:
+        - https
+      tls:
+        certResolver: internal-ca
+      service: coolify-ui
+
+  services:
+    coolify-ui:
+      loadBalancer:
+        servers:
+          - url: "http://coolify:8080"
