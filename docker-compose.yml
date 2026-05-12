@@ -306,6 +306,9 @@ services:
       context: ./sidecar/docker-proxy
       dockerfile: Dockerfile
     restart: unless-stopped
+    environment:
+      COOLIFY_NETWORK_NAME: "${COMPOSE_PROJECT_NAME:-hermithost}-coolify"
+      COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-hermithost}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
