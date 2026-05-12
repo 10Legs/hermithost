@@ -469,12 +469,14 @@ export async function provisionTraefikRoute(
   const confDir = TRAEFIK_CONF_DIR;
   const filePath = path.join(confDir, `site-${slug}.yml`);
   try {
-    // Find container with coolify.name=slug label (any state — stopped containers still have valid names)
-    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
-    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<{ Names: string[] }>;
+    // Find RUNNING container with coolify.name=slug label.
+    // Do NOT use all=true — after a Coolify redeploy the old stopped container still carries
+    // the same label and would be returned first, pointing the route at a dead container (502).
+    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`], status: ['running'] }));
+    const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[] }>;
     if (!containers.length) {
-      console.warn(`[traefik-route] No container found for slug ${slug} — route not written`);
-      return { ok: false, reason: `no container for slug ${slug}` };
+      console.warn(`[traefik-route] No running container found for slug ${slug} — route not written`);
+      return { ok: false, reason: `no running container for slug ${slug}` };
     }
     const containerName = containers[0].Names[0].replace(/^\//, '');
     // Phase 4 wildcard routing: internal-ca routes must NOT declare certResolver or
@@ -612,21 +614,24 @@ export async function provisionTraefikRouteForCompose(
 
     // ── Step 3: Discover container ──────────────────────────────────────────────
     console.log(`[traefik-route-compose] Discovering container for project=${slug} service=${primaryService}...`);
-    const filter = encodeURIComponent(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Docker inspect shape varies; use any for raw response
+    // Use status:running filter — do NOT use all=true. After a Coolify redeploy the old stopped
+    // container still has the same labels and would be matched first, yielding a stale route (502).
+    const runningFilter = encodeURIComponent(
       JSON.stringify({
         label: [
           `com.docker.compose.project=${slug}`,
           `com.docker.compose.service=${primaryService}`,
         ],
+        status: ['running'],
       }),
     );
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Docker inspect shape varies; use any for raw response
-    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<any>;
+    const containers = await dockerGet(`/containers/json?filters=${runningFilter}`) as Array<any>;
     if (!containers.length) {
       console.warn(
-        `[traefik-route-compose] No container found for project=${slug} service=${primaryService} — route not written`,
+        `[traefik-route-compose] No running container found for project=${slug} service=${primaryService} — route not written`,
       );
-      return { ok: false, reason: `no container for project=${slug} service=${primaryService}` };
+      return { ok: false, reason: `no running container for project=${slug} service=${primaryService}` };
     }
     const container = containers[0];
     const containerId: string = container.Id as string;
