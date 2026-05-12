@@ -119,8 +119,65 @@ if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
     echo "[start] Bootstrap mode forced by --bootstrap flag. TSIG will be provisioned by setup.sh after stack starts."
     BOOTSTRAP_MODE=1
   elif [ "$CONTAINER_COUNT" -eq 0 ] && [ -z "$TSIG_SECRET" ]; then
-    # Case A: no containers AND no secret — first-time setup, auto-bootstrap
-    echo "[start] New project detected — entering bootstrap mode. TSIG will be provisioned by setup.sh after stack starts."
+    # Case A: no containers AND no TSIG secret — first-time bootstrap
+    echo "[start] First-time bootstrap detected for project '${COMPOSE_PROJECT_NAME}'."
+    echo "[start] Starting stack to provision TSIG key..."
+
+    # Start stack without TSIG gate
+    docker compose ${PROFILE_ARG} up -d
+
+    # Wait for Technitium healthy (up to 120s)
+    echo "[start] Waiting for Technitium to become healthy..."
+    _TECH_CONTAINER="${COMPOSE_PROJECT_NAME}-technitium-1"
+    _WAIT=0
+    _TIMEOUT=120
+    until [ "$(docker inspect --format='{{.State.Health.Status}}' "$_TECH_CONTAINER" 2>/dev/null)" = "healthy" ]; do
+      if [ "$_WAIT" -ge "$_TIMEOUT" ]; then
+        echo "[start] ERROR: Technitium did not become healthy within ${_TIMEOUT}s. Bootstrap failed."
+        docker compose down
+        exit 1
+      fi
+      sleep 3
+      _WAIT=$(( _WAIT + 3 ))
+    done
+    echo "[start] Technitium healthy. Provisioning TSIG key..."
+
+    # Read values needed for TSIG init
+    _TECH_URL="$(grep -E '^TECHNITIUM_URL=' "$ROOT/.env" | cut -d'=' -f2- || true)"
+    _RFC2136_ZONE="$(grep -E '^RFC2136_ZONE=' "$ROOT/.env" | cut -d'=' -f2- || true)"
+    _PORT_MODE="$HERMITHOST_PORT_MODE"
+    _PROJECT_NAME="$(grep -E '^COMPOSE_PROJECT_NAME=' "$ROOT/.env" | cut -d'=' -f2- | tr -d '[:space:]')"
+    _PROJECT_NAME="${_PROJECT_NAME:-hermithost}"
+
+    # Derive volume dir from the volume path (directory component)
+    TSIG_VOLUME_DIR="$(dirname "$TSIG_VOLUME_PATH")"
+
+    docker run --rm \
+      --network "${_PROJECT_NAME}_hermithost-net" \
+      -v coolify-api-token:/coolify-api-token \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v "${ROOT}/scripts/conf.d:/scripts/conf.d:ro" \
+      -e TECHNITIUM_URL="${_TECH_URL}" \
+      -e HERMITHOST_PORT_MODE="${_PORT_MODE}" \
+      -e RFC2136_ZONE="${_RFC2136_ZONE}" \
+      docker:cli sh -c "apk add --no-cache bash openssl curl >/dev/null 2>&1 && bash /scripts/conf.d/technitium-tsig-init.sh"
+
+    # Verify secret was written
+    RFC2136_TSIG_SECRET="$(docker run --rm \
+      -v "coolify-api-token:${TSIG_VOLUME_DIR}:ro" \
+      alpine sh -c "cat '${TSIG_VOLUME_PATH}' 2>/dev/null | tr -d '\n\r '" 2>/dev/null || true)"
+
+    if [ -z "$RFC2136_TSIG_SECRET" ]; then
+      echo "[start] ERROR: TSIG provisioning completed but secret was not written. Check TSIG init logs."
+      docker compose down
+      exit 1
+    fi
+
+    echo "[start] TSIG key provisioned. Restarting stack with full configuration..."
+    docker compose down
+
+    # Fall through to normal docker compose up below (TSIG_SECRET now set, BOOTSTRAP_MODE=1 skips re-check)
+    export RFC2136_TSIG_SECRET
     BOOTSTRAP_MODE=1
   elif [ "$CONTAINER_COUNT" -gt 0 ] && [ -z "$TSIG_SECRET" ]; then
     # Case B: containers exist but secret missing — broken partial state

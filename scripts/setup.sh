@@ -360,36 +360,8 @@ echo ""
 echo "[setup] Checking RFC2136 TSIG bootstrap (LAN mode only)..."
 PORT_MODE_CURRENT="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
 if [ "$PORT_MODE_CURRENT" = "lan" ]; then
-  # Extract only the two variables the TSIG init script needs from .env.
-  # Using explicit variable assignment avoids exporting the entire .env
-  # (COOKIE_SECRET, passwords, etc.) into the child environment. SEC-S4.
-  #
-  # The init script writes the TSIG secret to /coolify-api-token/ which is a
-  # Docker named volume (coolify-api-token). To ensure the secret is NEVER
-  # written to the host filesystem, invoke the script inside a container with
-  # that volume mounted (SEC-S1). The host Docker socket is bind-mounted so the
-  # container can run `docker network inspect` for subnet detection.
-  _TECH_URL="$(grep -E '^TECHNITIUM_URL=' "$ENV_FILE" | cut -d'=' -f2- || true)"
-  # Resolve env vars that the init script consumes
-  _RFC2136_ZONE="$(grep -E '^RFC2136_ZONE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
-  _PORT_MODE="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
-  # TECHNITIUM_TOKEN is NOT read from .env — the init script reads it directly
-  # from the coolify-api-token volume (/coolify-api-token/technitium_token),
-  # which coolify-setup.sh writes at startup. Operators never supply this token.
-  _PROJECT_NAME="$(grep -E '^COMPOSE_PROJECT_NAME=' "$ENV_FILE" | cut -d'=' -f2- | tr -d '[:space:]')"
-  _PROJECT_NAME="${_PROJECT_NAME:-hermithost}"
-  docker run --rm \
-    --network "${_PROJECT_NAME}_hermithost-net" \
-    -v coolify-api-token:/coolify-api-token \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v "${SCRIPT_DIR}/conf.d:/scripts/conf.d:ro" \
-    -e TECHNITIUM_URL="${_TECH_URL}" \
-    -e HERMITHOST_PORT_MODE="${_PORT_MODE}" \
-    -e RFC2136_ZONE="${_RFC2136_ZONE}" \
-    docker:cli sh -c "apk add --no-cache bash openssl curl >/dev/null 2>&1 && bash /scripts/conf.d/technitium-tsig-init.sh" || {
-    echo "[setup] WARNING: TSIG bootstrap failed or was skipped."
-    echo "[setup] Re-run 'bash scripts/setup.sh' after starting the stack to complete TSIG setup."
-  }
+  echo "[setup] TSIG provisioning is handled automatically by start.sh on first boot."
+  echo "[setup] Run './scripts/start.sh -d' to start the stack — TSIG will be provisioned inline."
 else
   echo "[setup] Not in LAN mode — skipping TSIG bootstrap."
 fi
@@ -397,3 +369,9 @@ fi
 echo ""
 echo "[setup] Configuration complete. Ready to start:"
 echo "        bash scripts/start.sh -d"
+echo ""
+echo "        On first run in LAN mode, start.sh will automatically:"
+echo "          1. Start the stack"
+echo "          2. Wait for Technitium to be healthy"
+echo "          3. Provision the TSIG key"
+echo "          4. Restart with full configuration"
