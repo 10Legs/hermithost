@@ -343,6 +343,7 @@ services:
       PGUSER: "coolify"
       PGPASSWORD: "${COOLIFY_DB_PASSWORD}"
       DOCKER_PROXY_URL: "http://docker-proxy:2375"
+      COOLIFY_NETWORK_NAME: "${COMPOSE_PROJECT_NAME:-hermithost}-coolify"
     volumes:
       - hermithost-sites:/app/sites
       - coolify-api-token:/coolify-api-token
@@ -451,7 +452,7 @@ networks:
         - subnet: 172.28.0.0/24
   coolify:
     external: true
-    name: coolify
+    name: ${COMPOSE_PROJECT_NAME:-hermithost}-coolify
 
 volumes:
   hermithost-sites:
@@ -462,7 +463,6 @@ volumes:
   coolify-redis:
   coolify-keys:
   coolify-api-token:
-    name: coolify-api-token
   ssh-bridge-host-keys:
   step-ca-data:
   traefik-logs:

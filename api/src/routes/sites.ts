@@ -539,7 +539,7 @@ function removeTraefikRoute(slug: string): void {
 //   2. Pick the primary service using COMPOSE_PRIMARY_SERVICE_NAMES preference list.
 //   3. Discover the running container via com.docker.compose.project/service labels.
 //   4. Detect the exposed port (Traefik label → ExposedPorts → 80 fallback).
-//   5. Attach the primary container to the "coolify" network (idempotent).
+//   5. Attach the primary container to the COOLIFY_NETWORK_NAME network (idempotent).
 //   6. Write site-${slug}.yml — same filename convention so removeTraefikRoute() works.
 export async function provisionTraefikRouteForCompose(
   client: CoolifyClient,
@@ -669,9 +669,10 @@ export async function provisionTraefikRouteForCompose(
     }
 
     // ── Step 5: Attach container to coolify network (idempotent) ───────────────
-    console.log(`[traefik-route-compose] Attaching ${containerName} to coolify network...`);
-    await dockerNetworkConnect('coolify', containerId);
-    console.log(`[traefik-route-compose] ${containerName} is on coolify network`);
+    const _coolifyNet = process.env.COOLIFY_NETWORK_NAME || 'coolify';
+    console.log(`[traefik-route-compose] Attaching ${containerName} to ${_coolifyNet} network...`);
+    await dockerNetworkConnect(_coolifyNet, containerId);
+    console.log(`[traefik-route-compose] ${containerName} is on ${_coolifyNet} network`);
 
     // ── Step 6: Write Traefik yml (same structure as provisionTraefikRoute) ─────
     // Phase 4 wildcard routing: see provisionTraefikRoute() comment above.

@@ -25,8 +25,6 @@ for arg in "$@"; do
 done
 set -- "${_PASSTHROUGH_ARGS[@]}"
 
-docker network inspect coolify >/dev/null 2>&1 || docker network create coolify
-
 # Load only the specific vars needed from .env — do NOT export the entire file.
 # Broad export (set -a / source) would leak COOKIE_SECRET, HERMITHOST_PASSWORD,
 # COOLIFY_DB_PASSWORD, etc. into docker compose up env. SEC-S4.
@@ -38,6 +36,9 @@ if [ -f "$ROOT/.env" ]; then
   COMPOSE_PROJECT_NAME="$(grep -E '^COMPOSE_PROJECT_NAME=' "$ROOT/.env" | cut -d'=' -f2- | tr -d '[:space:]' || true)"
 fi
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-hermithost}"
+
+_COOLIFY_NET="${COMPOSE_PROJECT_NAME:-hermithost}-coolify"
+docker network inspect "$_COOLIFY_NET" >/dev/null 2>&1 || docker network create "$_COOLIFY_NET"
 
 # ── Race condition guard (Linux only; gracefully skipped on macOS) ────────────
 if command -v flock >/dev/null 2>&1; then
@@ -88,7 +89,7 @@ if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
   # Four-state detection determines whether this is a first-time setup, a broken
   # partial state, or a normal start with an existing TSIG secret.
   # Flags --bootstrap / --force / --no-bootstrap allow operator override.
-  TSIG_VOLUME_NAME="coolify-api-token"
+  TSIG_VOLUME_NAME="${COMPOSE_PROJECT_NAME:-hermithost}_coolify-api-token"
   TSIG_VOLUME_PATH="${RFC2136_TSIG_SECRET_FILE:-/coolify-api-token/rfc2136_tsig.secret}"
 
   CONTAINER_COUNT=$(docker ps -a \
@@ -154,7 +155,7 @@ if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
 
     docker run --rm \
       --network "${_PROJECT_NAME}_hermithost-net" \
-      -v coolify-api-token:/coolify-api-token \
+      -v "${COMPOSE_PROJECT_NAME:-hermithost}_coolify-api-token:/coolify-api-token" \
       -v /var/run/docker.sock:/var/run/docker.sock \
       -v "${ROOT}/scripts/conf.d:/scripts/conf.d:ro" \
       -e TECHNITIUM_URL="${_TECH_URL}" \
@@ -164,7 +165,7 @@ if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
 
     # Verify secret was written
     RFC2136_TSIG_SECRET="$(docker run --rm \
-      -v "coolify-api-token:${TSIG_VOLUME_DIR}:ro" \
+      -v "${COMPOSE_PROJECT_NAME:-hermithost}_coolify-api-token:${TSIG_VOLUME_DIR}:ro" \
       alpine sh -c "cat '${TSIG_VOLUME_PATH}' 2>/dev/null | tr -d '\n\r '" 2>/dev/null || true)"
 
     if [ -z "$RFC2136_TSIG_SECRET" ]; then
