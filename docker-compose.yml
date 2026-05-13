@@ -27,8 +27,6 @@ services:
       ROOT_USER_EMAIL: "${COOLIFY_ADMIN_EMAIL}"
       ROOT_USER_PASSWORD: "${COOLIFY_ADMIN_PASSWORD}"
       PHP_MEMORY_LIMIT: "256M"
-    ports:
-      - "${COOLIFY_PORT:-8000}:8080"
     depends_on:
       coolify-db:
         condition: service_healthy
@@ -281,7 +279,7 @@ services:
     ports:
       - "${TRAEFIK_HTTP_PORT:-8080}:80"
       - "${TRAEFIK_HTTPS_PORT:-8443}:443"
-      - "127.0.0.1:9080:9080"
+      - "${TRAEFIK_ADMIN_PORT:-9080}:9080"
     volumes:
       - ./traefik/conf.d:/etc/traefik/conf.d
       - traefik-acme:/acme
@@ -308,6 +306,9 @@ services:
       context: ./sidecar/docker-proxy
       dockerfile: Dockerfile
     restart: unless-stopped
+    environment:
+      COOLIFY_NETWORK_NAME: "${COMPOSE_PROJECT_NAME:-hermithost}-coolify"
+      COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:-hermithost}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
@@ -345,6 +346,7 @@ services:
       PGUSER: "coolify"
       PGPASSWORD: "${COOLIFY_DB_PASSWORD}"
       DOCKER_PROXY_URL: "http://docker-proxy:2375"
+      COOLIFY_NETWORK_NAME: "${COMPOSE_PROJECT_NAME:-hermithost}-coolify"
     volumes:
       - hermithost-sites:/app/sites
       - coolify-api-token:/coolify-api-token
@@ -453,7 +455,7 @@ networks:
         - subnet: 172.28.0.0/24
   coolify:
     external: true
-    name: coolify
+    name: ${COMPOSE_PROJECT_NAME:-hermithost}-coolify
 
 volumes:
   hermithost-sites:
@@ -464,7 +466,6 @@ volumes:
   coolify-redis:
   coolify-keys:
   coolify-api-token:
-    name: coolify-api-token
   ssh-bridge-host-keys:
   step-ca-data:
   traefik-logs:

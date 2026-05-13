@@ -144,17 +144,19 @@ prompt_port_mode() {
       sed_i "s|^HERMITHOST_PORT_MODE=.*|HERMITHOST_PORT_MODE=lan|"         "$ENV_FILE"
       sed_i "s|^TRAEFIK_HTTP_PORT=.*|TRAEFIK_HTTP_PORT=80|"                "$ENV_FILE"
       sed_i "s|^TRAEFIK_HTTPS_PORT=.*|TRAEFIK_HTTPS_PORT=443|"             "$ENV_FILE"
+      sed_i "s|^TRAEFIK_ADMIN_PORT=.*|TRAEFIK_ADMIN_PORT=9081|"            "$ENV_FILE"
       sed_i "s|^PUBLIC_BASE_PORT_HTTP=.*|PUBLIC_BASE_PORT_HTTP=80|"        "$ENV_FILE"
       sed_i "s|^PUBLIC_BASE_PORT_HTTPS=.*|PUBLIC_BASE_PORT_HTTPS=443|"     "$ENV_FILE"
       sed_i "s|^DNS_PORT=.*|DNS_PORT=53|"                                  "$ENV_FILE"
       sed_i "s|^LEGO_CA_CERTIFICATES=.*|LEGO_CA_CERTIFICATES=/home/step/certs/root_ca.crt|" "$ENV_FILE"
-      echo "[setup] Port mode set to lan: HTTP=80 HTTPS=443 DNS=53 LEGO_CA=/home/step/certs/root_ca.crt"
+      echo "[setup] Port mode set to lan: HTTP=80 HTTPS=443 ADMIN=9081 DNS=53 LEGO_CA=/home/step/certs/root_ca.crt"
       break
     elif [ "$choice" = "2" ]; then
       # Apply internet
       sed_i "s|^HERMITHOST_PORT_MODE=.*|HERMITHOST_PORT_MODE=internet|"       "$ENV_FILE"
       sed_i "s|^TRAEFIK_HTTP_PORT=.*|TRAEFIK_HTTP_PORT=8080|"                 "$ENV_FILE"
       sed_i "s|^TRAEFIK_HTTPS_PORT=.*|TRAEFIK_HTTPS_PORT=8443|"               "$ENV_FILE"
+      sed_i "s|^TRAEFIK_ADMIN_PORT=.*|TRAEFIK_ADMIN_PORT=9080|"               "$ENV_FILE"
       sed_i "s|^PUBLIC_BASE_PORT_HTTP=.*|PUBLIC_BASE_PORT_HTTP=8080|"          "$ENV_FILE"
       sed_i "s|^PUBLIC_BASE_PORT_HTTPS=.*|PUBLIC_BASE_PORT_HTTPS=8443|"        "$ENV_FILE"
       sed_i "s|^DNS_PORT=.*|DNS_PORT=5353|"                                    "$ENV_FILE"
@@ -166,6 +168,87 @@ prompt_port_mode() {
     fi
   done
 }
+
+# ── Instance naming ──────────────────────────────────────────────────────────
+# Sets COMPOSE_PROJECT_NAME in .env. Stable per host via hostname-hash seed.
+# Idempotent: re-runs detect and re-offer the existing name.
+ADJECTIVES=(cozy mossy sleepy foggy amber twilight hidden wandering bramble velvet copper drowsy woolen lantern ancient quiet crimson misty dusky hollow)
+NOUNS=(otter badger hedgehog owl fox mushroom kettle burrow thicket ember acorn brook cottage satchel rabbit fern candle feather stone willow)
+
+_generate_name() {
+  local hash
+  hash=$(printf '%s' "$(hostname)-hermithost" | sha256sum 2>/dev/null || printf '%s' "$(hostname)-hermithost" | shasum)
+  hash=$(echo "$hash" | cut -c1-8)
+  local adj_idx=$(( 0x${hash:0:4} % ${#ADJECTIVES[@]} ))
+  local noun_idx=$(( 0x${hash:4:4} % ${#NOUNS[@]} ))
+  echo "${ADJECTIVES[$adj_idx]}-${NOUNS[$noun_idx]}"
+}
+
+_reroll_name() {
+  local hash
+  hash=$(date +%s%N 2>/dev/null || date +%s)
+  hash=$(printf '%s' "$hash" | sha256sum 2>/dev/null || printf '%s' "$hash" | shasum)
+  hash=$(echo "$hash" | cut -c1-8)
+  local adj_idx=$(( 0x${hash:0:4} % ${#ADJECTIVES[@]} ))
+  local noun_idx=$(( 0x${hash:4:4} % ${#NOUNS[@]} ))
+  echo "${ADJECTIVES[$adj_idx]}-${NOUNS[$noun_idx]}"
+}
+
+# Detect existing name: container label first, .env fallback
+_EXISTING_NAME=""
+if command -v docker >/dev/null 2>&1; then
+  _EXISTING_NAME=$(docker ps -a \
+    --filter "label=com.docker.compose.project.working_dir=$(pwd)" \
+    --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | head -1 | tr -d '[:space:]')
+fi
+if [ -z "$_EXISTING_NAME" ] && [ -f "$ENV_FILE" ]; then
+  _EXISTING_NAME=$(grep -E '^COMPOSE_PROJECT_NAME=' "$ENV_FILE" | cut -d'=' -f2- | tr -d '[:space:]' || true)
+fi
+
+_SUGGESTED_NAME=""
+if [ -n "$_EXISTING_NAME" ]; then
+  _SUGGESTED_NAME="$_EXISTING_NAME"
+  _EXISTING_HINT="  ← current name (re-run is idempotent)"
+else
+  _SUGGESTED_NAME="$(_generate_name)"
+  _EXISTING_HINT=""
+fi
+
+while true; do
+  echo ""
+  echo "──────────────────────────────────────────"
+  echo "  Name this HermitHost instance"
+  echo ""
+  echo "  This name appears in docker ps output and CLI messages."
+  echo "  Use lowercase letters, numbers, and hyphens only."
+  echo ""
+  echo "  Suggested: ${_SUGGESTED_NAME}${_EXISTING_HINT}"
+  echo "  (Enter to accept, type a name, or 'r' to reroll)"
+  echo "──────────────────────────────────────────"
+  read -rp "> " _NAME_INPUT
+  _NAME_INPUT="${_NAME_INPUT:-${_SUGGESTED_NAME}}"
+  if [ "$_NAME_INPUT" = "r" ]; then
+    _SUGGESTED_NAME="$(_reroll_name)"
+    _EXISTING_HINT=""
+    continue
+  fi
+  # Auto-lowercase
+  _NAME_INPUT="$(echo "$_NAME_INPUT" | tr '[:upper:]' '[:lower:]')"
+  # Validate: ^[a-z][a-z0-9-]*$, max 63 chars
+  if [[ ! "$_NAME_INPUT" =~ ^[a-z][a-z0-9-]*$ ]] || [ "${#_NAME_INPUT}" -gt 63 ]; then
+    echo "[setup] Invalid name '${_NAME_INPUT}'. Use lowercase letters, numbers, hyphens; must start with a letter; max 63 chars."
+    continue
+  fi
+  break
+done
+
+# Upsert COMPOSE_PROJECT_NAME in .env
+if grep -qE '^COMPOSE_PROJECT_NAME=' "$ENV_FILE" 2>/dev/null; then
+  sed_i "s|^COMPOSE_PROJECT_NAME=.*|COMPOSE_PROJECT_NAME=${_NAME_INPUT}|" "$ENV_FILE"
+else
+  echo "COMPOSE_PROJECT_NAME=${_NAME_INPUT}" >> "$ENV_FILE"
+fi
+echo "[setup] Instance name set to '${_NAME_INPUT}'."
 
 # ── Generate Coolify internal secrets ────────────────────────────────────────
 echo "[setup] Checking Coolify secrets..."
@@ -279,34 +362,8 @@ echo ""
 echo "[setup] Checking RFC2136 TSIG bootstrap (LAN mode only)..."
 PORT_MODE_CURRENT="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
 if [ "$PORT_MODE_CURRENT" = "lan" ]; then
-  # Extract only the two variables the TSIG init script needs from .env.
-  # Using explicit variable assignment avoids exporting the entire .env
-  # (COOKIE_SECRET, passwords, etc.) into the child environment. SEC-S4.
-  #
-  # The init script writes the TSIG secret to /coolify-api-token/ which is a
-  # Docker named volume (coolify-api-token). To ensure the secret is NEVER
-  # written to the host filesystem, invoke the script inside a container with
-  # that volume mounted (SEC-S1). The host Docker socket is bind-mounted so the
-  # container can run `docker network inspect` for subnet detection.
-  _TECH_URL="$(grep -E '^TECHNITIUM_URL=' "$ENV_FILE" | cut -d'=' -f2- || true)"
-  # Resolve env vars that the init script consumes
-  _RFC2136_ZONE="$(grep -E '^RFC2136_ZONE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
-  _PORT_MODE="$(grep -E '^HERMITHOST_PORT_MODE=' "$ENV_FILE" | cut -d'=' -f2- || true)"
-  # TECHNITIUM_TOKEN is NOT read from .env — the init script reads it directly
-  # from the coolify-api-token volume (/coolify-api-token/technitium_token),
-  # which coolify-setup.sh writes at startup. Operators never supply this token.
-  docker run --rm \
-    --network hermithost_hermithost-net \
-    -v coolify-api-token:/coolify-api-token \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v "${SCRIPT_DIR}/conf.d:/scripts/conf.d:ro" \
-    -e TECHNITIUM_URL="${_TECH_URL}" \
-    -e HERMITHOST_PORT_MODE="${_PORT_MODE}" \
-    -e RFC2136_ZONE="${_RFC2136_ZONE}" \
-    docker:cli sh -c "apk add --no-cache bash openssl curl >/dev/null 2>&1 && bash /scripts/conf.d/technitium-tsig-init.sh" || {
-    echo "[setup] WARNING: TSIG bootstrap failed or was skipped."
-    echo "[setup] Re-run 'bash scripts/setup.sh' after starting the stack to complete TSIG setup."
-  }
+  echo "[setup] TSIG provisioning is handled automatically by start.sh on first boot."
+  echo "[setup] Run './scripts/start.sh -d' to start the stack — TSIG will be provisioned inline."
 else
   echo "[setup] Not in LAN mode — skipping TSIG bootstrap."
 fi
@@ -314,3 +371,9 @@ fi
 echo ""
 echo "[setup] Configuration complete. Ready to start:"
 echo "        bash scripts/start.sh -d"
+echo ""
+echo "        On first run in LAN mode, start.sh will automatically:"
+echo "          1. Start the stack"
+echo "          2. Wait for Technitium to be healthy"
+echo "          3. Provision the TSIG key"
+echo "          4. Restart with full configuration"

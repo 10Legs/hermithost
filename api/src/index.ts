@@ -18,8 +18,9 @@ import { createTechnitiumClient } from './services/technitium';
 import { ensureNsGlueRecords, cleanBadNsRecords, provisionTraefikRoute, provisionTraefikRouteForCompose } from './routes/sites';
 import { createCoolifyClient } from './services/coolify';
 import { resolveRouteDomain } from './services/mapper';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync, unlinkSync } from 'fs';
 import * as path from 'path';
+import { dockerGet } from './services/docker';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -139,10 +140,58 @@ app.listen(PORT, () => {
         return;
       }
 
+      // Helper: parse the backend container hostname from an existing route file.
+      // Looks for a line matching `- url: "http://<hostname>:<port>"` and returns
+      // the hostname portion (e.g. `frontend-p6zgia4ehgg4ddtqn58oralo-202242845078`).
+      function parseContainerHostnameFromRouteFile(filePath: string): string | null {
+        try {
+          const content = readFileSync(filePath, 'utf8');
+          const match = content.match(/- url:\s*"http:\/\/([^:/"]+):/);
+          return match ? match[1] : null;
+        } catch {
+          return null;
+        }
+      }
+
+      // Helper: returns true if the named Docker container is in running state.
+      async function isContainerRunning(containerName: string): Promise<boolean> {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const info = await dockerGet(`/containers/${encodeURIComponent(containerName)}/json`) as any;
+          return info?.State?.Status === 'running';
+        } catch {
+          // 404 = container does not exist; any other error → treat as not running
+          return false;
+        }
+      }
+
       for (const app of applications) {
         const slug = app.uuid;
         const routeFile = path.join(confDir, `site-${slug}.yml`);
-        if (existsSync(routeFile)) continue;
+
+        // If the route file exists, verify the container it points at is still running.
+        // If the container is dead or missing, delete the stale file so the re-provision
+        // path below recreates it pointing at the current running container.
+        if (existsSync(routeFile)) {
+          const hostname = parseContainerHostnameFromRouteFile(routeFile);
+          if (hostname) {
+            const running = await isContainerRunning(hostname);
+            if (!running) {
+              const domain = resolveRouteDomain(app) ?? slug;
+              console.log(
+                `[startup-sync] stale route for ${domain} (container ${hostname} not running) — reprovisioning`,
+              );
+              try { unlinkSync(routeFile); } catch { /* already gone */ }
+              // Fall through to re-provision below
+            } else {
+              // Container is alive — route is valid, skip
+              continue;
+            }
+          } else {
+            // Could not parse a container name from the file — skip to be safe
+            continue;
+          }
+        }
 
         const domain = resolveRouteDomain(app);
         if (!domain) {
@@ -153,8 +202,11 @@ app.listen(PORT, () => {
         try {
           let result: { ok: boolean; reason?: string };
           if (app.build_pack === 'dockercompose') {
-            const freshApp = await coolifyClient.getApplication(slug).catch(() => app);
-            result = await provisionTraefikRouteForCompose(createCoolifyClient()!, freshApp, domain, resolver);
+            if (!app.docker_compose_raw) {
+              console.log(`[startup-sync] skipping ${slug}: docker_compose_raw not yet populated`);
+              continue;
+            }
+            result = await provisionTraefikRouteForCompose(createCoolifyClient()!, app, domain, resolver);
           } else {
             const port = (app as any).ports_exposes ?? 3000;
             result = await provisionTraefikRoute(slug, domain, port, resolver);

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Ensure the external coolify network exists, then start the stack.
 # The coolify network is external so docker compose down doesn't destroy it
 # and take deployed site containers offline.
@@ -10,7 +10,20 @@
 #
 # Idempotent: docker compose up is a no-op for already-running services.
 
-docker network inspect coolify >/dev/null 2>&1 || docker network create coolify
+# ── Flag matrix ──────────────────────────────────────────────────────────────
+BOOTSTRAP_FORCE=0
+BOOTSTRAP_MODE=0
+NO_BOOTSTRAP=0
+_PASSTHROUGH_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --bootstrap)      BOOTSTRAP_MODE=1 ;;
+    --force)          BOOTSTRAP_FORCE=1 ;;
+    --no-bootstrap)   NO_BOOTSTRAP=1 ;;
+    *)                _PASSTHROUGH_ARGS+=("$arg") ;;
+  esac
+done
+set -- "${_PASSTHROUGH_ARGS[@]}"
 
 # Load only the specific vars needed from .env — do NOT export the entire file.
 # Broad export (set -a / source) would leak COOKIE_SECRET, HERMITHOST_PASSWORD,
@@ -20,6 +33,21 @@ ROOT="$SCRIPT_DIR/.."
 if [ -f "$ROOT/.env" ]; then
   HERMITHOST_PORT_MODE="$(grep -E '^HERMITHOST_PORT_MODE=' "$ROOT/.env" | cut -d'=' -f2- | tr -d '[:space:]' || true)"
   RFC2136_TSIG_SECRET_FILE="$(grep -E '^RFC2136_TSIG_SECRET_FILE=' "$ROOT/.env" | cut -d'=' -f2- | tr -d '[:space:]' || true)"
+  COMPOSE_PROJECT_NAME="$(grep -E '^COMPOSE_PROJECT_NAME=' "$ROOT/.env" | cut -d'=' -f2- | tr -d '[:space:]' || true)"
+fi
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-hermithost}"
+
+_COOLIFY_NET="${COMPOSE_PROJECT_NAME:-hermithost}-coolify"
+docker network inspect "$_COOLIFY_NET" >/dev/null 2>&1 || docker network create "$_COOLIFY_NET"
+
+# ── Race condition guard (Linux only; gracefully skipped on macOS) ────────────
+if command -v flock >/dev/null 2>&1; then
+  LOCK_FILE="/var/lock/hermithost-${COMPOSE_PROJECT_NAME}.lock"
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    echo "[start] ERROR: Another start.sh is already running for project '${COMPOSE_PROJECT_NAME}'. Aborting."
+    exit 1
+  fi
 fi
 
 PROFILE_ARG=""
@@ -57,33 +85,143 @@ if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
   PROFILE_ARG="--profile internal"
   echo "[start] LAN mode detected — activating internal CA profile (step-ca)"
 
-  # ── RFC2136 TSIG secret (read from volume; Traefik consumes in DNS-01 flow) ──
-  # The secret lives exclusively inside the coolify-api-token Docker volume.
-  # It is never written to or read from the host filesystem (SEC-S1).
-  # We use `docker run --rm` with the volume mounted to read it at start time.
-  # Fail closed: missing or empty secret aborts startup — DNS-01 cannot work without it.
+  # ── RFC2136 TSIG bootstrap auto-detection ────────────────────────────────────
+  # Four-state detection determines whether this is a first-time setup, a broken
+  # partial state, or a normal start with an existing TSIG secret.
+  # Flags --bootstrap / --force / --no-bootstrap allow operator override.
+  TSIG_VOLUME_NAME="${COMPOSE_PROJECT_NAME:-hermithost}_coolify-api-token"
+
+  # ── Volume migration guard ──────────────────────────────────────────────────
+  # Detects the pre-namespacing bare 'coolify-api-token' volume from older installs.
+  # If the new namespaced volume is missing but the bare one exists, the TSIG secret
+  # would otherwise be silently lost.
+  if ! docker volume inspect "$TSIG_VOLUME_NAME" >/dev/null 2>&1 \
+     && docker volume inspect "coolify-api-token" >/dev/null 2>&1; then
+    echo ""
+    echo "[start] ──────────────────────────────────────────────────────────────────"
+    echo "[start] MIGRATION REQUIRED: Legacy volume detected"
+    echo "[start]"
+    echo "[start] Found bare volume 'coolify-api-token' but expected '${TSIG_VOLUME_NAME}'."
+    echo "[start] This is a one-time migration from pre-namespacing HermitHost."
+    echo "[start]"
+    echo "[start] Run these commands to migrate, then re-run start.sh:"
+    echo "[start]"
+    echo "[start]   docker volume create ${TSIG_VOLUME_NAME}"
+    echo "[start]   docker run --rm \\"
+    echo "[start]     -v coolify-api-token:/src:ro \\"
+    echo "[start]     -v ${TSIG_VOLUME_NAME}:/dst \\"
+    echo "[start]     alpine sh -c 'cp -a /src/. /dst/'"
+    echo "[start]   docker volume rm coolify-api-token"
+    echo "[start]"
+    echo "[start] ──────────────────────────────────────────────────────────────────"
+    echo ""
+    exit 1
+  fi
+
   TSIG_VOLUME_PATH="${RFC2136_TSIG_SECRET_FILE:-/coolify-api-token/rfc2136_tsig.secret}"
-  TSIG_VOLUME_NAME="coolify-api-token"
-  TSIG_VOLUME_DIR="$(dirname "$TSIG_VOLUME_PATH")"
-  if ! docker volume inspect "$TSIG_VOLUME_NAME" >/dev/null 2>&1; then
-    echo "[start] ERROR: Docker volume '${TSIG_VOLUME_NAME}' not found."
-    echo "[start]   Run 'bash scripts/setup.sh' to initialise the stack and provision the TSIG key."
-    echo "[start]   If you need to rotate the key, run 'bash scripts/rotate-tsig.sh'."
-    exit 1
+
+  CONTAINER_COUNT=$(docker ps -a \
+    --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
+    --format '{{.ID}}' 2>/dev/null | wc -l | tr -d ' ')
+
+  TSIG_SECRET=""
+  if docker volume inspect "$TSIG_VOLUME_NAME" >/dev/null 2>&1; then
+    TSIG_SECRET="$(docker run --rm \
+      -v "${TSIG_VOLUME_NAME}:/coolify-api-token:ro" \
+      alpine sh -c "cat '${TSIG_VOLUME_PATH}' 2>/dev/null | tr -d '\n\r '" 2>/dev/null || true)"
   fi
-  RFC2136_TSIG_SECRET="$(
+
+  if [ "$NO_BOOTSTRAP" = "1" ]; then
+    # --no-bootstrap: always fail-closed; CI/prod safety path
+    if [ -z "$TSIG_SECRET" ]; then
+      echo "[start] ERROR: --no-bootstrap set and TSIG secret is missing. Aborting."
+      echo "[start]   Run 'bash scripts/setup.sh' with the stack running to provision the key."
+      exit 1
+    fi
+  elif [ "$BOOTSTRAP_MODE" = "1" ]; then
+    # --bootstrap: operator forces bootstrap path (required for Case B override)
+    if [ "$CONTAINER_COUNT" -gt 0 ] && [ "$BOOTSTRAP_FORCE" != "1" ]; then
+      echo "[start] ERROR: Containers already exist for project '${COMPOSE_PROJECT_NAME}'."
+      echo "[start]   Pass --bootstrap --force to acknowledge destructive intent."
+      exit 1
+    fi
+    echo "[start] Bootstrap mode forced by --bootstrap flag. TSIG will be provisioned by setup.sh after stack starts."
+    BOOTSTRAP_MODE=1
+  elif [ "$CONTAINER_COUNT" -eq 0 ] && [ -z "$TSIG_SECRET" ]; then
+    # Case A: no containers AND no TSIG secret — first-time bootstrap
+    echo "[start] First-time bootstrap detected for project '${COMPOSE_PROJECT_NAME}'."
+    echo "[start] Starting stack to provision TSIG key..."
+
+    # Start stack without TSIG gate
+    docker compose ${PROFILE_ARG} up -d
+
+    # Wait for Technitium healthy (up to 120s)
+    echo "[start] Waiting for Technitium to become healthy..."
+    _TECH_CONTAINER="${COMPOSE_PROJECT_NAME}-technitium-1"
+    _WAIT=0
+    _TIMEOUT=120
+    until [ "$(docker inspect --format='{{.State.Health.Status}}' "$_TECH_CONTAINER" 2>/dev/null)" = "healthy" ]; do
+      if [ "$_WAIT" -ge "$_TIMEOUT" ]; then
+        echo "[start] ERROR: Technitium did not become healthy within ${_TIMEOUT}s. Bootstrap failed."
+        docker compose down
+        exit 1
+      fi
+      sleep 3
+      _WAIT=$(( _WAIT + 3 ))
+    done
+    echo "[start] Technitium healthy. Provisioning TSIG key..."
+
+    # Read values needed for TSIG init
+    _TECH_URL="$(grep -E '^TECHNITIUM_URL=' "$ROOT/.env" | cut -d'=' -f2- || true)"
+    _RFC2136_ZONE="$(grep -E '^RFC2136_ZONE=' "$ROOT/.env" | cut -d'=' -f2- || true)"
+    _PORT_MODE="$HERMITHOST_PORT_MODE"
+    _PROJECT_NAME="$(grep -E '^COMPOSE_PROJECT_NAME=' "$ROOT/.env" | cut -d'=' -f2- | tr -d '[:space:]')"
+    _PROJECT_NAME="${_PROJECT_NAME:-hermithost}"
+
+    # Derive volume dir from the volume path (directory component)
+    TSIG_VOLUME_DIR="$(dirname "$TSIG_VOLUME_PATH")"
+
     docker run --rm \
-      -v "${TSIG_VOLUME_NAME}:${TSIG_VOLUME_DIR}:ro" \
-      alpine sh -c "cat '${TSIG_VOLUME_PATH}' 2>/dev/null | tr -d '\n\r '" 2>/dev/null || true
-  )"
-  if [ -z "$RFC2136_TSIG_SECRET" ]; then
-    echo "[start] ERROR: RFC2136 TSIG secret not found or empty in volume '${TSIG_VOLUME_NAME}' at '${TSIG_VOLUME_PATH}'."
-    echo "[start]   Run 'bash scripts/setup.sh' with the stack running to bootstrap the TSIG key."
-    echo "[start]   If the key was rotated, run 'bash scripts/rotate-tsig.sh'."
+      --network "${_PROJECT_NAME}_hermithost-net" \
+      -v "${COMPOSE_PROJECT_NAME:-hermithost}_coolify-api-token:/coolify-api-token" \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v "${ROOT}/scripts/conf.d:/scripts/conf.d:ro" \
+      -e TECHNITIUM_URL="${_TECH_URL}" \
+      -e HERMITHOST_PORT_MODE="${_PORT_MODE}" \
+      -e RFC2136_ZONE="${_RFC2136_ZONE}" \
+      docker:cli sh -c "apk add --no-cache bash openssl curl >/dev/null 2>&1 && bash /scripts/conf.d/technitium-tsig-init.sh"
+
+    # Verify secret was written
+    RFC2136_TSIG_SECRET="$(docker run --rm \
+      -v "${COMPOSE_PROJECT_NAME:-hermithost}_coolify-api-token:${TSIG_VOLUME_DIR}:ro" \
+      alpine sh -c "cat '${TSIG_VOLUME_PATH}' 2>/dev/null | tr -d '\n\r '" 2>/dev/null || true)"
+
+    if [ -z "$RFC2136_TSIG_SECRET" ]; then
+      echo "[start] ERROR: TSIG provisioning completed but secret was not written. Check TSIG init logs."
+      docker compose down
+      exit 1
+    fi
+
+    echo "[start] TSIG key provisioned. Restarting stack with full configuration..."
+    docker compose down
+
+    # Fall through to normal docker compose up below (TSIG_SECRET now set, BOOTSTRAP_MODE=1 skips re-check)
+    export RFC2136_TSIG_SECRET
+    BOOTSTRAP_MODE=1
+  elif [ "$CONTAINER_COUNT" -gt 0 ] && [ -z "$TSIG_SECRET" ]; then
+    # Case B: containers exist but secret missing — broken partial state
+    echo "[start] ERROR: Partial state — containers exist for project '${COMPOSE_PROJECT_NAME}' but TSIG secret is missing."
+    echo "[start]   A prior bootstrap likely failed. Options:"
+    echo "[start]     ./scripts/start.sh --bootstrap --force   (re-bootstrap, destroys existing state)"
+    echo "[start]     docker compose down -v && re-run start.sh (clean and retry)"
     exit 1
   fi
-  export RFC2136_TSIG_SECRET
-  echo "[start] RFC2136_TSIG_SECRET loaded from volume ${TSIG_VOLUME_NAME}."
+
+  # Cases C/D: secret exists — load it and continue
+  if [ -z "${BOOTSTRAP_MODE+x}" ] || [ "$BOOTSTRAP_MODE" != "1" ]; then
+    export RFC2136_TSIG_SECRET="$TSIG_SECRET"
+    echo "[start] RFC2136_TSIG_SECRET loaded from volume ${TSIG_VOLUME_NAME}."
+  fi
 fi
 
 # shellcheck disable=SC2086

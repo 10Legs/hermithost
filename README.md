@@ -162,7 +162,6 @@ NS_HOSTNAME=192.168.1.100              # Your server IP (LAN) or hostname (Inter
 
 # Optional (can be set in dashboard later)
 DNS_PROVIDER=technitium                # or "cloudflare"
-COOLIFY_PORT=8000
 DNS_PORT=53053                         # 53 if allowed; default avoids conflicts
 STEP_CA_PASSWORD=your-secure-password  # LAN mode only
 ```
@@ -275,6 +274,15 @@ To use Cloudflare as your DNS provider:
 
 3. **Use your domain's Cloudflare nameservers** — ensure your registrar points your domain to Cloudflare
 
+## Coolify Access
+
+The Coolify deployment engine runs internally and is managed exclusively through the HermitHost dashboard. Direct Coolify UI access is restricted as follows:
+
+- **LAN mode:** Coolify UI is accessible at `https://coolify.hh` (routed through Traefik, covered by the `*.hh` wildcard certificate)
+- **Internet mode:** Coolify UI is not externally exposed. Access the engine via SSH tunnel: `ssh -L 8080:localhost:8080 user@host`, then visit `http://localhost:8080`
+
+In both modes, the HermitHost dashboard is your primary interface for deployments.
+
 ## SSL Certificate Management
 
 HermitHost automates SSL certificate issuance and renewal. Certificates are stored in the `traefik-acme` volume and never require manual management.
@@ -327,7 +335,6 @@ Operator-configurable variables in `.env`. For the complete list, see `.env.temp
 | `NS_HOSTNAME` | Server IP (LAN) or hostname (Internet) | *(prompted)* |
 | `DNS_PROVIDER` | Active DNS provider: `technitium` or `cloudflare` | `technitium` |
 | `CLOUDFLARE_TOKEN` | Cloudflare API token (also settable in Settings UI) | *(empty)* |
-| `COOLIFY_PORT` | Internal deployment engine port | `8000` |
 | `DNS_PORT` | Host port for DNS (use 53 if allowed; avoid conflicts) | `53053` |
 | `TRAEFIK_HTTP_PORT` | Traefik HTTP port (Internet mode) | `8080` |
 | `TRAEFIK_HTTPS_PORT` | Traefik HTTPS port (Internet mode) | `8443` |

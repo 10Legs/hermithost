@@ -394,6 +394,7 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
           git_branch: site.git_branch,
           build_pack: 'nixpacks',
           ports_exposes: '3000',
+          ports_mappings: '',
           server_uuid,
           destination_uuid,
           project_uuid,

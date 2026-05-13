@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { readFileSync, writeFileSync, unlinkSync } from 'fs';
 import * as path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import * as yaml from 'js-yaml';
 import { dockerGet, dockerPost, dockerNetworkConnect } from '../services/docker';
 import { DnsRecord } from '../types';
@@ -24,6 +26,34 @@ import { createTechnitiumClient, TechnitiumClient } from '../services/technitium
 import { readNsHostname, readNsServerIp, readNetworkMode } from './config';
 
 const router = Router();
+
+const execFileAsync = promisify(execFile);
+
+// ── Coolify compose loader ────────────────────────────────────────────────────
+// Triggers Coolify's LoadComposeFile action immediately via artisan tinker so
+// docker_compose_raw is populated before the polling loop runs.  Non-fatal —
+// if the exec fails we log a warning and fall back to the existing poll loop.
+
+async function triggerCoolifyComposeLoad(appUuid: string): Promise<void> {
+  const containerName = process.env.COOLIFY_CONTAINER_NAME ?? 'hermithost-coolify-1';
+  const phpScript = [
+    `$app = App\\Models\\Application::where('uuid', '${appUuid}')->first();`,
+    `App\\Actions\\Application\\LoadComposeFile::dispatchSync($app);`,
+    `echo 'ok';`,
+  ].join(' ');
+
+  try {
+    const { stdout } = await execFileAsync(
+      'docker',
+      ['exec', containerName, 'sh', '-c', `php /var/www/html/artisan tinker --execute="${phpScript}"`],
+      { timeout: 30_000 },
+    );
+    console.log(`[coolify] LoadComposeFile triggered for ${appUuid}: ${stdout.trim()}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[coolify] LoadComposeFile trigger failed for ${appUuid} (non-fatal): ${msg}`);
+  }
+}
 
 // ── Docker Compose domain helper ──────────────────────────────────────────────
 // After creating a dockercompose app, Coolify parses the compose file async.
@@ -393,6 +423,31 @@ export async function unlinkGithubKey(appUuid: string): Promise<void> {
   }
 }
 
+// ── Direct Postgres write for git_repository ─────────────────────────────────
+// Coolify's PATCH /applications/{uuid} normalizes git_repository URLs, stripping
+// x-access-token:PAT@ credentials. We bypass the API and write directly to the DB,
+// mirroring the pattern used in unlinkGithubKey().
+export async function writeGitRepositoryUrl(appUuid: string, repoUrl: string): Promise<void> {
+  const { Client } = require('pg') as typeof import('pg');
+  const pg = new Client({
+    host: process.env.PGHOST ?? 'coolify-db',
+    port: Number(process.env.PGPORT ?? 5432),
+    database: process.env.PGDATABASE ?? 'coolify',
+    user: process.env.PGUSER ?? 'coolify',
+    password: process.env.PGPASSWORD,
+  });
+  await pg.connect();
+  try {
+    await pg.query(
+      'UPDATE applications SET git_repository = $1 WHERE uuid = $2',
+      [repoUrl, appUuid]
+    );
+    console.log(`[git-repo] Wrote git_repository directly to DB for app ${appUuid}`);
+  } finally {
+    await pg.end();
+  }
+}
+
 // ── Traefik route provisioning ────────────────────────────────────────────────
 // Queries Docker API for the running Coolify container for a given slug,
 // then writes (or removes) a Traefik conf.d route file so the site domain
@@ -414,12 +469,14 @@ export async function provisionTraefikRoute(
   const confDir = TRAEFIK_CONF_DIR;
   const filePath = path.join(confDir, `site-${slug}.yml`);
   try {
-    // Find container with coolify.name=slug label (any state — stopped containers still have valid names)
-    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
-    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<{ Names: string[] }>;
+    // Find RUNNING container with coolify.name=slug label.
+    // Do NOT use all=true — after a Coolify redeploy the old stopped container still carries
+    // the same label and would be returned first, pointing the route at a dead container (502).
+    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`], status: ['running'] }));
+    const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[] }>;
     if (!containers.length) {
-      console.warn(`[traefik-route] No container found for slug ${slug} — route not written`);
-      return { ok: false, reason: `no container for slug ${slug}` };
+      console.warn(`[traefik-route] No running container found for slug ${slug} — route not written`);
+      return { ok: false, reason: `no running container for slug ${slug}` };
     }
     const containerName = containers[0].Names[0].replace(/^\//, '');
     // Phase 4 wildcard routing: internal-ca routes must NOT declare certResolver or
@@ -484,7 +541,7 @@ function removeTraefikRoute(slug: string): void {
 //   2. Pick the primary service using COMPOSE_PRIMARY_SERVICE_NAMES preference list.
 //   3. Discover the running container via com.docker.compose.project/service labels.
 //   4. Detect the exposed port (Traefik label → ExposedPorts → 80 fallback).
-//   5. Attach the primary container to the "coolify" network (idempotent).
+//   5. Attach the primary container to the COOLIFY_NETWORK_NAME network (idempotent).
 //   6. Write site-${slug}.yml — same filename convention so removeTraefikRoute() works.
 export async function provisionTraefikRouteForCompose(
   client: CoolifyClient,
@@ -557,21 +614,24 @@ export async function provisionTraefikRouteForCompose(
 
     // ── Step 3: Discover container ──────────────────────────────────────────────
     console.log(`[traefik-route-compose] Discovering container for project=${slug} service=${primaryService}...`);
-    const filter = encodeURIComponent(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Docker inspect shape varies; use any for raw response
+    // Use status:running filter — do NOT use all=true. After a Coolify redeploy the old stopped
+    // container still has the same labels and would be matched first, yielding a stale route (502).
+    const runningFilter = encodeURIComponent(
       JSON.stringify({
         label: [
           `com.docker.compose.project=${slug}`,
           `com.docker.compose.service=${primaryService}`,
         ],
+        status: ['running'],
       }),
     );
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Docker inspect shape varies; use any for raw response
-    const containers = await dockerGet(`/containers/json?all=true&filters=${filter}`) as Array<any>;
+    const containers = await dockerGet(`/containers/json?filters=${runningFilter}`) as Array<any>;
     if (!containers.length) {
       console.warn(
-        `[traefik-route-compose] No container found for project=${slug} service=${primaryService} — route not written`,
+        `[traefik-route-compose] No running container found for project=${slug} service=${primaryService} — route not written`,
       );
-      return { ok: false, reason: `no container for project=${slug} service=${primaryService}` };
+      return { ok: false, reason: `no running container for project=${slug} service=${primaryService}` };
     }
     const container = containers[0];
     const containerId: string = container.Id as string;
@@ -614,9 +674,10 @@ export async function provisionTraefikRouteForCompose(
     }
 
     // ── Step 5: Attach container to coolify network (idempotent) ───────────────
-    console.log(`[traefik-route-compose] Attaching ${containerName} to coolify network...`);
-    await dockerNetworkConnect('coolify', containerId);
-    console.log(`[traefik-route-compose] ${containerName} is on coolify network`);
+    const _coolifyNet = process.env.COOLIFY_NETWORK_NAME || 'coolify';
+    console.log(`[traefik-route-compose] Attaching ${containerName} to ${_coolifyNet} network...`);
+    await dockerNetworkConnect(_coolifyNet, containerId);
+    console.log(`[traefik-route-compose] ${containerName} is on ${_coolifyNet} network`);
 
     // ── Step 6: Write Traefik yml (same structure as provisionTraefikRoute) ─────
     // Phase 4 wildcard routing: see provisionTraefikRoute() comment above.
@@ -663,14 +724,12 @@ router.get('/', async (_req: Request, res: Response) => {
   try {
     const client = createCoolifyClient()!;
     const applications = await client.listApplications();
+    // Deployments not fetched in list view — avoids N×Coolify calls; use GET /:slug for full deployment history
     const sites = await Promise.all(
       applications.map(async (app) => {
         const domain = resolveRouteDomain(app) ?? '';
-        const [deployments, probe] = await Promise.all([
-          client.listDeployments(app.uuid).catch(() => []),
-          domain ? probeSite(domain).catch(() => null) : Promise.resolve(null),
-        ]);
-        return mapSiteWithStoredAuth(app, deployments, probe);
+        const probe = domain ? await probeSite(domain).catch(() => null) : null;
+        return mapSiteWithStoredAuth(app, [], probe);
       })
     );
     res.status(200).json(sites);
@@ -744,11 +803,11 @@ export function embedPatInRepoUrl(repoUrl: string, token: string): string {
   }
   try {
     const url = new URL(httpsUrl);
-    url.username = token;
-    url.password = '';
+    url.username = 'x-access-token';
+    url.password = token;
     return url.toString();
   } catch {
-    return httpsUrl.replace(/^https?:\/\//, `https://${token}@`);
+    return httpsUrl.replace(/^https?:\/\//, `https://x-access-token:${token}@`);
   }
 }
 
@@ -839,6 +898,7 @@ router.post('/', async (req: Request, res: Response) => {
       git_branch: body.git_branch,
       build_pack: body.build_pack ?? 'nixpacks',
       ports_exposes: String(body.port ?? 3000),
+      ports_mappings: '',
       server_uuid,
       destination_uuid,
       project_uuid,
@@ -854,20 +914,26 @@ router.post('/', async (req: Request, res: Response) => {
     let app = await client.createApplication(payload);
 
     // SSH key auth: link the deploy key via DB
-    // PAT auth: clear source_type (Coolify defaults to GithubApp) and re-apply PAT URL
+    // PAT auth: clear source_type (Coolify defaults to GithubApp) and write PAT URL directly to DB.
+    // Coolify's PATCH /applications/{uuid} normalizes git_repository and strips PAT credentials,
+    // so we bypass the API entirely and write directly to Postgres (same pattern as unlinkGithubKey).
     if (deployAuth !== 'pat') {
       await linkGithubKey(app.uuid);
     } else {
+      const pat = body.deploy_token!.trim();
       // unlinkGithubKey sets source_type = NULL so Coolify uses git_repository directly
       await unlinkGithubKey(app.uuid);
-      // Re-apply PAT URL after source_type cleared — Coolify may have stripped it
-      await client.updateApplication(app.uuid, { git_repository: resolvedRepoUrl }).catch((e: Error) => {
-        console.warn(`[coolify] PAT url re-patch failed for ${app.uuid}:`, e.message);
+      // Write PAT-embedded URL directly to DB — bypasses Coolify PATCH URL normalization
+      await writeGitRepositoryUrl(app.uuid, embedPatInRepoUrl(body.git_repository, pat)).catch((e: Error) => {
+        console.warn(`[git-repo] PAT url DB write failed for ${app.uuid}:`, e.message);
       });
     }
 
     if (resolvedFqdn) {
       if (body.build_pack === 'dockercompose') {
+        // Trigger LoadComposeFile immediately so docker_compose_raw is populated
+        // before the poll loop starts, avoiding the ~5-minute scheduler delay.
+        await triggerCoolifyComposeLoad(app.uuid);
         // Async-poll for docker_compose_raw then PATCH docker_compose_domains
         app = await setDockerComposeDomain(client, app, coolifyFqdn!);
         // Prefill env vars extracted from compose YAML — non-fatal.
@@ -1013,20 +1079,30 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     if (body.base_directory !== undefined) payload.base_directory = body.base_directory;
 
     // Auth-aware repository URL handling:
-    // - Always stores clean base URL in the frontend-facing Site response
-    // - Transparently re-embeds PAT in Coolify's git_repository when needed
+    // - Always stores clean (credential-free) URL via Coolify PATCH
+    // - For PAT sites, writes PAT-embedded URL directly to Postgres after the PATCH
+    //   (Coolify PATCH normalizes git_repository and strips PAT credentials)
     const incomingRepo = (body as any).repository ?? body.git_repository;
-    const needCurrentApp = switchingAuth || incomingRepo !== undefined;
+    const needCurrentApp = switchingAuth || incomingRepo !== undefined || payload.domains !== undefined;
     const currentApp = needCurrentApp ? await client.getApplication(req.params.slug) : null;
+    // dockercompose apps reject the domains field — Coolify uses docker_compose_domains instead
+    if (currentApp?.build_pack === 'dockercompose') delete payload.domains;
 
-    // Extract current PAT from Coolify (if site currently uses PAT auth)
+    // Extract current PAT from Coolify git_repository URL.
+    // Since we now write the PAT-embedded URL directly to Postgres (bypassing Coolify's PATCH
+    // normalization), the URL in the DB should still contain the credentials on re-read.
     let currentPat: string | null = null;
     if (currentApp) {
       try {
         const url = new URL(currentApp.git_repository);
-        if (url.username) currentPat = url.username;
-      } catch { /* not a URL */ }
+        if (url.password) currentPat = url.password;
+        else if (url.username) currentPat = url.username;
+      } catch { /* not a parseable URL — SSH format, no PAT */ }
     }
+
+    // patUrlToWrite: PAT-embedded URL to write directly to DB after the Coolify PATCH.
+    // null = no direct DB write needed (SSH key or no repo change on non-PAT site).
+    let patUrlToWrite: string | null = null;
 
     if (incomingRepo !== undefined || switchingAuth) {
       // Resolve clean base URL from incoming field, or from current Coolify app
@@ -1046,16 +1122,16 @@ router.patch('/:slug', async (req: Request, res: Response) => {
         ? body.deploy_token!.trim()
         : currentPat;
 
-      payload.git_repository = (effectiveAuth === 'pat' && effectiveToken)
-        ? embedPatInRepoUrl(cleanBase, effectiveToken)
-        : httpsToSshUrl(cleanBase);
+      if (effectiveAuth === 'pat' && effectiveToken) {
+        // Send clean URL to Coolify PATCH (avoids normalization stripping PAT); write PAT URL to DB below
+        payload.git_repository = httpsToSshUrl(cleanBase);
+        patUrlToWrite = embedPatInRepoUrl(cleanBase, effectiveToken);
+      } else {
+        payload.git_repository = httpsToSshUrl(cleanBase);
+      }
     }
 
     let app = await client.updateApplication(req.params.slug, payload);
-
-    // Refetch to ensure git_repository is updated (especially for auth switches)
-    const refreshed = await client.getApplication(req.params.slug).catch(() => null);
-    if (refreshed) app = refreshed;
 
     // Post-update auth side effects (link/unlink SSH deploy key)
     if (switchingAuth) {
@@ -1065,6 +1141,18 @@ router.patch('/:slug', async (req: Request, res: Response) => {
         await linkGithubKey(req.params.slug);
       }
     }
+
+    // Write PAT-embedded URL directly to DB — bypasses Coolify PATCH URL normalization.
+    // Must happen after unlinkGithubKey so source_type is already NULL.
+    if (patUrlToWrite) {
+      await writeGitRepositoryUrl(req.params.slug, patUrlToWrite).catch((e: Error) => {
+        console.warn(`[git-repo] PAT url DB write failed for ${req.params.slug}:`, e.message);
+      });
+    }
+
+    // Refetch to ensure we return latest state
+    const refreshed = await client.getApplication(req.params.slug).catch(() => null);
+    if (refreshed) app = refreshed;
 
     if (payload.domains) {
       await provisionDns(payload.domains);

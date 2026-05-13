@@ -6,11 +6,13 @@ app.use(express.json());
 
 const DOCKER_SOCKET = '/var/run/docker.sock';
 const PORT = 2375;
+const COOLIFY_NETWORK_NAME = process.env.COOLIFY_NETWORK_NAME || 'hermithost-coolify';
+const COMPOSE_PROJECT_NAME = process.env.COMPOSE_PROJECT_NAME || 'hermithost';
 
-// A container is "managed" if it belongs to the hermithost compose stack
+// A container is "managed" if it belongs to this hermithost compose stack
 // OR is a Coolify-deployed application (carries coolify.applicationId or coolify.managed=true).
 function isManagedContainer(labels: Record<string, string>): boolean {
-  if (labels['com.docker.compose.project'] === 'hermithost') return true;
+  if (labels['com.docker.compose.project'] === COMPOSE_PROJECT_NAME) return true;
   if (labels['coolify.applicationId']) return true;
   if (labels['coolify.managed'] === 'true') return true;
   return false;
@@ -148,13 +150,13 @@ app.delete('/containers/:id', assertManaged, async (req: Request, res: Response)
 
 // ── POST /networks/:name/connect ──────────────────────────────────────────────
 // SYNC: DOMAIN_DANGEROUS_CHARS_RE and related regexes are also in api/src/lib/validation.ts
-// Only the "coolify" network may be used; container must be hermithost-managed.
+// Only the project-scoped coolify network (COOLIFY_NETWORK_NAME) may be used.
 
 app.post('/networks/:name/connect', async (req: Request, res: Response): Promise<void> => {
   const { name } = req.params;
 
-  // H1 — only the coolify network is allowed
-  if (name !== 'coolify') {
+  // H1 — only the project-scoped coolify network is allowed
+  if (name !== COOLIFY_NETWORK_NAME) {
     console.warn(`[docker-proxy] BLOCKED: network ${name} not allowed`);
     res.status(403).json({ error: 'Network not allowed' });
     return;
@@ -180,7 +182,7 @@ app.post('/networks/:name/connect', async (req: Request, res: Response): Promise
   const body = JSON.stringify({ Container: container });
   try {
     const result = await dockerRequest({
-      path: '/networks/coolify/connect',
+      path: `/networks/${COOLIFY_NETWORK_NAME}/connect`,
       method: 'POST',
       headers: {
         Host: 'localhost',
@@ -190,7 +192,7 @@ app.post('/networks/:name/connect', async (req: Request, res: Response): Promise
     }, body);
     res.status(result.statusCode).send(result.body || undefined);
   } catch (err) {
-    console.error(`[docker-proxy] POST /networks/coolify/connect failed:`, (err as Error).message);
+    console.error(`[docker-proxy] POST /networks/${COOLIFY_NETWORK_NAME}/connect failed:`, (err as Error).message);
     res.status(502).json({ error: 'Docker socket error' });
   }
 });
@@ -204,4 +206,6 @@ app.use((_req: Request, res: Response) => {
 app.listen(PORT, () => {
   console.log(`[docker-proxy] Listening on :${PORT}`);
   console.log(`[docker-proxy] Socket: ${DOCKER_SOCKET}`);
+  console.log(`[docker-proxy] Coolify network: ${COOLIFY_NETWORK_NAME}`);
+  console.log(`[docker-proxy] Compose project: ${COMPOSE_PROJECT_NAME}`);
 });

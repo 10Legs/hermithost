@@ -65,6 +65,7 @@ export interface CoolifyCreateApplicationPayload {
   docker_compose_location?: string;
   base_directory?: string;
   ports_exposes: string;
+  ports_mappings?: string;
   server_uuid: string;
   destination_uuid: string;
   project_uuid: string;
