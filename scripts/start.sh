@@ -189,6 +189,7 @@ if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
       -e TECHNITIUM_URL="${_TECH_URL}" \
       -e HERMITHOST_PORT_MODE="${_PORT_MODE}" \
       -e RFC2136_ZONE="${_RFC2136_ZONE}" \
+      -e COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}" \
       docker:cli sh -c "apk add --no-cache bash openssl curl >/dev/null 2>&1 && bash /scripts/conf.d/technitium-tsig-init.sh"
 
     # Verify secret was written

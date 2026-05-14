@@ -33,15 +33,19 @@ ENV_FILE="$ROOT/.env"
 # ── Resolve required vars ─────────────────────────────────────────────────────
 TECHNITIUM_URL="${TECHNITIUM_URL:-}"
 TECHNITIUM_TOKEN="${TECHNITIUM_TOKEN:-}"
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-}"
 
-if [ -z "$TECHNITIUM_URL" ] || [ -z "$TECHNITIUM_TOKEN" ]; then
+if [ -z "$TECHNITIUM_URL" ] || [ -z "$TECHNITIUM_TOKEN" ] || [ -z "$COMPOSE_PROJECT_NAME" ]; then
   if [ -f "$ENV_FILE" ]; then
     _URL="$(grep -E '^TECHNITIUM_URL=' "$ENV_FILE" | cut -d'=' -f2- || true)"
     _TOKEN="$(grep -E '^TECHNITIUM_TOKEN=' "$ENV_FILE" | cut -d'=' -f2- || true)"
+    _PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' "$ENV_FILE" | cut -d'=' -f2- | tr -d '[:space:]' || true)"
     TECHNITIUM_URL="${TECHNITIUM_URL:-$_URL}"
     TECHNITIUM_TOKEN="${TECHNITIUM_TOKEN:-$_TOKEN}"
+    COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$_PROJECT}"
   fi
 fi
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-hermithost}"
 
 if [ -z "$TECHNITIUM_URL" ]; then
   echo "[rotate-tsig] ERROR: TECHNITIUM_URL is not set." >&2
@@ -65,7 +69,7 @@ NEW_SECRET="$(openssl rand -base64 32 | tr -d '\n')"
 
 # ── Detect hermithost-net subnet ──────────────────────────────────────────────
 HERMITHOST_NET_SUBNET=""
-for NET_NAME in hermithost_hermithost-net hermithost-net; do
+for NET_NAME in "${COMPOSE_PROJECT_NAME:-hermithost}_hermithost-net" hermithost-net; do
   HERMITHOST_NET_SUBNET="$(docker network inspect "$NET_NAME" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"
   if [ -n "$HERMITHOST_NET_SUBNET" ]; then
     break

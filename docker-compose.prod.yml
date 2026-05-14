@@ -6,7 +6,7 @@ services:
     command:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
-      - "--providers.docker.network=hermithost-net"
+      - "--providers.docker.network=${COMPOSE_PROJECT_NAME:-hermithost}_hermithost-net"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"

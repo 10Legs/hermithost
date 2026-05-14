@@ -81,7 +81,7 @@ fi
 # The network name in docker compose is hermithost_hermithost-net.
 # We use docker network inspect to get the actual CIDR rather than hardcoding.
 HERMITHOST_NET_SUBNET=""
-for NET_NAME in hermithost_hermithost-net hermithost-net; do
+for NET_NAME in "${COMPOSE_PROJECT_NAME:-hermithost}_hermithost-net" hermithost-net; do
   if docker network inspect "$NET_NAME" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' >/dev/null 2>&1; then
     HERMITHOST_NET_SUBNET="$(docker network inspect "$NET_NAME" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"
     if [ -n "$HERMITHOST_NET_SUBNET" ]; then
