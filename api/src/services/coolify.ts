@@ -142,7 +142,9 @@ async function handleResponse<T>(res: Response, context: string): Promise<T> {
     const body = await res.text().catch(() => '(unreadable)');
     throw new Error(`Coolify ${context} failed: HTTP ${res.status} — ${body}`);
   }
-  return res.json() as Promise<T>;
+  const text = await res.text();
+  const sanitized = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+  return JSON.parse(sanitized) as T;
 }
 
 export class CoolifyClient {

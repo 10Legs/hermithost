@@ -473,11 +473,12 @@ export async function provisionTraefikRoute(
     // Do NOT use all=true — after a Coolify redeploy the old stopped container still carries
     // the same label and would be returned first, pointing the route at a dead container (502).
     const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`], status: ['running'] }));
-    const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[] }>;
+    const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; Created: number }>;
     if (!containers.length) {
       console.warn(`[traefik-route] No running container found for slug ${slug} — route not written`);
       return { ok: false, reason: `no running container for slug ${slug}` };
     }
+    containers.sort((a, b) => b.Created - a.Created);
     const containerName = containers[0].Names[0].replace(/^\//, '');
     // Phase 4 wildcard routing: internal-ca routes must NOT declare certResolver or
     // tls.domains — wildcard-internal.yml owns the single *.hh cert acquisition via
@@ -633,6 +634,7 @@ export async function provisionTraefikRouteForCompose(
       );
       return { ok: false, reason: `no running container for project=${slug} service=${primaryService}` };
     }
+    containers.sort((a, b) => b.Created - a.Created);
     const container = containers[0];
     const containerId: string = container.Id as string;
     const containerName: string = (container.Names as string[])[0].replace(/^\//, '');
@@ -1698,6 +1700,47 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
       } catch (preflightErr) {
         // Non-fatal: log and continue — don't block deploy on preflight failure
         console.warn(`[deploy-preflight] env check failed for ${req.params.slug}:`, (preflightErr as Error).message);
+      }
+    }
+
+    // ── Deploy preflight: port conflict guard ─────────────────────────────────
+    // Only applies to dockercompose apps with a compose manifest.
+    if (app.build_pack === 'dockercompose' && app.docker_compose_raw) {
+      try {
+        const parsedCompose = yaml.load(app.docker_compose_raw) as Record<string, unknown>;
+        const composeServices = (parsedCompose?.services ?? {}) as Record<string, { ports?: Array<string | number> }>;
+        const hostPorts: string[] = [];
+        for (const svc of Object.values(composeServices)) {
+          for (const entry of svc.ports ?? []) {
+            const raw = String(entry);
+            // Host port is the part before ':', or the whole value if no ':'
+            const hostPart = raw.includes(':') ? raw.split(':')[0] : raw;
+            const portNum = hostPart.replace(/[^0-9]/g, '');
+            if (portNum) hostPorts.push(portNum);
+          }
+        }
+        if (hostPorts.length > 0) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const runningContainers = await dockerGet('/containers/json') as Array<any>;
+          const conflicts: string[] = [];
+          for (const hostPort of hostPorts) {
+            for (const c of runningContainers) {
+              const ports: Array<{ PublicPort?: number }> = c.Ports ?? [];
+              const bound = ports.some((p) => String(p.PublicPort) === hostPort);
+              if (bound) {
+                const name = (c.Names as string[])?.[0]?.replace(/^\//, '') ?? c.Id;
+                conflicts.push(`${hostPort} already allocated by container ${name}`);
+              }
+            }
+          }
+          if (conflicts.length > 0) {
+            res.status(409).json({ error: 'Port conflict detected', conflicts });
+            return;
+          }
+        }
+      } catch (portCheckErr) {
+        // Non-fatal: never block deploy due to port check failure
+        console.warn(`[deploy-preflight] port conflict check failed for ${req.params.slug}:`, (portCheckErr as Error).message);
       }
     }
 

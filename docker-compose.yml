@@ -347,6 +347,7 @@ services:
       PGPASSWORD: "${COOLIFY_DB_PASSWORD}"
       DOCKER_PROXY_URL: "http://docker-proxy:2375"
       COOLIFY_NETWORK_NAME: "${COMPOSE_PROJECT_NAME:-hermithost}-coolify"
+      COOLIFY_CONTAINER_NAME: "${COMPOSE_PROJECT_NAME:-hermithost}-coolify-1"
     volumes:
       - hermithost-sites:/app/sites
       - coolify-api-token:/coolify-api-token
