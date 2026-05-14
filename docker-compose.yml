@@ -130,6 +130,9 @@ services:
       - ./scripts/step-ca-entrypoint.sh:/scripts/step-ca-entrypoint.sh:ro
     networks:
       - hermithost-net
+    # tini as PID 1 reaps zombie children from health check forks,
+    # preventing PID exhaustion over multi-day uptime.
+    init: true
     restart: unless-stopped
     depends_on:
       step-ca-init:
@@ -137,9 +140,9 @@ services:
       technitium:
         condition: service_healthy
     # step-ca binds :9000; curl is not in the image so we use wget (busybox).
-    # -k: self-signed root during first boot is acceptable here.
+    # CMD (exec) form avoids an intermediate /bin/sh child that could zombie.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- --no-check-certificate https://localhost:9000/health || exit 1"]
+      test: ["CMD", "wget", "-qO-", "--no-check-certificate", "https://localhost:9000/health"]
       interval: 10s
       retries: 12
       timeout: 5s
