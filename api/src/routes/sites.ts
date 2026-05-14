@@ -1713,10 +1713,11 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
         for (const svc of Object.values(composeServices)) {
           for (const entry of svc.ports ?? []) {
             const raw = String(entry);
-            // Host port is the part before ':', or the whole value if no ':'
-            const hostPart = raw.includes(':') ? raw.split(':')[0] : raw;
-            const portNum = hostPart.replace(/[^0-9]/g, '');
-            if (portNum) hostPorts.push(portNum);
+            // Format is [ip:]host:container — host port is second-to-last segment
+            const parts = raw.split(':');
+            const hostPart = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
+            const portNum = parseInt(hostPart.replace(/[^0-9]/g, ''), 10);
+            if (!isNaN(portNum) && portNum > 0) hostPorts.push(String(portNum));
           }
         }
         if (hostPorts.length > 0) {
