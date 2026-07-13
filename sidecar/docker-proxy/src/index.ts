@@ -8,6 +8,7 @@ const DOCKER_SOCKET = '/var/run/docker.sock';
 const PORT = 2375;
 const COOLIFY_NETWORK_NAME = process.env.COOLIFY_NETWORK_NAME || 'hermithost-coolify';
 const COMPOSE_PROJECT_NAME = process.env.COMPOSE_PROJECT_NAME || 'hermithost';
+const SAFE_NETWORK_ALIAS_RE = /^site-[a-z0-9]+$/;
 
 // A container is "managed" if it belongs to this hermithost compose stack
 // OR is a Coolify-deployed application (carries coolify.applicationId or coolify.managed=true).
@@ -162,10 +163,28 @@ app.post('/networks/:name/connect', async (req: Request, res: Response): Promise
     return;
   }
 
-  const container = (req.body as Record<string, unknown>)?.Container;
+  const requestBody = req.body as Record<string, unknown>;
+  const container = requestBody?.Container;
   if (!container || typeof container !== 'string') {
     res.status(400).json({ error: 'Container required' });
     return;
+  }
+
+  const endpointConfig = requestBody.EndpointConfig as Record<string, unknown> | undefined;
+  const aliasesRaw = endpointConfig?.Aliases;
+  let aliases: string[] | undefined;
+  if (aliasesRaw !== undefined) {
+    if (!Array.isArray(aliasesRaw) || aliasesRaw.some((alias) => typeof alias !== 'string')) {
+      res.status(400).json({ error: 'EndpointConfig.Aliases must be an array of strings' });
+      return;
+    }
+    aliases = aliasesRaw as string[];
+    const unsafe = aliases.find((alias) => !SAFE_NETWORK_ALIAS_RE.test(alias));
+    if (unsafe) {
+      console.warn(`[docker-proxy] BLOCKED: unsafe network alias ${unsafe}`);
+      res.status(400).json({ error: 'Unsafe network alias' });
+      return;
+    }
   }
 
   const labels = await getContainerLabels(container);
@@ -179,7 +198,11 @@ app.post('/networks/:name/connect', async (req: Request, res: Response): Promise
     return;
   }
 
-  const body = JSON.stringify({ Container: container });
+  const connectPayload = {
+    Container: container,
+    ...(aliases && aliases.length > 0 ? { EndpointConfig: { Aliases: aliases } } : {}),
+  };
+  const body = JSON.stringify(connectPayload);
   try {
     const result = await dockerRequest({
       path: `/networks/${COOLIFY_NETWORK_NAME}/connect`,
@@ -193,6 +216,54 @@ app.post('/networks/:name/connect', async (req: Request, res: Response): Promise
     res.status(result.statusCode).send(result.body || undefined);
   } catch (err) {
     console.error(`[docker-proxy] POST /networks/${COOLIFY_NETWORK_NAME}/connect failed:`, (err as Error).message);
+    res.status(502).json({ error: 'Docker socket error' });
+  }
+});
+
+// ── POST /networks/:name/disconnect ──────────────────────────────────────────
+// Same guard model as connect. Required to repair containers that Coolify already
+// attached to the Traefik network without HermitHost's stable route alias.
+
+app.post('/networks/:name/disconnect', async (req: Request, res: Response): Promise<void> => {
+  const { name } = req.params;
+
+  if (name !== COOLIFY_NETWORK_NAME) {
+    console.warn(`[docker-proxy] BLOCKED: network ${name} not allowed`);
+    res.status(403).json({ error: 'Network not allowed' });
+    return;
+  }
+
+  const container = (req.body as Record<string, unknown>)?.Container;
+  if (!container || typeof container !== 'string') {
+    res.status(400).json({ error: 'Container required' });
+    return;
+  }
+
+  const labels = await getContainerLabels(container);
+  if (labels === null) {
+    res.status(404).json({ error: 'Container not found' });
+    return;
+  }
+  if (!isManagedContainer(labels)) {
+    console.warn(`[docker-proxy] BLOCKED: network disconnect refused — container ${container} is not managed`);
+    res.status(403).json({ error: 'Container not managed' });
+    return;
+  }
+
+  const body = JSON.stringify({ Container: container });
+  try {
+    const result = await dockerRequest({
+      path: `/networks/${COOLIFY_NETWORK_NAME}/disconnect`,
+      method: 'POST',
+      headers: {
+        Host: 'localhost',
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, body);
+    res.status(result.statusCode).send(result.body || undefined);
+  } catch (err) {
+    console.error(`[docker-proxy] POST /networks/${COOLIFY_NETWORK_NAME}/disconnect failed:`, (err as Error).message);
     res.status(502).json({ error: 'Docker socket error' });
   }
 });

@@ -126,10 +126,13 @@ export function dockerPost(path: string, body?: object): Promise<{ statusCode: n
  * Idempotent: Docker 409 (endpoint already exists in this network) is swallowed.
  * Real proxy denials (403 — container not managed, network not allowed) are re-thrown.
  */
-export async function dockerNetworkConnect(network: string, containerId: string): Promise<void> {
+export async function dockerNetworkConnect(network: string, containerId: string, aliases: string[] = []): Promise<void> {
   const result = await dockerPostRaw(
     `/networks/${encodeURIComponent(network)}/connect`,
-    { Container: containerId },
+    {
+      Container: containerId,
+      ...(aliases.length > 0 ? { EndpointConfig: { Aliases: aliases } } : {}),
+    },
   );
   if (result.statusCode >= 200 && result.statusCode < 300) return;
   // Docker returns 409 (or 403 on some versions) when the container is already connected.
@@ -148,5 +151,25 @@ export async function dockerNetworkConnect(network: string, containerId: string)
   // Any other non-2xx (403 proxy-denied, 404, 500, …) must propagate.
   let message = `Docker proxy error ${result.statusCode}`;
   try { message = (JSON.parse(result.body) as { error?: string; message?: string }).error ?? message; } catch {}
+  throw Object.assign(new Error(message), { statusCode: result.statusCode });
+}
+
+/**
+ * Detaches an existing container from a Docker network.
+ * Used when a container is already connected without the stable alias required
+ * by HermitHost's Traefik file-provider route.
+ */
+export async function dockerNetworkDisconnect(network: string, containerId: string): Promise<void> {
+  const result = await dockerPostRaw(
+    `/networks/${encodeURIComponent(network)}/disconnect`,
+    { Container: containerId },
+  );
+  if (result.statusCode >= 200 && result.statusCode < 300) return;
+  // Docker returns 404/403 variants when the endpoint is already absent.
+  if (result.statusCode === 404) return;
+
+  let message = `Docker proxy error ${result.statusCode}`;
+  try { message = (JSON.parse(result.body) as { error?: string; message?: string }).error ?? message; } catch {}
+  if (message.includes('is not connected to the network')) return;
   throw Object.assign(new Error(message), { statusCode: result.statusCode });
 }
