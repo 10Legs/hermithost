@@ -4,7 +4,7 @@ import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as yaml from 'js-yaml';
-import { dockerGet, dockerPost, dockerNetworkConnect } from '../services/docker';
+import { dockerGet, dockerPost, dockerNetworkConnect, dockerNetworkDisconnect } from '../services/docker';
 import { DnsRecord } from '../types';
 import {
   createCoolifyClient,
@@ -20,7 +20,7 @@ import {
 import { extractEnvVars, generateSecretValue } from '../lib/composeEnv';
 import { FQDN_RE, SLUG_RE, domainHasDangerousChars } from '../lib/validation';
 import { mapSite, mapDeploy, resolveRouteDomain } from '../services/mapper';
-import { probeSite } from '../services/healthProbe';
+import { clearProbeCache, probeSite } from '../services/healthProbe';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
 import { createTechnitiumClient, TechnitiumClient } from '../services/technitium';
 import { readNsHostname, readNsServerIp, readNetworkMode } from './config';
@@ -533,6 +533,43 @@ function removeTraefikRoute(slug: string): void {
   }
 }
 
+export function stableComposeRouteAlias(slug: string): string {
+  return `site-${slug}`;
+}
+
+async function ensureContainerNetworkAlias(containerId: string, network: string, alias: string): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Docker inspect response shape
+  const inspected = await dockerGet(`/containers/${containerId}/json`) as any;
+  const networks = inspected?.NetworkSettings?.Networks ?? {};
+  const current = networks[network] as { Aliases?: string[] | null } | undefined;
+  const aliases = current?.Aliases ?? [];
+
+  if (current && aliases.includes(alias)) {
+    console.log(`[docker] ${containerId} already on ${network} with alias ${alias}`);
+    return;
+  }
+
+  if (current) {
+    console.log(`[docker] ${containerId} already on ${network} without alias ${alias}; reconnecting`);
+    await dockerNetworkDisconnect(network, containerId);
+  }
+
+  await dockerNetworkConnect(network, containerId, [alias]);
+}
+
+async function verifyRouteNotBadGateway(domain: string): Promise<{ ok: boolean; reason?: string; statusCode?: number | null }> {
+  // Give Traefik's file provider a short window to reload the route file.
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  clearProbeCache(domain);
+  const probe = await probeSite(domain).catch((err) => {
+    return { http: { reachable: false, statusCode: null }, error: (err as Error).message };
+  });
+  const statusCode = probe.http.statusCode;
+  if (!probe.http.reachable) return { ok: false, reason: 'domain not reachable after route provisioning', statusCode };
+  if (statusCode === 502) return { ok: false, reason: 'route returned 502 Bad Gateway after provisioning', statusCode };
+  return { ok: true, statusCode };
+}
+
 // ── Traefik route provisioning — dockercompose build pack ─────────────────────
 // Mirrors provisionTraefikRoute() but handles compose-specific container
 // discovery, port detection, and network attachment.
@@ -549,7 +586,8 @@ export async function provisionTraefikRouteForCompose(
   app: CoolifyApplication,
   domain: string,
   resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt',
-): Promise<{ ok: boolean; reason?: string }> {
+  options: { minCreated?: number } = {},
+): Promise<{ ok: boolean; reason?: string; upstream?: string; statusCode?: number | null }> {
   // H2 Layer 2 — defensive domain safety check before writing yml
   if (domainHasDangerousChars(domain)) {
     const reason = `domain contains dangerous characters: ${JSON.stringify(domain)}`;
@@ -627,7 +665,10 @@ export async function provisionTraefikRouteForCompose(
         status: ['running'],
       }),
     );
-    const containers = await dockerGet(`/containers/json?filters=${runningFilter}`) as Array<any>;
+    let containers = await dockerGet(`/containers/json?filters=${runningFilter}`) as Array<any>;
+    if (options.minCreated !== undefined) {
+      containers = containers.filter((c) => Number(c.Created ?? 0) >= options.minCreated!);
+    }
     if (!containers.length) {
       console.warn(
         `[traefik-route-compose] No running container found for project=${slug} service=${primaryService} — route not written`,
@@ -638,6 +679,7 @@ export async function provisionTraefikRouteForCompose(
     const container = containers[0];
     const containerId: string = container.Id as string;
     const containerName: string = (container.Names as string[])[0].replace(/^\//, '');
+    const stableAlias = stableComposeRouteAlias(slug);
 
     // ── Step 4: Discover port ───────────────────────────────────────────────────
     // Priority: Traefik label on container → image ExposedPorts → 80
@@ -677,9 +719,9 @@ export async function provisionTraefikRouteForCompose(
 
     // ── Step 5: Attach container to coolify network (idempotent) ───────────────
     const _coolifyNet = process.env.COOLIFY_NETWORK_NAME || 'coolify';
-    console.log(`[traefik-route-compose] Attaching ${containerName} to ${_coolifyNet} network...`);
-    await dockerNetworkConnect(_coolifyNet, containerId);
-    console.log(`[traefik-route-compose] ${containerName} is on ${_coolifyNet} network`);
+    console.log(`[traefik-route-compose] Ensuring ${containerName} is on ${_coolifyNet} network as ${stableAlias}...`);
+    await ensureContainerNetworkAlias(containerId, _coolifyNet, stableAlias);
+    console.log(`[traefik-route-compose] ${containerName} is on ${_coolifyNet} network as ${stableAlias}`);
 
     // ── Step 6: Write Traefik yml (same structure as provisionTraefikRoute) ─────
     // Phase 4 wildcard routing: see provisionTraefikRoute() comment above.
@@ -709,11 +751,20 @@ ${tlsBlock}
     site-${slug}:
       loadBalancer:
         servers:
-          - url: "http://${containerName}:${port}"
+          - url: "http://${stableAlias}:${port}"
 `;
     writeFileSync(filePath, yml, 'utf8');
-    console.log(`[traefik-route-compose] Route written for ${domain} → ${containerName}:${port} (resolver=${resolver})`);
-    return { ok: true };
+    const upstream = `${stableAlias}:${port}`;
+    console.log(`[traefik-route-compose] Route written for ${domain} → ${upstream} (resolver=${resolver})`);
+
+    const verification = await verifyRouteNotBadGateway(domain);
+    if (!verification.ok) {
+      const reason = `${verification.reason}; upstream=${upstream}; container=${containerName}; network=${_coolifyNet}; route=${filePath}`;
+      console.error(`[traefik-route-compose] Verification failed for ${domain}: ${reason}`);
+      return { ok: false, reason, upstream, statusCode: verification.statusCode };
+    }
+
+    return { ok: true, upstream, statusCode: verification.statusCode };
   } catch (err) {
     const reason = (err as Error).message;
     console.warn(`[traefik-route-compose] Failed to provision route for ${slug}:`, reason);
@@ -1745,11 +1796,11 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
       }
     }
 
+    const deployStartedAt = Math.floor(Date.now() / 1000) - 5;
     const result = await client.triggerDeploy(req.params.slug);
     const dep = result.deployments?.[0];
-    res.status(202).json({ jobId: dep?.deployment_uuid, message: dep?.message });
 
-    // Async: update Traefik route once the container is running.
+    // Update Traefik route once the container is running.
     // Poll up to 3 minutes for the new container to appear.
     const _routeDomain = resolveRouteDomain(app);
     if (_routeDomain === null) {
@@ -1760,43 +1811,58 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
       const port = (app as any).ports_exposes ?? 3000;
       const slug = req.params.slug;
       const isCompose = app.build_pack === 'dockercompose';
-      (async () => {
-        const maxAttempts = 18; // 18 × 10s = 3 min
-        for (let i = 0; i < maxAttempts; i++) {
-          await new Promise(r => setTimeout(r, 10_000));
-          try {
-            const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
-            if (isCompose) {
-              // For compose: poll for any running service container in this project
-              const filter = encodeURIComponent(
-                JSON.stringify({ label: [`com.docker.compose.project=${slug}`] }),
-              );
-              const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ State: string }>;
-              const running = containers.find(c => c.State === 'running');
-              if (running) {
-                const freshApp = await createCoolifyClient()!.getApplication(slug).catch(() => null);
-                if (freshApp) {
-                  const r = await provisionTraefikRouteForCompose(createCoolifyClient()!, freshApp, domain, resolver);
-                  if (!r.ok) console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${r.reason}`);
-                }
-                break;
-              }
-            } else {
-              const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`] }));
-              const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; State: string }>;
-              const running = containers.find(c => c.State === 'running');
-              if (running) {
-                const r = await provisionTraefikRoute(slug, domain, port, resolver);
-                if (!r.ok) console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${r.reason}`);
-                break;
-              }
+      const maxAttempts = 18; // 18 × 10s = 3 min
+      let routeResult: { ok: boolean; reason?: string; upstream?: string; statusCode?: number | null } | null = null;
+      for (let i = 0; i < maxAttempts; i++) {
+        await new Promise(r => setTimeout(r, 10_000));
+        try {
+          const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
+          if (isCompose) {
+            // For compose: wait for the primary service container that will be routed.
+            const freshApp = await createCoolifyClient()!.getApplication(slug).catch(() => null);
+            if (!freshApp) continue;
+            routeResult = await provisionTraefikRouteForCompose(
+              createCoolifyClient()!,
+              freshApp,
+              domain,
+              resolver,
+              { minCreated: deployStartedAt },
+            );
+            if (routeResult.ok) break;
+            console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${routeResult.reason}`);
+          } else {
+            const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`], status: ['running'] }));
+            const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; State: string }>;
+            if (containers.length) {
+              routeResult = await provisionTraefikRoute(slug, domain, port, resolver);
+              if (routeResult.ok) break;
+              console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${routeResult.reason}`);
             }
-          } catch {
-            // keep polling
           }
+        } catch (routeErr) {
+          routeResult = { ok: false, reason: (routeErr as Error).message };
         }
-      })();
+      }
+
+      if (isCompose && (!routeResult || !routeResult.ok)) {
+        res.status(502).json({
+          error: 'Deploy started, but route provisioning failed',
+          jobId: dep?.deployment_uuid,
+          message: dep?.message,
+          route: routeResult ?? { ok: false, reason: 'timed out waiting for route provisioning' },
+        });
+        return;
+      }
+
+      res.status(202).json({
+        jobId: dep?.deployment_uuid,
+        message: dep?.message,
+        ...(routeResult ? { route: routeResult } : {}),
+      });
+      return;
     }
+
+    res.status(202).json({ jobId: dep?.deployment_uuid, message: dep?.message });
   } catch (err) {
     console.error(`[coolify] POST /deploy for ${req.params.slug} failed:`, (err as Error).message);
     res.status(502).json({ error: 'Failed to trigger deploy via Coolify' });
