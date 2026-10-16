@@ -327,7 +327,12 @@ docker exec traefik cat /acme/acme.json
 
 ### Continuous Deployment
 
-`.github/workflows/deploy.yml` runs on every push to `main` (and on manual dispatch). A read-only **Plan** job shows which services the commit would recreate; the **Deploy** job then waits for approval on the `production` environment before running `scripts/deploy.sh deploy` on the production host.
+`.github/workflows/deploy.yml` runs on every push to `main` (and on manual dispatch). A read-only **Plan** job lists the services the commit would recreate and assigns a tier:
+
+- **low** — only `technitium`, `api`, `frontend`, `docker-proxy`, `ssh-bridge` (or nothing): **Deploy** runs automatically.
+- **high** — anything else (`traefik`, `coolify*`, `step-ca`, … — restarting them interrupts every site): an **Approve** job waits on the `production-approval` environment's required reviewer first.
+
+**Deploy** then runs `scripts/deploy.sh deploy` on the production host with exactly the planned services.
 
 One-time setup:
 
@@ -337,7 +342,7 @@ One-time setup:
    restrict,command="DEPLOY_READONLY=1 /path/to/hermithost/scripts/deploy.sh" ssh-ed25519 AAAA... hermithost-plan
    restrict,command="/path/to/hermithost/scripts/deploy.sh" ssh-ed25519 AAAA... hermithost-deploy
    ```
-   The **plan** key lives on the runner. The **deploy** key is stored only as the `DEPLOY_SSH_KEY` secret of the `production` environment, so it is released to the job only after approval.
+   The **plan** key lives on the runner. The **deploy** key is stored only as the `DEPLOY_SSH_KEY` secret of the `production` environment (deployments restricted to `main`). A separate `production-approval` environment carries the required reviewer for high-impact deploys.
 3. On the runner, SSH aliases in `~/.ssh/config`: `hermithost-plan` (HostName, User, `IdentityFile` = plan key, `IdentitiesOnly yes`) and `hermithost-deploy` (HostName and User only — the workflow supplies the key). Pin the host key in `known_hosts`.
 4. `DEPLOY_SMOKE_URLS` (and, for internal-CA hosts, `DEPLOY_SMOKE_CACERT`) in the production `.env`.
 
