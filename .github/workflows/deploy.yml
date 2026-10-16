@@ -5,8 +5,14 @@ name: Deploy
 # keys restricted (authorized_keys forced command) to scripts/deploy.sh:
 #   - plan:   the runner's on-disk key behind the `hermithost-plan` SSH alias,
 #             forced to DEPLOY_READONLY=1 (plan/status only).
-#   - deploy: DEPLOY_SSH_KEY, a secret of the `production` environment, so it is
-#             only released to the job after a required reviewer approves.
+#   - deploy: DEPLOY_SSH_KEY, a secret of the `production` environment
+#             (main only), released only to the Deploy job below.
+#
+# Tiers: the Plan job classifies the services it would recreate.
+#   - low  (every service in LOW_IMPACT, or none): deploys automatically.
+#   - high (anything else, e.g. traefik, coolify*, step-ca — restarting them
+#          interrupts every site): the Approve job pauses on the
+#          `production-approval` environment until a required reviewer approves.
 #
 # NEVER add a pull_request trigger here, and never target a self-hosted runner
 # from any pull_request workflow — this repository is public.
@@ -32,33 +38,70 @@ defaults:
   run:
     shell: bash   # -eo pipefail, so a failed ssh fails the step despite `| tee`
 
+env:
+  LOW_IMPACT: technitium api frontend docker-proxy ssh-bridge
+
 jobs:
-  # Read-only: shows which services this commit would recreate, before approval.
+  # Read-only: decides which services this commit recreates and how risky that is.
   plan:
     name: Plan
     runs-on: [self-hosted, hermithost-deploy]
     if: github.ref == 'refs/heads/main'
+    outputs:
+      services: ${{ steps.plan.outputs.services }}
+      tier: ${{ steps.plan.outputs.tier }}
     steps:
       - name: Plan deploy
+        id: plan
         env:
           SHA: ${{ github.sha }}
           SERVICES: ${{ inputs.services || 'auto' }}
         run: |
           [[ "$SERVICES" =~ ^[A-Za-z0-9._\ -]+$ ]] || { echo "invalid services input"; exit 1; }
           ssh hermithost-plan "plan $SHA $SERVICES" | tee plan.txt
-          { echo '### Deploy plan'; echo '```'; cat plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          planned="$(sed -n 's/^\[deploy\] .* ; services: //p' plan.txt | head -n1)"
+          [ "$planned" = "(none)" ] && planned=""
+          tier=low
+          for s in $planned; do
+            [[ " $LOW_IMPACT " == *" $s "* ]] || tier=high
+          done
+          echo "services=$planned" >> "$GITHUB_OUTPUT"
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Deploy plan'
+            echo "**Tier:** \`$tier\` — $([ "$tier" = low ] && echo 'deploys automatically' || echo 'waits for approval')"
+            echo '```'; cat plan.txt; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-  # Pauses for the `production` environment's required reviewer.
+  # Only for high-impact plans; pauses for the environment's required reviewer.
+  approve:
+    name: Approve high-impact deploy
+    needs: plan
+    if: needs.plan.outputs.tier == 'high'
+    runs-on: [self-hosted, hermithost-deploy]
+    environment: production-approval
+    steps:
+      - env:
+          SERVICES: ${{ needs.plan.outputs.services }}
+        run: echo "Approved deploy of $SERVICES"
+
   deploy:
     name: Deploy to production
-    needs: plan
+    needs: [plan, approve]
+    # Runs when the plan succeeded and approval was either not needed (skipped
+    # because the tier is low) or granted. A rejected approval stops it.
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      (needs.approve.result == 'success' ||
+       (needs.approve.result == 'skipped' && needs.plan.outputs.tier == 'low'))
     runs-on: [self-hosted, hermithost-deploy]
     environment: production
     steps:
       - name: Deploy
         env:
           SHA: ${{ github.sha }}
-          SERVICES: ${{ inputs.services || 'auto' }}
+          # Deploy exactly what was planned (and tiered); empty → auto (no-op).
+          SERVICES: ${{ needs.plan.outputs.services || 'auto' }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           [[ "$SERVICES" =~ ^[A-Za-z0-9._\ -]+$ ]] || { echo "invalid services input"; exit 1; }
