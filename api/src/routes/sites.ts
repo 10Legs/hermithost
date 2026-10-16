@@ -454,12 +454,58 @@ export async function writeGitRepositoryUrl(appUuid: string, repoUrl: string): P
 // is proxied to the correct container. Non-fatal.
 const TRAEFIK_CONF_DIR = process.env.TRAEFIK_CONF_DIR ?? '/app/traefik-conf.d';
 
-export async function provisionTraefikRoute(
+export type RouteResult = { ok: boolean; reason?: string; upstream?: string; statusCode?: number | null };
+
+// ── Per-site route lock ───────────────────────────────────────────────────────
+// Deploy, PATCH, DELETE and the background reconciler all rewrite the same route
+// file and network endpoint. Serialise them per slug so one can't interleave a
+// disconnect/connect or overwrite a newer route with stale app data.
+const siteRouteLocks = new Map<string, Promise<unknown>>();
+export function withSiteRouteLock<T>(slug: string, fn: () => Promise<T>): Promise<T> {
+  const prev = siteRouteLocks.get(slug) ?? Promise.resolve();
+  const run = prev.catch(() => undefined).then(fn);
+  const tail = run.catch(() => undefined);
+  siteRouteLocks.set(slug, tail);
+  void tail.then(() => { if (siteRouteLocks.get(slug) === tail) siteRouteLocks.delete(slug); });
+  return run;
+}
+
+// Slugs deleted recently. Coolify removes containers asynchronously, so for a
+// while a deleted site still has a running container; the reconciler must not
+// recreate its route in that window.
+const deletedSites = new Map<string, number>();
+const DELETED_SITE_TTL_MS = 30 * 60_000;
+export function markSiteDeleted(slug: string): void { deletedSites.set(slug, Date.now()); }
+export function isSiteRecentlyDeleted(slug: string): boolean {
+  const at = deletedSites.get(slug);
+  if (at === undefined) return false;
+  if (Date.now() - at > DELETED_SITE_TTL_MS) { deletedSites.delete(slug); return false; }
+  return true;
+}
+
+// Docker label filter for a nixpacks/dockerfile app's production container.
+// pullRequestId=0 excludes Coolify preview-deployment containers.
+export function appContainerLabels(slug: string): string[] {
+  return [`coolify.name=${slug}`, 'coolify.pullRequestId=0'];
+}
+
+export function provisionTraefikRoute(
   slug: string,
   domain: string,
   port: number | string = 3000,
-  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt'
-): Promise<{ ok: boolean; reason?: string }> {
+  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt',
+  options: { minCreated?: number } = {},
+): Promise<RouteResult> {
+  return withSiteRouteLock(slug, () => provisionTraefikRouteUnlocked(slug, domain, port, resolver, options));
+}
+
+export async function provisionTraefikRouteUnlocked(
+  slug: string,
+  domain: string,
+  port: number | string = 3000,
+  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt',
+  options: { minCreated?: number } = {},
+): Promise<RouteResult> {
   // H2 Layer 2 — defensive domain safety check before writing yml
   if (domainHasDangerousChars(domain)) {
     const reason = `domain contains dangerous characters: ${JSON.stringify(domain)}`;
@@ -472,26 +518,69 @@ export async function provisionTraefikRoute(
     // Find RUNNING container with coolify.name=slug label.
     // Do NOT use all=true — after a Coolify redeploy the old stopped container still carries
     // the same label and would be returned first, pointing the route at a dead container (502).
-    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`], status: ['running'] }));
-    const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; Created: number }>;
+    const filter = encodeURIComponent(JSON.stringify({ label: appContainerLabels(slug), status: ['running'] }));
+    let containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Id: string; Names: string[]; Created: number }>;
+    // During a deploy, ignore the container being replaced (same as the compose path).
+    if (options.minCreated !== undefined) {
+      containers = containers.filter((c) => Number(c.Created ?? 0) >= options.minCreated!);
+    }
     if (!containers.length) {
       console.warn(`[traefik-route] No running container found for slug ${slug} — route not written`);
       return { ok: false, reason: `no running container for slug ${slug}` };
     }
     containers.sort((a, b) => b.Created - a.Created);
     const containerName = containers[0].Names[0].replace(/^\//, '');
-    // Phase 4 wildcard routing: internal-ca routes must NOT declare certResolver or
-    // tls.domains — wildcard-internal.yml owns the single *.hh cert acquisition via
-    // DNS-01. Individual site routes emit bare `tls: {}` so Traefik matches the
-    // pre-fetched *.hh cert by SNI without triggering a new ACME order per host.
-    // Public-mode (letsencrypt) routes declare their resolver for per-host issuance.
-    // See ADR-007 + security-review-dns01-phase4-wildcard-2026-05-03.md.
-    const tlsBlock =
-      resolver === 'internal-ca'
-        ? `      tls: {}`
-        : `      tls:
+
+    // Attach to the Traefik-facing coolify network under a stable alias, and route
+    // through that alias rather than the volatile Coolify container name. Coolify can
+    // leave the container on the legacy bare `coolify` network only (#127), and every
+    // redeploy changes the container name; the alias survives both once re-asserted.
+    const network = coolifyNetworkName();
+    const alias = stableSiteRouteAlias(slug);
+    await ensureContainerNetworkAlias(containers[0].Id, network, alias);
+
+    // Coolify's ports_exposes may list several ports ("3000,8080"); route to the first.
+    const upstream = `${alias}:${String(port).split(',')[0].trim()}`;
+    writeFileSync(filePath, buildTraefikRouteYaml(slug, domain, upstream, resolver), 'utf8');
+    console.log(`[traefik-route] Route written for ${domain} → ${upstream} (container=${containerName}, resolver=${resolver})`);
+
+    // Only a 502 means the route/network is wrong. An unreachable probe (DNS not
+    // propagated, cert not issued yet, no hairpin NAT) is reported but not fatal.
+    const verification = await verifyRouteNotBadGateway(domain);
+    if (verification.statusCode === 502) {
+      const reason = `${verification.reason}; upstream=${upstream}; container=${containerName}; network=${network}; route=${filePath}`;
+      console.error(`[traefik-route] Verification failed for ${domain}: ${reason}`);
+      return { ok: false, reason, upstream, statusCode: verification.statusCode };
+    }
+    if (!verification.ok) {
+      console.warn(`[traefik-route] ${domain}: ${verification.reason} (route written; not treated as failure)`);
+    }
+    return { ok: true, upstream, statusCode: verification.statusCode };
+  } catch (err) {
+    const reason = (err as Error).message;
+    console.warn(`[traefik-route] Failed to provision route for ${slug}:`, reason);
+    return { ok: false, reason };
+  }
+}
+
+// Phase 4 wildcard routing: internal-ca routes must NOT declare certResolver or
+// tls.domains — wildcard-internal.yml owns the single *.hh cert acquisition via
+// DNS-01. Individual site routes emit bare `tls: {}` so Traefik matches the
+// pre-fetched *.hh cert by SNI without triggering a new ACME order per host.
+// Public-mode (letsencrypt) routes declare their resolver for per-host issuance.
+// See ADR-007 + security-review-dns01-phase4-wildcard-2026-05-03.md.
+export function buildTraefikRouteYaml(
+  slug: string,
+  domain: string,
+  upstream: string,
+  resolver: 'letsencrypt' | 'internal-ca',
+): string {
+  const tlsBlock =
+    resolver === 'internal-ca'
+      ? `      tls: {}`
+      : `      tls:
         certResolver: ${resolver}`;
-    const yml = `http:
+  return `http:
   routers:
     site-${slug}-http:
       rule: "Host(\`${domain}\`)"
@@ -512,16 +601,8 @@ ${tlsBlock}
     site-${slug}:
       loadBalancer:
         servers:
-          - url: "http://${containerName}:${port}"
+          - url: "http://${upstream}"
 `;
-    writeFileSync(filePath, yml, 'utf8');
-    console.log(`[traefik-route] Route written for ${domain} → ${containerName}:${port} (resolver=${resolver})`);
-    return { ok: true };
-  } catch (err) {
-    const reason = (err as Error).message;
-    console.warn(`[traefik-route] Failed to provision route for ${slug}:`, reason);
-    return { ok: false, reason };
-  }
 }
 
 function removeTraefikRoute(slug: string): void {
@@ -533,11 +614,29 @@ function removeTraefikRoute(slug: string): void {
   }
 }
 
-export function stableComposeRouteAlias(slug: string): string {
+// Stable per-site DNS alias on the coolify network. Traefik routes to this name, so a
+// recreated container only needs the alias re-asserted — the route file stays valid.
+export function stableSiteRouteAlias(slug: string): string {
   return `site-${slug}`;
 }
+/** @deprecated use stableSiteRouteAlias — kept for existing callers/tests. */
+export const stableComposeRouteAlias = stableSiteRouteAlias;
 
-async function ensureContainerNetworkAlias(containerId: string, network: string, alias: string): Promise<void> {
+// The Traefik-facing network Coolify app containers must join (project-scoped).
+export function coolifyNetworkName(): string {
+  return process.env.COOLIFY_NETWORK_NAME || 'coolify';
+}
+
+// Picks the compose service HermitHost routes to: first match from the preference
+// list, else the first service declared. Throws on unparsable YAML.
+export function pickPrimaryComposeService(composeRaw: string): { primary: string | undefined; services: string[] } {
+  const parsed = yaml.load(composeRaw) as Record<string, unknown>;
+  const services = Object.keys((parsed?.services ?? {}) as Record<string, unknown>);
+  const primary = COMPOSE_PRIMARY_SERVICE_NAMES.find((name) => services.includes(name)) ?? services[0];
+  return { primary, services };
+}
+
+export async function ensureContainerNetworkAlias(containerId: string, network: string, alias: string): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Docker inspect response shape
   const inspected = await dockerGet(`/containers/${containerId}/json`) as any;
   const networks = inspected?.NetworkSettings?.Networks ?? {};
@@ -581,13 +680,23 @@ async function verifyRouteNotBadGateway(domain: string): Promise<{ ok: boolean; 
 //   4. Detect the exposed port (Traefik label → ExposedPorts → 80 fallback).
 //   5. Attach the primary container to the COOLIFY_NETWORK_NAME network (idempotent).
 //   6. Write site-${slug}.yml — same filename convention so removeTraefikRoute() works.
-export async function provisionTraefikRouteForCompose(
+export function provisionTraefikRouteForCompose(
   client: CoolifyClient,
   app: CoolifyApplication,
   domain: string,
   resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt',
   options: { minCreated?: number } = {},
-): Promise<{ ok: boolean; reason?: string; upstream?: string; statusCode?: number | null }> {
+): Promise<RouteResult> {
+  return withSiteRouteLock(app.uuid, () => provisionTraefikRouteForComposeUnlocked(client, app, domain, resolver, options));
+}
+
+export async function provisionTraefikRouteForComposeUnlocked(
+  client: CoolifyClient,
+  app: CoolifyApplication,
+  domain: string,
+  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt',
+  options: { minCreated?: number } = {},
+): Promise<RouteResult> {
   // H2 Layer 2 — defensive domain safety check before writing yml
   if (domainHasDangerousChars(domain)) {
     const reason = `domain contains dangerous characters: ${JSON.stringify(domain)}`;
@@ -621,10 +730,9 @@ export async function provisionTraefikRouteForCompose(
 
     // ── Step 2: Pick primary service ────────────────────────────────────────────
     let serviceNames: string[] = [];
+    let primaryService: string | undefined;
     try {
-      const parsed = yaml.load(composedApp.docker_compose_raw) as Record<string, unknown>;
-      const services = (parsed?.services ?? {}) as Record<string, unknown>;
-      serviceNames = Object.keys(services);
+      ({ primary: primaryService, services: serviceNames } = pickPrimaryComposeService(composedApp.docker_compose_raw));
     } catch (parseErr) {
       const reason = (parseErr as Error).message;
       console.warn(
@@ -633,9 +741,6 @@ export async function provisionTraefikRouteForCompose(
       );
       return { ok: false, reason: `compose parse error: ${reason}` };
     }
-
-    const primaryService =
-      COMPOSE_PRIMARY_SERVICE_NAMES.find((name) => serviceNames.includes(name)) ?? serviceNames[0];
 
     if (!primaryService) {
       console.warn(`[traefik-route-compose] No services in compose YAML (uuid=${slug}) — route not written`);
@@ -679,7 +784,7 @@ export async function provisionTraefikRouteForCompose(
     const container = containers[0];
     const containerId: string = container.Id as string;
     const containerName: string = (container.Names as string[])[0].replace(/^\//, '');
-    const stableAlias = stableComposeRouteAlias(slug);
+    const stableAlias = stableSiteRouteAlias(slug);
 
     // ── Step 4: Discover port ───────────────────────────────────────────────────
     // Priority: Traefik label on container → image ExposedPorts → 80
@@ -718,42 +823,13 @@ export async function provisionTraefikRouteForCompose(
     }
 
     // ── Step 5: Attach container to coolify network (idempotent) ───────────────
-    const _coolifyNet = process.env.COOLIFY_NETWORK_NAME || 'coolify';
+    const _coolifyNet = coolifyNetworkName();
     console.log(`[traefik-route-compose] Ensuring ${containerName} is on ${_coolifyNet} network as ${stableAlias}...`);
     await ensureContainerNetworkAlias(containerId, _coolifyNet, stableAlias);
     console.log(`[traefik-route-compose] ${containerName} is on ${_coolifyNet} network as ${stableAlias}`);
 
-    // ── Step 6: Write Traefik yml (same structure as provisionTraefikRoute) ─────
-    // Phase 4 wildcard routing: see provisionTraefikRoute() comment above.
-    const tlsBlock =
-      resolver === 'internal-ca'
-        ? `      tls: {}`
-        : `      tls:
-        certResolver: ${resolver}`;
-    const yml = `http:
-  routers:
-    site-${slug}-http:
-      rule: "Host(\`${domain}\`)"
-      entryPoints:
-        - http
-      middlewares:
-        - redirect-to-https
-      service: site-${slug}
-
-    site-${slug}:
-      rule: "Host(\`${domain}\`)"
-      entryPoints:
-        - https
-${tlsBlock}
-      service: site-${slug}
-
-  services:
-    site-${slug}:
-      loadBalancer:
-        servers:
-          - url: "http://${stableAlias}:${port}"
-`;
-    writeFileSync(filePath, yml, 'utf8');
+    // ── Step 6: Write Traefik yml ───────────────────────────────────────────────
+    writeFileSync(filePath, buildTraefikRouteYaml(slug, domain, `${stableAlias}:${port}`, resolver), 'utf8');
     const upstream = `${stableAlias}:${port}`;
     console.log(`[traefik-route-compose] Route written for ${domain} → ${upstream} (resolver=${resolver})`);
 
@@ -1054,7 +1130,8 @@ router.delete('/:slug', async (req: Request, res: Response) => {
     const domain = app ? resolveRouteDomain(app) ?? '' : '';
 
     await client.deleteApplication(req.params.slug);
-    removeTraefikRoute(req.params.slug);
+    markSiteDeleted(req.params.slug);
+    await withSiteRouteLock(req.params.slug, async () => removeTraefikRoute(req.params.slug));
 
     // Non-fatal DNS teardown — delete zone created by provisionDns
     if (domain) {
@@ -1831,10 +1908,11 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
             if (routeResult.ok) break;
             console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${routeResult.reason}`);
           } else {
-            const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`], status: ['running'] }));
+            const filter = encodeURIComponent(JSON.stringify({ label: appContainerLabels(slug), status: ['running'] }));
             const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; State: string }>;
             if (containers.length) {
-              routeResult = await provisionTraefikRoute(slug, domain, port, resolver);
+              // minCreated: wait for the container this deploy creates, not the one it replaces.
+              routeResult = await provisionTraefikRoute(slug, domain, port, resolver, { minCreated: deployStartedAt });
               if (routeResult.ok) break;
               console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${routeResult.reason}`);
             }
