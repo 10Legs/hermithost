@@ -5,8 +5,8 @@ WORKDIR /app
 # better-sqlite3 requires native compilation
 RUN apk add --no-cache python3 make g++
 
-COPY package.json ./
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci
 
 COPY . .
 RUN npm run build
@@ -26,8 +26,8 @@ ENV HOST=0.0.0.0
 RUN apk add --no-cache git python3 make g++
 
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/package.json ./package.json
-RUN npm install --omit=dev
+COPY --from=builder /app/package.json /app/package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

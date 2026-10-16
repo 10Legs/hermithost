@@ -4,8 +4,8 @@ RUN apk add --no-cache git
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci
 
 COPY . .
 RUN npm run build
@@ -21,8 +21,8 @@ ENV PORT=3000
 ENV HOST=0.0.0.0
 
 COPY --from=builder /app/build ./build
-COPY --from=builder /app/package.json ./package.json
-RUN npm install --omit=dev
+COPY --from=builder /app/package.json /app/package-lock.json ./
+RUN npm ci --omit=dev
 
 EXPOSE 3000
 
