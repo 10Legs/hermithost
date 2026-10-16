@@ -323,6 +323,23 @@ docker exec traefik cat /acme/acme.json
 | `bash scripts/restart.sh` | Restart the entire stack |
 | `bash scripts/status.sh` | Display service status and health check results |
 | `bash scripts/rotate-tsig.sh` | Rotate the TSIG secret for secure DNS updates (requires Traefik restart after) |
+| `bash scripts/deploy.sh plan\|deploy <sha> [auto\|<service>...]` | Fast-forward to a commit on `origin/main` and rebuild/recreate only the affected services, then health- and smoke-check. `rollback <prev-sha> <service>...` reverts to the images tagged before the last deploy |
+
+### Continuous Deployment
+
+`.github/workflows/deploy.yml` runs on every push to `main` (and on manual dispatch). A read-only **Plan** job shows which services the commit would recreate; the **Deploy** job then waits for approval on the `production` environment before running `scripts/deploy.sh deploy` on the production host.
+
+One-time setup:
+
+1. A self-hosted runner labelled `hermithost-deploy`, in a runner group restricted to this repository's `deploy.yml` on `main`.
+2. Two SSH keys, each restricted in the production host's `authorized_keys` to the deploy script:
+   ```
+   restrict,command="DEPLOY_READONLY=1 /path/to/hermithost/scripts/deploy.sh" ssh-ed25519 AAAA... hermithost-plan
+   restrict,command="/path/to/hermithost/scripts/deploy.sh" ssh-ed25519 AAAA... hermithost-deploy
+   ```
+   The **plan** key lives on the runner. The **deploy** key is stored only as the `DEPLOY_SSH_KEY` secret of the `production` environment, so it is released to the job only after approval.
+3. On the runner, SSH aliases in `~/.ssh/config`: `hermithost-plan` (HostName, User, `IdentityFile` = plan key, `IdentitiesOnly yes`) and `hermithost-deploy` (HostName and User only — the workflow supplies the key). Pin the host key in `known_hosts`.
+4. `DEPLOY_SMOKE_URLS` (and, for internal-CA hosts, `DEPLOY_SMOKE_CACERT`) in the production `.env`.
 
 ## Environment Variables
 
