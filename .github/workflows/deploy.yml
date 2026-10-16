@@ -1,0 +1,69 @@
+name: Deploy
+
+# Deploys main to the production host. Runs only on the dedicated
+# `hermithost-deploy` self-hosted runner, which reaches the host over SSH with
+# keys restricted (authorized_keys forced command) to scripts/deploy.sh:
+#   - plan:   the runner's on-disk key behind the `hermithost-plan` SSH alias,
+#             forced to DEPLOY_READONLY=1 (plan/status only).
+#   - deploy: DEPLOY_SSH_KEY, a secret of the `production` environment, so it is
+#             only released to the job after a required reviewer approves.
+#
+# NEVER add a pull_request trigger here, and never target a self-hosted runner
+# from any pull_request workflow — this repository is public.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      services:
+        description: 'Services to deploy, space-separated ("auto" = derive from changed files)'
+        required: true
+        default: auto
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash   # -eo pipefail, so a failed ssh fails the step despite `| tee`
+
+jobs:
+  # Read-only: shows which services this commit would recreate, before approval.
+  plan:
+    name: Plan
+    runs-on: [self-hosted, hermithost-deploy]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Plan deploy
+        env:
+          SHA: ${{ github.sha }}
+          SERVICES: ${{ inputs.services || 'auto' }}
+        run: |
+          [[ "$SERVICES" =~ ^[A-Za-z0-9._\ -]+$ ]] || { echo "invalid services input"; exit 1; }
+          ssh hermithost-plan "plan $SHA $SERVICES" | tee plan.txt
+          { echo '### Deploy plan'; echo '```'; cat plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  # Pauses for the `production` environment's required reviewer.
+  deploy:
+    name: Deploy to production
+    needs: plan
+    runs-on: [self-hosted, hermithost-deploy]
+    environment: production
+    steps:
+      - name: Deploy
+        env:
+          SHA: ${{ github.sha }}
+          SERVICES: ${{ inputs.services || 'auto' }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          [[ "$SERVICES" =~ ^[A-Za-z0-9._\ -]+$ ]] || { echo "invalid services input"; exit 1; }
+          key="$RUNNER_TEMP/deploy_key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077; printf '%s\n' "$DEPLOY_SSH_KEY" > "$key")
+          ssh -i "$key" -o IdentitiesOnly=yes hermithost-deploy "deploy $SHA $SERVICES" | tee deploy.txt
+          { echo '### Deploy result'; echo '```'; cat deploy.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
