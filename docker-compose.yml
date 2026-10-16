@@ -438,8 +438,11 @@ services:
         # Static IP so step-ca dns: block and RFC2136_NAMESERVER can reference
         # a stable address rather than a hostname (Docker dns: validates IPs only).
         ipv4_address: 172.28.0.10
+    # tini as PID 1 reaps healthcheck children; the dotnet server does not.
+    init: true
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5380/api/user/login?user=admin&pass=admin > /dev/null 2>&1 || exit 1"]
+      # Exec form (no shell). dig exits non-zero only when the server gives no reply.
+      test: ["CMD", "dig", "+norecurse", "+time=2", "+tries=1", "@127.0.0.1", ".", "SOA"]
       interval: 5s
       retries: 12
       timeout: 3s
