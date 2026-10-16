@@ -362,6 +362,8 @@ Operator-configurable variables in `.env`. For the complete list, see `.env.temp
 | `TRAEFIK_HTTPS_PORT` | Traefik HTTPS port (Internet mode) | `8443` |
 | `STEP_CA_PASSWORD` | step-ca (LAN mode) password | *(auto-generated)* |
 | `TECHNITIUM_URL` | Technitium API endpoint | `http://technitium:5380` |
+| `HERMITHOST_NET_SUBNET` | Docker subnet for `hermithost-net`; must not overlap another network on the host (one per instance) | *(setup.sh picks a free `172.28.N.0/24`; compose default `172.28.0.0/24`)* |
+| `TECHNITIUM_IP` | Technitium's pinned address inside `HERMITHOST_NET_SUBNET` | *(`.10` of the subnet)* |
 
 ## Architecture Reference
 

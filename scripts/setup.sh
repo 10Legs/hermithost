@@ -250,6 +250,40 @@ else
 fi
 echo "[setup] Instance name set to '${_NAME_INPUT}'."
 
+# ── Per-instance hermithost-net subnet (#125) ────────────────────────────────
+# Two instances on one host must not share a subnet: compose fails to (re)create
+# the second network ("Pool overlaps"). Keep whatever this instance already uses;
+# otherwise pick the first free 172.28.N.0/24. Never overwrites a value in .env.
+# shellcheck source=lib/net-subnet.sh
+source "$SCRIPT_DIR/lib/net-subnet.sh"
+env_value() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d'=' -f2- | tr -d '[:space:]"' || true; }
+upsert_if_empty() {
+  local key="$1" value="$2"
+  if [ -n "$(env_value "$key")" ]; then
+    echo "[setup] ${key} already set — skipping."
+  elif grep -qE "^${key}=" "$ENV_FILE"; then
+    sed_i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"; echo "[setup] Set ${key}=${value}."
+  else
+    echo "${key}=${value}" >> "$ENV_FILE"; echo "[setup] Set ${key}=${value}."
+  fi
+}
+if command -v docker >/dev/null 2>&1; then
+  _OWN_NET="${_NAME_INPUT}_hermithost-net"
+  _SUBNET="$(env_value HERMITHOST_NET_SUBNET)"
+  if [ -z "$_SUBNET" ]; then
+    _SUBNET="$(docker network inspect "$_OWN_NET" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"
+    [ -n "$_SUBNET" ] && echo "[setup] Keeping existing ${_OWN_NET} subnet ${_SUBNET}."
+  fi
+  if [ -z "$_SUBNET" ]; then
+    _SUBNET="$(pick_free_subnet)" || { echo "[setup] ERROR: no free 172.28.N.0/24 subnet; set HERMITHOST_NET_SUBNET in .env manually." >&2; exit 1; }
+    echo "[setup] Picked free subnet ${_SUBNET} for hermithost-net."
+  fi
+  upsert_if_empty HERMITHOST_NET_SUBNET "$_SUBNET"
+  upsert_if_empty TECHNITIUM_IP "$(technitium_ip_for "$(env_value HERMITHOST_NET_SUBNET)")"
+else
+  echo "[setup] docker not found — leaving HERMITHOST_NET_SUBNET/TECHNITIUM_IP at compose defaults."
+fi
+
 # ── Generate Coolify internal secrets ────────────────────────────────────────
 echo "[setup] Checking Coolify secrets..."
 set_if_empty "COOLIFY_APP_ID"            "$(openssl rand -hex 16)"

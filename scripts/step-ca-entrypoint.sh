@@ -5,7 +5,7 @@
 # The Compose dns: block is only written at container creation. On a
 # stack restart (without --force-recreate) the container preserves its
 # previous resolv.conf (127.0.0.11 — Docker's embedded resolver) instead
-# of using 172.28.0.10 (Technitium). This wrapper enforces the correct
+# of using Technitium (TECHNITIUM_DNS_IP). This wrapper enforces the correct
 # nameserver on every container start, regardless of how the container
 # was created.
 #
@@ -16,7 +16,7 @@
 
 set -e
 
-# Technitium static IP (matches ipv4_address in docker-compose.yml)
+# Technitium static IP (compose passes TECHNITIUM_IP; matches its ipv4_address)
 TECHNITIUM_DNS="${TECHNITIUM_DNS_IP:-172.28.0.10}"
 
 # Write resolv.conf. Runs before step-ca starts, so DNS is correct from
