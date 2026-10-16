@@ -15,12 +15,8 @@ import { startStatsIngester } from './services/statsIngester';
 import { startLiveStats } from './services/liveStats';
 import { readNsHostname, readNsServerIp } from './routes/config';
 import { createTechnitiumClient } from './services/technitium';
-import { ensureNsGlueRecords, cleanBadNsRecords, provisionTraefikRoute, provisionTraefikRouteForCompose } from './routes/sites';
-import { createCoolifyClient } from './services/coolify';
-import { resolveRouteDomain } from './services/mapper';
-import { existsSync, readFileSync, unlinkSync } from 'fs';
-import * as path from 'path';
-import { dockerGet } from './services/docker';
+import { ensureNsGlueRecords, cleanBadNsRecords } from './routes/sites';
+import { startRouteReconciler } from './services/routeReconciler';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -117,113 +113,9 @@ app.listen(PORT, () => {
     await cleanBadNsRecords(client);
   })();
 
-  // Non-blocking startup route sync — regenerates any missing Traefik route files
-  // for active Coolify applications. Route files are gitignored (traefik/conf.d/site-*.yml)
-  // and are lost on fresh clones or after sanitization. This ensures sites remain
-  // accessible without requiring a manual PATCH to each site.
-  (async () => {
-    try {
-      const coolifyClient = createCoolifyClient();
-      if (!coolifyClient) {
-        console.warn('[startup-sync] Coolify client not available — skipping route sync');
-        return;
-      }
-      const confDir = process.env.TRAEFIK_CONF_DIR ?? '/app/traefik-conf.d';
-      const { readNetworkMode } = await import('./routes/config');
-      const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
-
-      let applications: Awaited<ReturnType<typeof coolifyClient.listApplications>>;
-      try {
-        applications = await coolifyClient.listApplications();
-      } catch (listErr) {
-        console.warn('[startup-sync] Failed to list applications from Coolify:', (listErr as Error).message);
-        return;
-      }
-
-      // Helper: parse the backend container hostname from an existing route file.
-      // Looks for a line matching `- url: "http://<hostname>:<port>"` and returns
-      // the hostname portion (e.g. `frontend-p6zgia4ehgg4ddtqn58oralo-202242845078`).
-      function parseContainerHostnameFromRouteFile(filePath: string): string | null {
-        try {
-          const content = readFileSync(filePath, 'utf8');
-          const match = content.match(/- url:\s*"http:\/\/([^:/"]+):/);
-          return match ? match[1] : null;
-        } catch {
-          return null;
-        }
-      }
-
-      // Helper: returns true if the named Docker container is in running state.
-      async function isContainerRunning(containerName: string): Promise<boolean> {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const info = await dockerGet(`/containers/${encodeURIComponent(containerName)}/json`) as any;
-          return info?.State?.Status === 'running';
-        } catch {
-          // 404 = container does not exist; any other error → treat as not running
-          return false;
-        }
-      }
-
-      for (const app of applications) {
-        const slug = app.uuid;
-        const routeFile = path.join(confDir, `site-${slug}.yml`);
-
-        // If the route file exists, verify the container it points at is still running.
-        // If the container is dead or missing, delete the stale file so the re-provision
-        // path below recreates it pointing at the current running container.
-        if (existsSync(routeFile)) {
-          const hostname = parseContainerHostnameFromRouteFile(routeFile);
-          if (hostname) {
-            const running = await isContainerRunning(hostname);
-            if (!running) {
-              const domain = resolveRouteDomain(app) ?? slug;
-              console.log(
-                `[startup-sync] stale route for ${domain} (container ${hostname} not running) — reprovisioning`,
-              );
-              try { unlinkSync(routeFile); } catch { /* already gone */ }
-              // Fall through to re-provision below
-            } else {
-              // Container is alive — route is valid, skip
-              continue;
-            }
-          } else {
-            // Could not parse a container name from the file — skip to be safe
-            continue;
-          }
-        }
-
-        const domain = resolveRouteDomain(app);
-        if (!domain) {
-          console.warn(`[startup-sync] No domain for app ${slug} — skipping`);
-          continue;
-        }
-
-        try {
-          let result: { ok: boolean; reason?: string };
-          if (app.build_pack === 'dockercompose') {
-            if (!app.docker_compose_raw) {
-              console.log(`[startup-sync] skipping ${slug}: docker_compose_raw not yet populated`);
-              continue;
-            }
-            result = await provisionTraefikRouteForCompose(createCoolifyClient()!, app, domain, resolver);
-          } else {
-            const port = (app as any).ports_exposes ?? 3000;
-            result = await provisionTraefikRoute(slug, domain, port, resolver);
-          }
-          if (result.ok) {
-            console.log(`[startup-sync] regenerated missing route for ${domain}`);
-          } else {
-            console.warn(`[startup-sync] failed to regenerate route for ${domain}: ${result.reason}`);
-          }
-        } catch (routeErr) {
-          console.warn(`[startup-sync] error regenerating route for ${slug}:`, (routeErr as Error).message);
-        }
-      }
-    } catch (err) {
-      console.warn('[startup-sync] Unexpected error during route sync:', (err as Error).message);
-    }
-  })();
+  // Route reconciler — heals missing/stale Traefik routes and coolify-network drift
+  // (#126, #127) at startup and periodically, without a manual deploy/PATCH.
+  startRouteReconciler();
 });
 
 export default app;
