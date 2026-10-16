@@ -40,6 +40,19 @@ COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-hermithost}"
 _COOLIFY_NET="${COMPOSE_PROJECT_NAME:-hermithost}-coolify"
 docker network inspect "$_COOLIFY_NET" >/dev/null 2>&1 || docker network create "$_COOLIFY_NET"
 
+# ── hermithost-net subnet preflight (#125) ───────────────────────────────────
+# If this instance's network has to be (re)created, make sure its subnet is free.
+# Otherwise compose fails half-way with "Pool overlaps with other one on this
+# address space" and leaves the instance down (2026-07-13 outage).
+# shellcheck source=lib/net-subnet.sh
+source "$SCRIPT_DIR/lib/net-subnet.sh"
+if [ -f "$ROOT/.env" ]; then
+  HERMITHOST_NET_SUBNET="$(grep -E '^HERMITHOST_NET_SUBNET=' "$ROOT/.env" | tail -n1 | cut -d'=' -f2- | tr -d '[:space:]"' || true)"
+  TECHNITIUM_IP="$(grep -E '^TECHNITIUM_IP=' "$ROOT/.env" | tail -n1 | cut -d'=' -f2- | tr -d '[:space:]"' || true)"
+fi
+hermithost_net_preflight "${COMPOSE_PROJECT_NAME}_hermithost-net" \
+  "${HERMITHOST_NET_SUBNET:-$HH_DEFAULT_SUBNET}" "${TECHNITIUM_IP:-172.28.0.10}" "[start]" || exit 1
+
 # ── Race condition guard (Linux only; gracefully skipped on macOS) ────────────
 if command -v flock >/dev/null 2>&1; then
   LOCK_FILE="/var/lock/hermithost-${COMPOSE_PROJECT_NAME}.lock"
