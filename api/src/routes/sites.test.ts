@@ -111,6 +111,38 @@ describe('provisionTraefikRoute (nixpacks) — #127', () => {
     expect(dockerNetworkConnect).not.toHaveBeenCalled();
   });
 
+  it('during a deploy, ignores the container being replaced (minCreated)', async () => {
+    mockContainer({ [NET]: { Aliases: ['site-lv44'] } });
+    vi.mocked(dockerGet).mockImplementation(async (p: string) => {
+      if (p.startsWith('/containers/json')) return [{ Id: 'old', Names: ['/lv44-100'], Created: 100 }];
+      throw new Error(`unexpected ${p}`);
+    });
+    const out = await provisionTraefikRoute('lv44', 'pf.example.com', 3000, 'letsencrypt', { minCreated: 150 });
+    expect(out).toMatchObject({ ok: false, reason: 'no running container for slug lv44' });
+    expect(dockerNetworkConnect).not.toHaveBeenCalled();
+  });
+
+  it('filters to production containers (excludes Coolify previews)', async () => {
+    mockContainer({ [NET]: { Aliases: ['site-lv44'] } });
+    await provisionTraefikRoute('lv44', 'pf.example.com', 3000, 'letsencrypt');
+    const listCall = vi.mocked(dockerGet).mock.calls.find(([p]) => (p as string).startsWith('/containers/json'))![0] as string;
+    expect(JSON.parse(decodeURIComponent(listCall.split('filters=')[1])).label)
+      .toEqual(['coolify.name=lv44', 'coolify.pullRequestId=0']);
+  });
+
+  it('routes to the first port when ports_exposes lists several', async () => {
+    mockContainer({ [NET]: { Aliases: ['site-lv44'] } });
+    const out = await provisionTraefikRoute('lv44', 'pf.example.com', '3000,8080', 'letsencrypt');
+    expect(out.upstream).toBe('site-lv44:3000');
+  });
+
+  it('treats an unreachable probe (DNS/cert not ready) as a warning, not a failure', async () => {
+    mockContainer({ [NET]: { Aliases: ['site-lv44'] } });
+    vi.mocked(probeSite).mockResolvedValue({ http: { reachable: false, statusCode: null } } as never);
+    const out = await provisionTraefikRoute('lv44', 'pf.example.com', 3000, 'letsencrypt');
+    expect(out).toMatchObject({ ok: true, upstream: 'site-lv44:3000' });
+  });
+
   it('fails when the route still returns 502 after provisioning', async () => {
     mockContainer({ [NET]: { Aliases: ['site-lv44'] } });
     vi.mocked(probeSite).mockResolvedValue({ http: { reachable: true, statusCode: 502 } } as never);

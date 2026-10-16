@@ -454,12 +454,58 @@ export async function writeGitRepositoryUrl(appUuid: string, repoUrl: string): P
 // is proxied to the correct container. Non-fatal.
 const TRAEFIK_CONF_DIR = process.env.TRAEFIK_CONF_DIR ?? '/app/traefik-conf.d';
 
-export async function provisionTraefikRoute(
+export type RouteResult = { ok: boolean; reason?: string; upstream?: string; statusCode?: number | null };
+
+// ── Per-site route lock ───────────────────────────────────────────────────────
+// Deploy, PATCH, DELETE and the background reconciler all rewrite the same route
+// file and network endpoint. Serialise them per slug so one can't interleave a
+// disconnect/connect or overwrite a newer route with stale app data.
+const siteRouteLocks = new Map<string, Promise<unknown>>();
+export function withSiteRouteLock<T>(slug: string, fn: () => Promise<T>): Promise<T> {
+  const prev = siteRouteLocks.get(slug) ?? Promise.resolve();
+  const run = prev.catch(() => undefined).then(fn);
+  const tail = run.catch(() => undefined);
+  siteRouteLocks.set(slug, tail);
+  void tail.then(() => { if (siteRouteLocks.get(slug) === tail) siteRouteLocks.delete(slug); });
+  return run;
+}
+
+// Slugs deleted recently. Coolify removes containers asynchronously, so for a
+// while a deleted site still has a running container; the reconciler must not
+// recreate its route in that window.
+const deletedSites = new Map<string, number>();
+const DELETED_SITE_TTL_MS = 30 * 60_000;
+export function markSiteDeleted(slug: string): void { deletedSites.set(slug, Date.now()); }
+export function isSiteRecentlyDeleted(slug: string): boolean {
+  const at = deletedSites.get(slug);
+  if (at === undefined) return false;
+  if (Date.now() - at > DELETED_SITE_TTL_MS) { deletedSites.delete(slug); return false; }
+  return true;
+}
+
+// Docker label filter for a nixpacks/dockerfile app's production container.
+// pullRequestId=0 excludes Coolify preview-deployment containers.
+export function appContainerLabels(slug: string): string[] {
+  return [`coolify.name=${slug}`, 'coolify.pullRequestId=0'];
+}
+
+export function provisionTraefikRoute(
   slug: string,
   domain: string,
   port: number | string = 3000,
-  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt'
-): Promise<{ ok: boolean; reason?: string; upstream?: string; statusCode?: number | null }> {
+  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt',
+  options: { minCreated?: number } = {},
+): Promise<RouteResult> {
+  return withSiteRouteLock(slug, () => provisionTraefikRouteUnlocked(slug, domain, port, resolver, options));
+}
+
+export async function provisionTraefikRouteUnlocked(
+  slug: string,
+  domain: string,
+  port: number | string = 3000,
+  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt',
+  options: { minCreated?: number } = {},
+): Promise<RouteResult> {
   // H2 Layer 2 — defensive domain safety check before writing yml
   if (domainHasDangerousChars(domain)) {
     const reason = `domain contains dangerous characters: ${JSON.stringify(domain)}`;
@@ -472,8 +518,12 @@ export async function provisionTraefikRoute(
     // Find RUNNING container with coolify.name=slug label.
     // Do NOT use all=true — after a Coolify redeploy the old stopped container still carries
     // the same label and would be returned first, pointing the route at a dead container (502).
-    const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`], status: ['running'] }));
-    const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Id: string; Names: string[]; Created: number }>;
+    const filter = encodeURIComponent(JSON.stringify({ label: appContainerLabels(slug), status: ['running'] }));
+    let containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Id: string; Names: string[]; Created: number }>;
+    // During a deploy, ignore the container being replaced (same as the compose path).
+    if (options.minCreated !== undefined) {
+      containers = containers.filter((c) => Number(c.Created ?? 0) >= options.minCreated!);
+    }
     if (!containers.length) {
       console.warn(`[traefik-route] No running container found for slug ${slug} — route not written`);
       return { ok: false, reason: `no running container for slug ${slug}` };
@@ -489,15 +539,21 @@ export async function provisionTraefikRoute(
     const alias = stableSiteRouteAlias(slug);
     await ensureContainerNetworkAlias(containers[0].Id, network, alias);
 
-    const upstream = `${alias}:${port}`;
+    // Coolify's ports_exposes may list several ports ("3000,8080"); route to the first.
+    const upstream = `${alias}:${String(port).split(',')[0].trim()}`;
     writeFileSync(filePath, buildTraefikRouteYaml(slug, domain, upstream, resolver), 'utf8');
     console.log(`[traefik-route] Route written for ${domain} → ${upstream} (container=${containerName}, resolver=${resolver})`);
 
+    // Only a 502 means the route/network is wrong. An unreachable probe (DNS not
+    // propagated, cert not issued yet, no hairpin NAT) is reported but not fatal.
     const verification = await verifyRouteNotBadGateway(domain);
-    if (!verification.ok) {
+    if (verification.statusCode === 502) {
       const reason = `${verification.reason}; upstream=${upstream}; container=${containerName}; network=${network}; route=${filePath}`;
       console.error(`[traefik-route] Verification failed for ${domain}: ${reason}`);
       return { ok: false, reason, upstream, statusCode: verification.statusCode };
+    }
+    if (!verification.ok) {
+      console.warn(`[traefik-route] ${domain}: ${verification.reason} (route written; not treated as failure)`);
     }
     return { ok: true, upstream, statusCode: verification.statusCode };
   } catch (err) {
@@ -624,13 +680,23 @@ async function verifyRouteNotBadGateway(domain: string): Promise<{ ok: boolean; 
 //   4. Detect the exposed port (Traefik label → ExposedPorts → 80 fallback).
 //   5. Attach the primary container to the COOLIFY_NETWORK_NAME network (idempotent).
 //   6. Write site-${slug}.yml — same filename convention so removeTraefikRoute() works.
-export async function provisionTraefikRouteForCompose(
+export function provisionTraefikRouteForCompose(
   client: CoolifyClient,
   app: CoolifyApplication,
   domain: string,
   resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt',
   options: { minCreated?: number } = {},
-): Promise<{ ok: boolean; reason?: string; upstream?: string; statusCode?: number | null }> {
+): Promise<RouteResult> {
+  return withSiteRouteLock(app.uuid, () => provisionTraefikRouteForComposeUnlocked(client, app, domain, resolver, options));
+}
+
+export async function provisionTraefikRouteForComposeUnlocked(
+  client: CoolifyClient,
+  app: CoolifyApplication,
+  domain: string,
+  resolver: 'letsencrypt' | 'internal-ca' = 'letsencrypt',
+  options: { minCreated?: number } = {},
+): Promise<RouteResult> {
   // H2 Layer 2 — defensive domain safety check before writing yml
   if (domainHasDangerousChars(domain)) {
     const reason = `domain contains dangerous characters: ${JSON.stringify(domain)}`;
@@ -1064,7 +1130,8 @@ router.delete('/:slug', async (req: Request, res: Response) => {
     const domain = app ? resolveRouteDomain(app) ?? '' : '';
 
     await client.deleteApplication(req.params.slug);
-    removeTraefikRoute(req.params.slug);
+    markSiteDeleted(req.params.slug);
+    await withSiteRouteLock(req.params.slug, async () => removeTraefikRoute(req.params.slug));
 
     // Non-fatal DNS teardown — delete zone created by provisionDns
     if (domain) {
@@ -1841,10 +1908,11 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
             if (routeResult.ok) break;
             console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${routeResult.reason}`);
           } else {
-            const filter = encodeURIComponent(JSON.stringify({ label: [`coolify.name=${slug}`], status: ['running'] }));
+            const filter = encodeURIComponent(JSON.stringify({ label: appContainerLabels(slug), status: ['running'] }));
             const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; State: string }>;
             if (containers.length) {
-              routeResult = await provisionTraefikRoute(slug, domain, port, resolver);
+              // minCreated: wait for the container this deploy creates, not the one it replaces.
+              routeResult = await provisionTraefikRoute(slug, domain, port, resolver, { minCreated: deployStartedAt });
               if (routeResult.ok) break;
               console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${routeResult.reason}`);
             }

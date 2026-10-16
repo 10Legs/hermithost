@@ -21,7 +21,8 @@ CONF="$(mktemp -d)"
 PASS=0; FAIL=0
 
 cleanup_docker() {
-  docker rm -f ${P}-traefik ${P}-docker-proxy ${P}-nixsite01-a ${P}-nixsite01-b app-cmpsite01-1 app-cmpsite01-2 >/dev/null 2>&1 || true
+  docker rm -f ${P}-traefik ${P}-docker-proxy ${P}-nixsite01-a ${P}-nixsite01-b ${P}-nixsite01-pr \
+    app-cmpsite01-1 app-cmpsite01-2 >/dev/null 2>&1 || true
   docker network rm ${P}-coolify ${P}-legacy ${P}-ctl >/dev/null 2>&1 || true
 }
 trap 'cleanup_docker; rm -rf "$CONF"' EXIT
@@ -56,7 +57,8 @@ TRAEFIK_IP="$(docker inspect -f "{{(index .NetworkSettings.Networks \"${P}-cooli
 
 nixsite() { # nixsite <suffix>
   docker run -d --name ${P}-nixsite01-$1 --network ${P}-legacy \
-    --label coolify.name=nixsite01 --label coolify.managed=true nginx:alpine >/dev/null
+    --label coolify.name=nixsite01 --label coolify.managed=true --label coolify.pullRequestId=0 \
+    nginx:alpine >/dev/null
 }
 cmpsite() { # cmpsite <n> [extra docker args]
   local n="$1"; shift
@@ -128,7 +130,24 @@ OUT="$(reconcile)"
 check "cmpsite01 outcome" healed "$(echo "$OUT" | sed -n 's/^cmpsite01=//p')"
 check "compose site → 200" 200 "$(waitcode cmpsite01.test 200)"
 
-echo "▶ 6. stopped site is left alone"
+echo "▶ 6. route left with a stale host (e.g. pre-PATCH domain) is rewritten"
+docker run --rm -v "$CONF:/conf" -v "$ROOT:/w:ro" node:22 node -e "
+  const yml = require('/w/api/dist/routes/sites.js').buildTraefikRouteYaml('nixsite01','old-name.test','site-nixsite01:80','internal-ca');
+  require('fs').writeFileSync('/conf/site-nixsite01.yml', yml);" >/dev/null
+check "nixpacks site with stale host → 404" 404 "$(waitcode nixsite01.test 404)"
+OUT="$(reconcile)"
+check "nixsite01 outcome" healed "$(echo "$OUT" | sed -n 's/^nixsite01=//p')"
+check "nixpacks site → 200" 200 "$(waitcode nixsite01.test 200)"
+
+echo "▶ 7. a preview (PR) container is never picked"
+docker run -d --name ${P}-nixsite01-pr --network ${P}-legacy --label coolify.name=nixsite01 \
+  --label coolify.managed=true --label coolify.pullRequestId=7 nginx:alpine >/dev/null
+OUT="$(reconcile)"
+check "nixsite01 outcome" healthy "$(echo "$OUT" | sed -n 's/^nixsite01=//p')"
+check "preview not attached to ${P}-coolify" no \
+  "$(docker inspect -f "{{if index .NetworkSettings.Networks \"${P}-coolify\"}}yes{{else}}no{{end}}" ${P}-nixsite01-pr)"
+
+echo "▶ 8. stopped site is left alone"
 docker stop ${P}-nixsite01-b >/dev/null
 OUT="$(reconcile)"
 check "nixsite01 outcome" skipped "$(echo "$OUT" | sed -n 's/^nixsite01=//p')"
