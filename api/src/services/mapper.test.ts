@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mapSite, formatSiteUrl, resolveRouteDomain } from './mapper';
+import { mapSite, formatSiteUrl, resolveRouteDomain, mapAppStatus } from './mapper';
 import type { CoolifyApplication } from './coolify';
 
 // Minimal CoolifyApplication fixture for mapper tests
@@ -196,5 +196,31 @@ describe('resolveRouteDomain — Phase C .hh routing fix', () => {
       docker_compose_domains: '{"web":{"domain":"example.hh"}}',
     });
     expect(resolveRouteDomain(app)).toBe('example.hh');
+  });
+});
+
+describe('mapAppStatus — Coolify v4 "<state>:<health>" statuses', () => {
+  it.each([
+    ['running:healthy', 'healthy'],
+    ['running:unknown', 'healthy'],   // container up, no healthcheck defined
+    ['running:unhealthy', 'warning'],
+    ['degraded:unhealthy', 'warning'],
+    ['exited:unhealthy', 'warning'],
+    ['restarting:unknown', 'pending'],
+    ['starting', 'pending'],
+    ['', 'pending'],
+    // legacy bare states
+    ['running', 'healthy'],
+    ['exited', 'warning'],
+    ['stopped', 'warning'],
+    ['error', 'error'],
+  ] as const)('%s → %s', (raw, expected) => {
+    expect(mapAppStatus(raw)).toBe(expected);
+  });
+
+  it('a live v4 site maps to healthy with a reachable stub HTTP status (no probe)', () => {
+    const site = mapSite(makeApp({ status: 'running:healthy' }), [], null);
+    expect(site.overallStatus).toBe('healthy');
+    expect(site.http.reachable).toBe(true);
   });
 });
