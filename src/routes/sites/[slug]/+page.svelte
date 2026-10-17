@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import type { PageData } from './$types';
 	import { formatRelativeTime, formatDuration } from '$lib/data';
-	import type { DnsRecord, Deploy, Site, EnvVar, ComposeEnvVar } from '$lib/types';
+	import type { DnsRecord, Deploy, Site, EnvVar, ComposeEnvVar, DeployToken } from '$lib/types';
 
 	export let data: PageData;
 
@@ -156,6 +156,118 @@
 			setTimeout(() => { authSaveState = 'idle'; authSaveMessage = ''; }, 6000);
 		}
 	}
+
+	// Build setting: Coolify "include source commit in build" (SOURCE_COMMIT build arg)
+	let settingsIncludeSourceCommit: boolean = data.site.include_source_commit ?? false;
+	let buildSaveState: 'idle' | 'saving' | 'saved' | 'error' = 'idle';
+	let buildSaveMessage = '';
+
+	async function saveBuildSettings(): Promise<void> {
+		buildSaveState = 'saving';
+		buildSaveMessage = '';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ include_source_commit: settingsIncludeSourceCommit })
+			});
+			if (!res.ok) {
+				const b: { error?: string } = await res.json().catch(() => ({}));
+				buildSaveState = 'error';
+				buildSaveMessage = b.error ?? `Save failed (${res.status})`;
+				setTimeout(() => { buildSaveState = 'idle'; buildSaveMessage = ''; }, 6000);
+				return;
+			}
+			const updated: Site = await res.json();
+			data = { ...data, site: updated };
+			settingsIncludeSourceCommit = updated.include_source_commit ?? settingsIncludeSourceCommit;
+			buildSaveState = 'saved';
+			buildSaveMessage = 'Saved — applies from the next deploy';
+			setTimeout(() => { buildSaveState = 'idle'; buildSaveMessage = ''; }, 3000);
+		} catch {
+			buildSaveState = 'error';
+			buildSaveMessage = 'Network error — could not save';
+			setTimeout(() => { buildSaveState = 'idle'; buildSaveMessage = ''; }, 6000);
+		}
+	}
+
+	// Deploy tokens: per-site bearer tokens for CI (deploy + status only)
+	let deployTokens: DeployToken[] = [];
+	let deployTokensLoaded = false;
+	let newTokenName = '';
+	let newTokenValue = '';
+	let newTokenCopied = false;
+	let tokenState: 'idle' | 'working' | 'error' = 'idle';
+	let tokenError = '';
+	let revokeConfirmId: string | null = null;
+
+	async function loadDeployTokens(): Promise<void> {
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/deploy-tokens`);
+			if (res.ok) deployTokens = await res.json();
+		} catch {
+			// silently fail — list stays as-is
+		} finally {
+			deployTokensLoaded = true;
+		}
+	}
+
+	async function createDeployToken(): Promise<void> {
+		tokenState = 'working';
+		tokenError = '';
+		newTokenValue = '';
+		newTokenCopied = false;
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/deploy-tokens`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ name: newTokenName.trim() || undefined })
+			});
+			const b: DeployToken & { token?: string; error?: string } = await res.json().catch(() => ({}));
+			if (!res.ok || !b.token) {
+				tokenState = 'error';
+				tokenError = b.error ?? `Create failed (${res.status})`;
+				return;
+			}
+			newTokenValue = b.token;
+			newTokenName = '';
+			tokenState = 'idle';
+			await loadDeployTokens();
+		} catch {
+			tokenState = 'error';
+			tokenError = 'Network error — could not create token';
+		}
+	}
+
+	async function revokeToken(id: string): Promise<void> {
+		tokenState = 'working';
+		tokenError = '';
+		try {
+			const res = await fetch(`/api/sites/${site.slug}/deploy-tokens/${id}`, { method: 'DELETE' });
+			if (!res.ok && res.status !== 404) {
+				tokenState = 'error';
+				tokenError = `Revoke failed (${res.status})`;
+				return;
+			}
+			revokeConfirmId = null;
+			tokenState = 'idle';
+			await loadDeployTokens();
+		} catch {
+			tokenState = 'error';
+			tokenError = 'Network error — could not revoke token';
+		}
+	}
+
+	async function copyNewToken(): Promise<void> {
+		try {
+			await navigator.clipboard.writeText(newTokenValue);
+			newTokenCopied = true;
+		} catch {
+			// clipboard unavailable — the token stays visible to copy by hand
+		}
+	}
+
+	$: if (activeTab === 'settings' && !deployTokensLoaded) loadDeployTokens();
 
 	async function triggerDeploy(): Promise<void> {
 		deployState = 'loading';
@@ -1802,6 +1914,86 @@
 					</div>
 				</div>
 
+				<div class="settings-section">
+					<h2 class="section-title">Build</h2>
+					<div class="settings-form">
+						<div class="form-field">
+							<label class="checkbox-label" for="cfg-source-commit">
+								<input id="cfg-source-commit" type="checkbox" bind:checked={settingsIncludeSourceCommit} />
+								Include source commit in build
+							</label>
+							<span class="field-hint">Passes <code>SOURCE_COMMIT</code> (the deployed git SHA) to the build so the app can report its version. Busts the Docker layer cache on every commit.</span>
+						</div>
+						<div class="form-actions">
+							<button
+								class="btn btn-primary btn-sm"
+								disabled={buildSaveState === 'saving' || settingsIncludeSourceCommit === (site.include_source_commit ?? false)}
+								on:click={saveBuildSettings}
+							>
+								{buildSaveState === 'saving' ? 'Saving…' : 'Save'}
+							</button>
+							{#if buildSaveMessage}
+								<span
+									class="save-feedback"
+									class:save-feedback-success={buildSaveState === 'saved'}
+									class:save-feedback-error={buildSaveState === 'error'}
+								>{buildSaveMessage}</span>
+							{/if}
+						</div>
+					</div>
+				</div>
+
+				<div class="settings-section">
+					<h2 class="section-title">Deploy Tokens</h2>
+					<div class="settings-form">
+						<p class="deploy-key-hint text-secondary">For CI: a token can deploy <strong>this site only</strong> and read its status and deploy logs. Send it as <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+						{#if newTokenValue}
+							<div class="form-field">
+								<p class="field-label">New token — copy it now, it won't be shown again</p>
+								<div class="deploy-key-block">
+									<code class="deploy-key-text mono" data-testid="new-deploy-token">{newTokenValue}</code>
+								</div>
+								<div class="form-actions" style="margin-top:8px">
+									<button class="btn btn-ghost btn-sm" on:click={copyNewToken}>{newTokenCopied ? 'Copied!' : 'Copy Token'}</button>
+									<button class="btn btn-ghost btn-sm" on:click={() => { newTokenValue = ''; }}>Done</button>
+								</div>
+							</div>
+						{/if}
+						{#if deployTokens.length > 0}
+							<ul class="token-list">
+								{#each deployTokens as t (t.id)}
+									<li class="token-row">
+										<div>
+											<div class="mono">{t.name}</div>
+											<div class="text-secondary token-meta">Created {formatRelativeTime(t.createdAt)} · {t.lastUsedAt ? `last used ${formatRelativeTime(t.lastUsedAt)}` : 'never used'}</div>
+										</div>
+										{#if revokeConfirmId === t.id}
+											<div class="delete-site-confirm">
+												<button class="btn btn-danger btn-sm" disabled={tokenState === 'working'} on:click={() => revokeToken(t.id)}>Yes, revoke</button>
+												<button class="btn btn-ghost btn-sm" on:click={() => { revokeConfirmId = null; }}>Cancel</button>
+											</div>
+										{:else}
+											<button class="btn btn-danger-outline btn-sm" on:click={() => { revokeConfirmId = t.id; }}>Revoke…</button>
+										{/if}
+									</li>
+								{/each}
+							</ul>
+						{:else if deployTokensLoaded}
+							<p class="text-secondary" style="font-size:12px">No deploy tokens.</p>
+						{/if}
+						<div class="form-field">
+							<label for="cfg-token-name">Token name</label>
+							<input id="cfg-token-name" bind:value={newTokenName} class="input mono" placeholder="e.g. github-actions" maxlength="64" />
+						</div>
+						<div class="form-actions">
+							<button class="btn btn-primary btn-sm" disabled={tokenState === 'working'} on:click={createDeployToken}>
+								{tokenState === 'working' ? 'Working…' : 'Create Token'}
+							</button>
+							{#if tokenError}<span class="save-feedback save-feedback-error">{tokenError}</span>{/if}
+						</div>
+					</div>
+				</div>
+
 				<div class="settings-section danger-zone">
 					<h2 class="section-title text-danger">Danger Zone</h2>
 					<div class="danger-item">
@@ -2416,7 +2608,9 @@
 		max-width: 100px;
 	}
 
-	label {
+	label,
+	.field-label {
+		margin: 0;
 		font-size: 11px;
 		font-weight: 500;
 		text-transform: uppercase;
@@ -2742,6 +2936,33 @@
 	}
 
 	/* Deploy key */
+	.checkbox-label {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		cursor: pointer;
+	}
+
+	.token-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.token-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+	}
+
+	.token-meta {
+		font-size: 12px;
+	}
+
 	.deploy-key-hint {
 		font-size: 12px;
 		margin: 0;

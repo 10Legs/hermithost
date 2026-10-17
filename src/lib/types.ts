@@ -70,6 +70,7 @@ export interface DnsRecord {
 export interface Deploy {
 	id: string;
 	status: DeployStatus;
+	commit: string; // full SHA ('' if unknown)
 	commitRef: string;
 	commitMessage: string;
 	branch: string;
@@ -115,6 +116,16 @@ export interface Site {
 	dns: DnsStatus;
 	overallStatus: SiteStatus;
 	disabled?: boolean;
+	// Coolify "include source commit in build"; null when unreadable. Detail/PATCH responses only.
+	include_source_commit?: boolean | null;
 	dnsRecords?: DnsRecord[];
 	deploys?: Deploy[];
+}
+
+export interface DeployToken {
+	id: string;
+	slug: string;
+	name: string;
+	createdAt: string;
+	lastUsedAt: string | null;
 }

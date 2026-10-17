@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { createHmac, timingSafeEqual } from 'crypto';
+import { isDeployTokenRouteAllowed, verifyDeployToken } from '../services/deployTokens';
 
 const COOKIE_NAME = 'hermithost_session';
 
@@ -40,12 +41,29 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   const cookies = parseCookies(cookieHeader);
   const sessionValue = cookies[COOKIE_NAME];
 
-  if (!sessionValue || !verifySessionCookie(sessionValue, secret)) {
-    res.status(401).json({ error: 'Unauthorized' });
+  if (sessionValue && verifySessionCookie(sessionValue, secret)) {
+    next();
     return;
   }
 
-  next();
+  // Per-site deploy token: valid only for its own site's deploy/status routes.
+  const authHeader = req.headers.authorization ?? '';
+  if (authHeader.startsWith('Bearer ')) {
+    const token = verifyDeployToken(authHeader.slice('Bearer '.length).trim());
+    if (!token) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    if (!isDeployTokenRouteAllowed(req.method, req.path, token.slug)) {
+      res.status(403).json({ error: 'Deploy token not permitted for this route' });
+      return;
+    }
+    res.locals.deployToken = token;
+    next();
+    return;
+  }
+
+  res.status(401).json({ error: 'Unauthorized' });
 }
 
 function parseCookies(cookieHeader: string): Record<string, string> {

@@ -24,6 +24,14 @@ import { clearProbeCache, probeSite } from '../services/healthProbe';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
 import { createTechnitiumClient, TechnitiumClient } from '../services/technitium';
 import { readNsHostname, readNsServerIp, readNetworkMode } from './config';
+import {
+  createDeployToken,
+  listDeployTokens,
+  normalizeTokenName,
+  revokeAllDeployTokens,
+  revokeDeployToken,
+} from '../services/deployTokens';
+import { deploymentBelongsToApp, readIncludeSourceCommit, writeIncludeSourceCommit } from '../services/coolifyDb';
 
 const router = Router();
 
@@ -185,6 +193,17 @@ function writeStoredVisibility(uuid: string, visibility: 'internal' | 'external'
     writeFileSync(path.join(SITES_DIR, `${uuid}.visibility`), visibility, 'utf8');
   } catch (err) {
     console.warn(`[visibility] Could not write visibility sidecar for ${uuid}:`, (err as Error).message);
+  }
+}
+
+// include_source_commit for API responses: null when coolify-db can't be read,
+// so a DB hiccup never fails the whole site request.
+async function readIncludeSourceCommitSafe(uuid: string): Promise<boolean | null> {
+  try {
+    return await readIncludeSourceCommit(uuid);
+  } catch (err) {
+    console.warn(`[coolify-settings] could not read include_source_commit for ${uuid}:`, (err as Error).message);
+    return null;
   }
 }
 
@@ -882,7 +901,10 @@ router.get('/:slug', async (req: Request, res: Response) => {
         : Promise.resolve(null),
     ]);
 
-    res.status(200).json(mapSiteWithStoredAuth(app, deployments, probe));
+    res.status(200).json({
+      ...mapSiteWithStoredAuth(app, deployments, probe),
+      include_source_commit: await readIncludeSourceCommitSafe(app.uuid),
+    });
   } catch (err) {
     console.error(`[coolify] GET /applications/${req.params.slug} failed:`, (err as Error).message);
     res.status(502).json({ error: 'Failed to retrieve site from Coolify' });
@@ -1131,6 +1153,11 @@ router.delete('/:slug', async (req: Request, res: Response) => {
 
     await client.deleteApplication(req.params.slug);
     markSiteDeleted(req.params.slug);
+    try {
+      revokeAllDeployTokens(req.params.slug);
+    } catch (tokenErr) {
+      console.warn(`[deploy-tokens] could not revoke tokens for deleted site ${req.params.slug}:`, (tokenErr as Error).message);
+    }
     await withSiteRouteLock(req.params.slug, async () => removeTraefikRoute(req.params.slug));
 
     // Non-fatal DNS teardown — delete zone created by provisionDns
@@ -1174,6 +1201,7 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     deploy_token?: string;  // required when deploy_auth === 'pat'
     docker_compose_location?: string;
     base_directory?: string;
+    include_source_commit?: boolean;
   }>;
   if (Object.keys(body).length === 0) {
     res.status(400).json({ error: 'Request body must include at least one field to update' });
@@ -1187,6 +1215,10 @@ router.patch('/:slug', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'Invalid domain: must be a valid FQDN' });
       return;
     }
+  }
+  if (body.include_source_commit !== undefined && typeof body.include_source_commit !== 'boolean') {
+    res.status(400).json({ error: 'include_source_commit must be a boolean' });
+    return;
   }
   const switchingAuth = body.deploy_auth !== undefined;
   if (switchingAuth && body.deploy_auth === 'pat' && !body.deploy_token?.trim()) {
@@ -1261,7 +1293,11 @@ router.patch('/:slug', async (req: Request, res: Response) => {
       }
     }
 
-    let app = await client.updateApplication(req.params.slug, payload);
+    // Settings-only PATCHes (e.g. just include_source_commit) skip the Coolify PATCH.
+    let app = Object.keys(payload).length > 0
+      ? await client.updateApplication(req.params.slug, payload)
+      : await client.getApplication(req.params.slug);
+
 
     // Post-update auth side effects (link/unlink SSH deploy key)
     if (switchingAuth) {
@@ -1278,6 +1314,12 @@ router.patch('/:slug', async (req: Request, res: Response) => {
       await writeGitRepositoryUrl(req.params.slug, patUrlToWrite).catch((e: Error) => {
         console.warn(`[git-repo] PAT url DB write failed for ${req.params.slug}:`, e.message);
       });
+    }
+
+    // Not exposed by Coolify's API — written to coolify-db directly. Runs after the
+    // auth side effects so a DB failure here can't leave a half-applied auth switch.
+    if (body.include_source_commit !== undefined) {
+      await writeIncludeSourceCommit(app.uuid, body.include_source_commit);
     }
 
     // Refetch to ensure we return latest state
@@ -1310,7 +1352,7 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     }
     if (switchingAuth) writeStoredDeployAuth(req.params.slug, body.deploy_auth!);
     const result = mapSiteWithStoredAuth(app, []);
-    res.status(200).json(result);
+    res.status(200).json({ ...result, include_source_commit: await readIncludeSourceCommitSafe(app.uuid) });
   } catch (err) {
     console.error(`[coolify] PATCH /applications/${req.params.slug} failed:`, (err as Error).message);
     res.status(502).json({ error: 'Failed to update application via Coolify' });
@@ -1723,6 +1765,76 @@ router.put('/:slug/env', async (req: Request, res: Response) => {
   }
 });
 
+// ── /api/sites/:slug/deploy-tokens — per-site deploy tokens (dashboard only) ──
+// Deploy tokens can never manage tokens: requireAuth's allow-list already
+// excludes these routes; the explicit check below is defence in depth.
+function rejectDeployToken(res: Response): boolean {
+  if (!res.locals.deployToken) return false;
+  res.status(403).json({ error: 'Deploy token not permitted for this route' });
+  return true;
+}
+
+router.get('/:slug/deploy-tokens', (req: Request, res: Response) => {
+  if (rejectDeployToken(res)) return;
+  if (!SLUG_RE.test(req.params.slug)) {
+    res.status(400).json({ error: 'Invalid slug' });
+    return;
+  }
+  try {
+    res.status(200).json(listDeployTokens(req.params.slug));
+  } catch (err) {
+    console.error(`[deploy-tokens] list for ${req.params.slug} failed:`, (err as Error).message);
+    res.status(500).json({ error: 'Failed to read deploy tokens' });
+  }
+});
+
+router.post('/:slug/deploy-tokens', async (req: Request, res: Response) => {
+  if (rejectDeployToken(res)) return;
+  if (!SLUG_RE.test(req.params.slug)) {
+    res.status(400).json({ error: 'Invalid slug' });
+    return;
+  }
+  const name = normalizeTokenName(req.body?.name);
+  if (name === null) {
+    res.status(400).json({ error: 'Invalid name: 1-64 letters, digits, spaces or . _ : @ -' });
+    return;
+  }
+  try {
+    // Only issue tokens for sites that exist.
+    await createCoolifyClient()!.getApplication(req.params.slug);
+  } catch {
+    res.status(404).json({ error: 'Site not found' });
+    return;
+  }
+  try {
+    const { token, meta } = createDeployToken(req.params.slug, name);
+    console.log(`[deploy-tokens] created token ${meta.id} (${meta.name}) for ${req.params.slug}`);
+    res.status(201).json({ ...meta, token });
+  } catch (err) {
+    console.error(`[deploy-tokens] create for ${req.params.slug} failed:`, (err as Error).message);
+    res.status(500).json({ error: 'Failed to create deploy token' });
+  }
+});
+
+router.delete('/:slug/deploy-tokens/:id', (req: Request, res: Response) => {
+  if (rejectDeployToken(res)) return;
+  if (!SLUG_RE.test(req.params.slug)) {
+    res.status(400).json({ error: 'Invalid slug' });
+    return;
+  }
+  try {
+    if (!revokeDeployToken(req.params.slug, req.params.id)) {
+      res.status(404).json({ error: 'Deploy token not found' });
+      return;
+    }
+    console.log(`[deploy-tokens] revoked token ${req.params.id} for ${req.params.slug}`);
+    res.status(204).send();
+  } catch (err) {
+    console.error(`[deploy-tokens] revoke for ${req.params.slug} failed:`, (err as Error).message);
+    res.status(500).json({ error: 'Failed to revoke deploy token' });
+  }
+});
+
 // ── GET /api/sites/:slug/deployments — deployment history ────────────────────
 router.get('/:slug/deployments', async (req: Request, res: Response) => {
   try {
@@ -1950,6 +2062,11 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
 // ── GET /api/sites/:slug/deployments/:id/log — deploy log lines ───────────────
 router.get('/:slug/deployments/:id/log', async (req: Request, res: Response) => {
   try {
+    // Deploy tokens are scoped to one site: only serve logs of that site's deployments.
+    if (res.locals.deployToken && !(await deploymentBelongsToApp(req.params.id, req.params.slug))) {
+      res.status(404).json({ error: 'Deployment not found' });
+      return;
+    }
     const client = createCoolifyClient()!;
     const deployment = await client.getDeployment(req.params.id);
     const mapped = mapDeploy(deployment, '');

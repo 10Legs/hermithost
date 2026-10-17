@@ -249,6 +249,32 @@ These avoid conflicts with system services on port 80/443.
 4. **Monitor deployment logs** — view real-time build output in the site detail page
 5. **Access your site** — once deployment completes, visit https://yourdomain.hh (LAN) or https://yourdomain.com (Internet)
 
+### Deploying a Site from CI
+
+Automation deploys a site through the HermitHost API with a **deploy token**. Do not call Coolify directly.
+
+1. In the dashboard, open the site and go to **Settings → Deploy Tokens → Create Token**. Copy the token: it is shown once, and only its hash is stored.
+2. Store it as a CI secret. A token works for **that site only**, and only on these routes (`:slug` is the site's Coolify UUID, shown in the dashboard URL):
+
+   | Route | Use |
+   |---|---|
+   | `POST /api/sites/:slug/deploy` | Trigger a deploy. `202` + `jobId` = started and route OK; `502` = failed |
+   | `GET /api/sites/:slug/deployments` | Poll deploy status; `commit` is the full SHA built |
+   | `GET /api/sites/:slug/deployments/:id/log` | Deploy log |
+   | `GET /api/sites/:slug` | Site status (`overallStatus`) |
+
+   Every other route returns `403` for a deploy token.
+3. Send it as a bearer token:
+
+   ```bash
+   curl -fsS -X POST -H "Authorization: Bearer $HERMITHOST_DEPLOY_TOKEN" \
+     "$HERMITHOST_URL/api/sites/$SITE_UUID/deploy"
+   ```
+
+Revoke a token in the same place. Deleting a site revokes all of its tokens.
+
+To have the app report the commit it was built from, enable **Settings → Build → Include source commit in build**. Coolify then passes `SOURCE_COMMIT=<sha>` to the build. The API field is `include_source_commit` on `PATCH /api/sites/:slug`.
+
 ## DNS Management
 
 The dashboard provides full DNS zone and record management. The default DNS provider is **Technitium** (bundled, no external dependencies). You can switch to **Cloudflare** anytime via Settings.

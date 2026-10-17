@@ -73,6 +73,7 @@ export interface DnsRecord {
 export interface Deploy {
   id: string;
   status: DeployStatus;
+  commit: string; // full SHA ('' if unknown)
   commitRef: string;
   commitMessage: string;
   branch: string;
