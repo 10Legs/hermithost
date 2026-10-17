@@ -27,6 +27,8 @@ import { dockerGet, dockerNetworkConnect, dockerNetworkDisconnect } from '../ser
 import { probeSite } from '../services/healthProbe';
 import {
   buildTraefikRouteYaml,
+  followDeploymentAndProvisionRoute,
+  isTerminalDeployStatus,
   pickPrimaryComposeService,
   provisionTraefikRoute,
   stableComposeRouteAlias,
@@ -155,5 +157,75 @@ describe('provisionTraefikRoute (nixpacks) — #127', () => {
     vi.mocked(dockerGet).mockResolvedValue([]);
     const out = await provisionTraefikRoute('gone', 'g.example.com', 3000, 'letsencrypt');
     expect(out).toMatchObject({ ok: false, reason: 'no running container for slug gone' });
+  });
+});
+
+describe('followDeploymentAndProvisionRoute (#139)', () => {
+  const ok = { ok: true, upstream: 'site-abc:8088' };
+  function deps(statuses: string[], routes: Array<{ ok: boolean; reason?: string; upstream?: string }>) {
+    let t = 0;
+    const getDeploymentStatus = vi.fn(async () => statuses.shift() ?? 'in_progress');
+    const provisionRoute = vi.fn(async () => routes.shift() ?? { ok: false, reason: 'no running container' });
+    return {
+      getDeploymentStatus,
+      provisionRoute,
+      sleep: async (ms: number) => { t += ms; },
+      now: () => t,
+    };
+  }
+
+  it('waits for a long build to finish, then writes the route', async () => {
+    // 30 polls × 10s = 5 min of building — longer than the old 3-minute request wait.
+    const d = deps([...Array(30).fill('in_progress'), 'finished'], [ok]);
+    const r = await followDeploymentAndProvisionRoute('abc', 'job1', d);
+    expect(r).toEqual({ outcome: 'routed', route: ok });
+    expect(d.getDeploymentStatus).toHaveBeenCalledTimes(31);
+    expect(d.provisionRoute).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries the route briefly after finish while the container comes up', async () => {
+    const d = deps(['finished'], [{ ok: false, reason: 'no running container' }, { ok: false, reason: 'no running container' }, ok]);
+    expect((await followDeploymentAndProvisionRoute('abc', 'job1', d)).outcome).toBe('routed');
+    expect(d.provisionRoute).toHaveBeenCalledTimes(3);
+  });
+
+  it('leaves the route alone when the deployment fails or is cancelled', async () => {
+    for (const status of ['failed', 'cancelled-by-user']) {
+      const d = deps(['queued', status], [ok]);
+      expect(await followDeploymentAndProvisionRoute('abc', 'job1', d)).toEqual({ outcome: 'deploy-failed', status });
+      expect(d.provisionRoute).not.toHaveBeenCalled();
+    }
+  });
+
+  it('keeps polling through transient status read errors', async () => {
+    const d = deps([], [ok]);
+    d.getDeploymentStatus
+      .mockRejectedValueOnce(new Error('ECONNRESET'))
+      .mockResolvedValueOnce('finished');
+    expect((await followDeploymentAndProvisionRoute('abc', 'job1', d)).outcome).toBe('routed');
+  });
+
+  it('gives up after the follow timeout without touching the route', async () => {
+    const d = deps([], [ok]); // never terminal
+    expect(await followDeploymentAndProvisionRoute('abc', 'job1', d)).toEqual({ outcome: 'timeout' });
+    expect(d.provisionRoute).not.toHaveBeenCalled();
+  });
+
+  it('reports route-failed when the container never becomes routable', async () => {
+    const d = deps(['finished'], []);
+    const r = await followDeploymentAndProvisionRoute('abc', 'job1', d);
+    expect(r.outcome).toBe('route-failed');
+    expect(d.provisionRoute).toHaveBeenCalledTimes(12);
+  });
+
+  it('without a jobId, polls for the new container until it is routable', async () => {
+    const d = deps([], [{ ok: false }, { ok: false }, ok]);
+    expect((await followDeploymentAndProvisionRoute('abc', undefined, d)).outcome).toBe('routed');
+    expect(d.getDeploymentStatus).not.toHaveBeenCalled();
+  });
+
+  it('classifies terminal Coolify statuses', () => {
+    expect(['finished', 'failed', 'cancelled-by-user', 'cancelled'].every(isTerminalDeployStatus)).toBe(true);
+    expect(['queued', 'in_progress', ''].some(isTerminalDeployStatus)).toBe(false);
   });
 });

@@ -258,8 +258,8 @@ Automation deploys a site through the HermitHost API with a **deploy token**. Do
 
    | Route | Use |
    |---|---|
-   | `POST /api/sites/:slug/deploy` | Trigger a deploy. `202` + `jobId` = started and route OK; `502` = failed |
-   | `GET /api/sites/:slug/deployments` | Poll deploy status; `commit` is the full SHA built |
+   | `POST /api/sites/:slug/deploy` | Trigger a deploy. Returns `202` + `jobId` as soon as Coolify accepts it; the route is written when the deployment finishes. `4xx`/`502` = not started |
+   | `GET /api/sites/:slug/deployments` | Poll the `jobId` until `status` is `success` or `failed` (anything else, or not listed yet, is still in progress); `commit` is the full SHA built |
    | `GET /api/sites/:slug/deployments/:id/log` | Deploy log |
    | `GET /api/sites/:slug` | Site status (`overallStatus`) |
 

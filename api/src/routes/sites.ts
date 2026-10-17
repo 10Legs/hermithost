@@ -1910,6 +1910,82 @@ router.post('/:slug/enable', async (req: Request, res: Response) => {
 });
 
 // ── POST /api/sites/:slug/deploy — trigger a deploy ──────────────────────────
+// ── Post-deploy route follow-up ───────────────────────────────────────────────
+// Waits for a Coolify deployment to reach a terminal state, then writes the
+// site's Traefik route (and attaches the coolify network) for the container it
+// created. Tied to the deployment rather than a fixed timer, so long builds
+// still get their route the moment they finish (#139).
+const DEPLOY_POLL_INTERVAL_MS = 10_000;
+const DEPLOY_FOLLOW_TIMEOUT_MS = 60 * 60_000;
+// A finished deployment's containers can take a few seconds to report running.
+const ROUTE_ATTEMPTS_AFTER_FINISH = 12; // ~2 min
+
+export function isTerminalDeployStatus(status: string): boolean {
+  return status === 'finished' || status === 'failed' || status.startsWith('cancelled');
+}
+
+export interface DeploymentFollowDeps {
+  getDeploymentStatus: (jobId: string) => Promise<string>;
+  provisionRoute: () => Promise<RouteResult>;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+export type DeploymentFollowOutcome =
+  | { outcome: 'routed'; route: RouteResult }
+  | { outcome: 'route-failed'; route: RouteResult | null }
+  | { outcome: 'deploy-failed'; status: string }
+  | { outcome: 'timeout' };
+
+export async function followDeploymentAndProvisionRoute(
+  slug: string,
+  jobId: string | undefined,
+  deps: DeploymentFollowDeps,
+): Promise<DeploymentFollowOutcome> {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const now = deps.now ?? Date.now;
+  const deadline = now() + DEPLOY_FOLLOW_TIMEOUT_MS;
+
+  if (jobId) {
+    let status = '';
+    while (!isTerminalDeployStatus(status)) {
+      if (now() >= deadline) {
+        console.warn(`[traefik-route] post-deploy ${slug}: deployment ${jobId} not finished after ${DEPLOY_FOLLOW_TIMEOUT_MS / 60_000} min — leaving the route to the reconciler`);
+        return { outcome: 'timeout' };
+      }
+      await sleep(DEPLOY_POLL_INTERVAL_MS);
+      try {
+        status = await deps.getDeploymentStatus(jobId);
+      } catch (err) {
+        console.warn(`[traefik-route] post-deploy ${slug}: could not read deployment ${jobId} — ${(err as Error).message}`);
+      }
+    }
+    if (status !== 'finished') {
+      console.warn(`[traefik-route] post-deploy ${slug}: deployment ${jobId} ended '${status}' — route unchanged`);
+      return { outcome: 'deploy-failed', status };
+    }
+  } else {
+    console.warn(`[traefik-route] post-deploy ${slug}: Coolify returned no deployment id — polling for the new container instead`);
+  }
+
+  // With no jobId we can't tell when the build ends, so keep trying until the deadline.
+  let last: RouteResult | null = null;
+  for (let attempt = 0; jobId ? attempt < ROUTE_ATTEMPTS_AFTER_FINISH : now() < deadline; attempt++) {
+    if (attempt > 0 || !jobId) await sleep(DEPLOY_POLL_INTERVAL_MS);
+    try {
+      last = await deps.provisionRoute();
+    } catch (err) {
+      last = { ok: false, reason: (err as Error).message };
+    }
+    if (last.ok) {
+      console.log(`[traefik-route] post-deploy ${slug}: route written → ${last.upstream ?? 'ok'}`);
+      return { outcome: 'routed', route: last };
+    }
+  }
+  console.error(`[traefik-route] post-deploy ${slug}: route provision failed — ${last?.reason ?? 'unknown'}`);
+  return { outcome: 'route-failed', route: last };
+}
+
 router.post('/:slug/deploy', async (req: Request, res: Response) => {
   // C — slug validation
   if (!SLUG_RE.test(req.params.slug)) {
@@ -1989,70 +2065,37 @@ router.post('/:slug/deploy', async (req: Request, res: Response) => {
     const result = await client.triggerDeploy(req.params.slug);
     const dep = result.deployments?.[0];
 
-    // Update Traefik route once the container is running.
-    // Poll up to 3 minutes for the new container to appear.
-    const _routeDomain = resolveRouteDomain(app);
-    if (_routeDomain === null) {
+    const jobId = dep?.deployment_uuid;
+
+    // Respond as soon as Coolify accepts the deploy. The route is written in the
+    // background once the deployment itself finishes (#139) — builds can take far
+    // longer than any sensible request timeout. Callers track the result via
+    // GET /deployments; the route reconciler remains the backstop.
+    res.status(202).json({ jobId, message: dep?.message });
+
+    const routeDomain = resolveRouteDomain(app);
+    if (routeDomain === null) {
       console.warn(`[traefik-route] deploy ${req.params.slug}: no usable domain resolved — skipping post-deploy route write`);
-    }
-    if (_routeDomain) {
-      const domain = _routeDomain;
-      const port = (app as any).ports_exposes ?? 3000;
-      const slug = req.params.slug;
-      const isCompose = app.build_pack === 'dockercompose';
-      const maxAttempts = 18; // 18 × 10s = 3 min
-      let routeResult: { ok: boolean; reason?: string; upstream?: string; statusCode?: number | null } | null = null;
-      for (let i = 0; i < maxAttempts; i++) {
-        await new Promise(r => setTimeout(r, 10_000));
-        try {
-          const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
-          if (isCompose) {
-            // For compose: wait for the primary service container that will be routed.
-            const freshApp = await createCoolifyClient()!.getApplication(slug).catch(() => null);
-            if (!freshApp) continue;
-            routeResult = await provisionTraefikRouteForCompose(
-              createCoolifyClient()!,
-              freshApp,
-              domain,
-              resolver,
-              { minCreated: deployStartedAt },
-            );
-            if (routeResult.ok) break;
-            console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${routeResult.reason}`);
-          } else {
-            const filter = encodeURIComponent(JSON.stringify({ label: appContainerLabels(slug), status: ['running'] }));
-            const containers = await dockerGet(`/containers/json?filters=${filter}`) as Array<{ Names: string[]; State: string }>;
-            if (containers.length) {
-              // minCreated: wait for the container this deploy creates, not the one it replaces.
-              routeResult = await provisionTraefikRoute(slug, domain, port, resolver, { minCreated: deployStartedAt });
-              if (routeResult.ok) break;
-              console.error(`[traefik-route] post-deploy poll ${slug}: route provision failed — ${routeResult.reason}`);
-            }
-          }
-        } catch (routeErr) {
-          routeResult = { ok: false, reason: (routeErr as Error).message };
-        }
-      }
-
-      if (isCompose && (!routeResult || !routeResult.ok)) {
-        res.status(502).json({
-          error: 'Deploy started, but route provisioning failed',
-          jobId: dep?.deployment_uuid,
-          message: dep?.message,
-          route: routeResult ?? { ok: false, reason: 'timed out waiting for route provisioning' },
-        });
-        return;
-      }
-
-      res.status(202).json({
-        jobId: dep?.deployment_uuid,
-        message: dep?.message,
-        ...(routeResult ? { route: routeResult } : {}),
-      });
       return;
     }
-
-    res.status(202).json({ jobId: dep?.deployment_uuid, message: dep?.message });
+    const slug = req.params.slug;
+    const isCompose = app.build_pack === 'dockercompose';
+    const port = (app as any).ports_exposes ?? 3000;
+    void followDeploymentAndProvisionRoute(slug, jobId, {
+      getDeploymentStatus: async (id) => (await createCoolifyClient()!.getDeployment(id)).status,
+      provisionRoute: async () => {
+        const resolver = readNetworkMode() === 'internal' ? 'internal-ca' : 'letsencrypt';
+        if (isCompose) {
+          const freshApp = await createCoolifyClient()!.getApplication(slug);
+          return provisionTraefikRouteForCompose(createCoolifyClient()!, freshApp, routeDomain, resolver, { minCreated: deployStartedAt });
+        }
+        // minCreated: route the container this deploy creates, not the one it replaces.
+        return provisionTraefikRoute(slug, routeDomain, port, resolver, { minCreated: deployStartedAt });
+      },
+    }).catch((err: unknown) => {
+      console.error(`[traefik-route] post-deploy ${slug}: route follow-up crashed — ${(err as Error).message}`);
+    });
+    return;
   } catch (err) {
     console.error(`[coolify] POST /deploy for ${req.params.slug} failed:`, (err as Error).message);
     res.status(502).json({ error: 'Failed to trigger deploy via Coolify' });
