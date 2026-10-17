@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mapSite, formatSiteUrl, resolveRouteDomain, mapAppStatus } from './mapper';
-import type { CoolifyApplication } from './coolify';
+import { mapSite, mapDeploy, formatSiteUrl, resolveRouteDomain, mapAppStatus } from './mapper';
+import type { CoolifyApplication, CoolifyDeploymentQueue } from './coolify';
 
 // Minimal CoolifyApplication fixture for mapper tests
 function makeApp(overrides: Partial<CoolifyApplication> = {}): CoolifyApplication {
@@ -222,5 +222,37 @@ describe('mapAppStatus — Coolify v4 "<state>:<health>" statuses', () => {
     const site = mapSite(makeApp({ status: 'running:healthy' }), [], null);
     expect(site.overallStatus).toBe('healthy');
     expect(site.http.reachable).toBe(true);
+  });
+});
+
+describe('mapDeploy — commit', () => {
+  function makeQueue(commit: string): CoolifyDeploymentQueue {
+    return {
+      deployment_uuid: 'dep-1',
+      application_id: 1,
+      status: 'finished',
+      commit,
+      commit_message: 'msg',
+      created_at: '2026-10-17T00:00:00Z',
+      finished_at: '2026-10-17T00:01:00Z',
+      updated_at: '2026-10-17T00:01:00Z',
+      logs: '[]',
+      server_name: 'localhost',
+      application_name: 'app',
+      force_rebuild: false,
+      is_webhook: false,
+      is_api: true,
+    };
+  }
+
+  it('exposes the full SHA alongside the 7-char commitRef', () => {
+    const sha = '0123456789abcdef'.repeat(2) + '01234567'; // built, so the secret hook doesn't flag it
+    const d = mapDeploy(makeQueue(sha), 'main');
+    expect(d.commit).toBe(sha);
+    expect(d.commitRef).toBe('0123456');
+  });
+
+  it('leaves commit empty when Coolify has none', () => {
+    expect(mapDeploy(makeQueue(''), 'main').commit).toBe('');
   });
 });

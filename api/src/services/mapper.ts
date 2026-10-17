@@ -231,6 +231,7 @@ export function mapDeploy(
   return {
     id: queue.deployment_uuid,
     status: mapDeployStatus(queue.status),
+    commit: queue.commit ?? '',
     commitRef: queue.commit ? queue.commit.substring(0, 7) : '',
     commitMessage: queue.commit_message ?? '',
     branch: gitBranch,
