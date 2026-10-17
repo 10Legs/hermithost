@@ -18,16 +18,27 @@ import type { ProbeResult } from './healthProbe';
 
 // ── Status mappers ────────────────────────────────────────────────────────────
 
-function mapAppStatus(coolifyStatus: string): SiteStatus {
-  switch (coolifyStatus) {
+// Coolify v4 reports application status as "<state>:<health>" — e.g. "running:healthy",
+// "running:unknown" (no healthcheck), "running:unhealthy", "exited:unhealthy",
+// "degraded:unhealthy", "restarting:unknown". Older versions sent the bare state.
+export function parseCoolifyStatus(coolifyStatus: string | null | undefined): { state: string; health: string } {
+  const [state = '', health = ''] = (coolifyStatus ?? '').toLowerCase().split(':');
+  return { state, health };
+}
+
+export function mapAppStatus(coolifyStatus: string | null | undefined): SiteStatus {
+  const { state, health } = parseCoolifyStatus(coolifyStatus);
+  switch (state) {
     case 'running':
-      return 'healthy';
+      return health === 'unhealthy' ? 'warning' : 'healthy';
+    case 'degraded':
     case 'stopped':
     case 'exited':
       return 'warning';
     case 'error':
       return 'error';
     default:
+      // starting, restarting, unknown, empty
       return 'pending';
   }
 }
@@ -51,7 +62,7 @@ function mapDeployStatus(coolifyStatus: string): DeployStatus {
 // ── Stub HTTP/SSL/DNS status derived from Coolify app status ──────────────────
 
 function stubHttpStatus(coolifyStatus: string): HttpStatus {
-  const running = coolifyStatus === 'running';
+  const running = parseCoolifyStatus(coolifyStatus).state === 'running';
   return {
     reachable: running,
     statusCode: running ? 200 : null,
