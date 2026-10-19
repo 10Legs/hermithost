@@ -191,3 +191,19 @@ describe('CoolifyClient.syncApplicationEnvs — race-safe env sync', () => {
     expect(listSpy.mock.calls.length).toBeGreaterThan(1);
   });
 });
+
+describe('CoolifyClient.updateEnv — PATCH body', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('sends the var by key and omits uuid (Coolify rejects uuid with 422)', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    await makeClient().updateEnv('app-uuid', { uuid: 'env-uuid', key: 'CHANCLA_DOMAIN', value: 'x.example', is_runtime: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe('http://localhost:8000/applications/app-uuid/envs');
+    expect((init as RequestInit).method).toBe('PATCH');
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ key: 'CHANCLA_DOMAIN', value: 'x.example', is_runtime: true });
+  });
+});

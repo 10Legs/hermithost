@@ -258,11 +258,13 @@ export class CoolifyClient {
     await handleResponse<unknown>(res, `POST /applications/${appUuid}/envs`);
   }
 
+  // Coolify identifies the var by key and rejects uuid in the body (422), so it is dropped here.
   async updateEnv(appUuid: string, payload: UpdateEnvPayload): Promise<void> {
+    const { uuid: _uuid, ...body } = payload;
     const res = await fetch(`${this.baseUrl}/applications/${appUuid}/envs`, {
       method: 'PATCH',
       headers: this.headers,
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
     await handleResponse<unknown>(res, `PATCH /applications/${appUuid}/envs`);
   }
