@@ -26,8 +26,10 @@ vi.mock('../services/healthProbe', () => ({
 import { dockerGet, dockerNetworkConnect, dockerNetworkDisconnect } from '../services/docker';
 import { probeSite } from '../services/healthProbe';
 import {
+  embedPatInRepoUrl,
   buildTraefikRouteYaml,
   followDeploymentAndProvisionRoute,
+  httpsToSshUrl,
   isTerminalDeployStatus,
   pickPrimaryComposeService,
   provisionTraefikRoute,
@@ -227,5 +229,37 @@ describe('followDeploymentAndProvisionRoute (#139)', () => {
   it('classifies terminal Coolify statuses', () => {
     expect(['finished', 'failed', 'cancelled-by-user', 'cancelled'].every(isTerminalDeployStatus)).toBe(true);
     expect(['queued', 'in_progress', ''].some(isTerminalDeployStatus)).toBe(false);
+  });
+});
+
+describe('httpsToSshUrl — GitHub SSH over 443', () => {
+  const want = 'ssh://git@ssh.github.com:443/10Legs/chancla-reta-online.git';
+  it.each([
+    'https://github.com/10Legs/chancla-reta-online.git',
+    'https://github.com/10Legs/chancla-reta-online',
+    'git@github.com:10Legs/chancla-reta-online.git',
+    'git@github.com:10Legs/chancla-reta-online',
+    '10Legs/chancla-reta-online',
+    want,
+    // PATCH strips URL credentials before converting, which drops the git@ user
+    'ssh://ssh.github.com:443/10Legs/chancla-reta-online.git',
+  ])('%s', (input) => {
+    expect(httpsToSshUrl(input)).toBe(want);
+  });
+
+  it('keeps scp-style URLs for non-GitHub hosts', () => {
+    expect(httpsToSshUrl('https://gitlab.example.com/a/b.git')).toBe('git@gitlab.example.com:a/b.git');
+    expect(httpsToSshUrl('git@gitlab.example.com:a/b')).toBe('git@gitlab.example.com:a/b.git');
+  });
+});
+
+describe('embedPatInRepoUrl — from SSH URLs', () => {
+  it('converts ssh://git@ssh.github.com:443 back to github.com HTTPS', () => {
+    expect(embedPatInRepoUrl('ssh://git@ssh.github.com:443/o/r.git', 'tok'))
+      .toBe('https://x-access-token:tok@github.com/o/r.git');
+  });
+  it('still converts git@github.com: form', () => {
+    expect(embedPatInRepoUrl('git@github.com:o/r.git', 'tok'))
+      .toBe('https://x-access-token:tok@github.com/o/r.git');
   });
 });
