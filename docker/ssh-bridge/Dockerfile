@@ -1,4 +1,4 @@
-FROM alpine:3.20
+FROM alpine:3.24
 RUN apk add --no-cache openssh docker-cli docker-cli-compose bash curl sudo git git-lfs jq
 RUN adduser -D -s /bin/bash deploy && \
     passwd -d deploy && \
