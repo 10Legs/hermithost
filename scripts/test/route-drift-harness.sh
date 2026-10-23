@@ -50,7 +50,7 @@ docker run -d --name ${P}-docker-proxy --network ${P}-ctl \
 # probe), so the proxy joins that network too.
 docker network connect ${P}-coolify ${P}-docker-proxy
 
-docker run -d --name ${P}-traefik --network ${P}-coolify -v "$CONF:/conf:ro" traefik:v3.2 \
+docker run -d --name ${P}-traefik --network ${P}-coolify -v "$CONF:/conf:ro" traefik:v3.6.25 \
   --entrypoints.http.address=:80 --entrypoints.https.address=:443 \
   --providers.file.directory=/conf --providers.file.watch=true >/dev/null
 TRAEFIK_IP="$(docker inspect -f "{{(index .NetworkSettings.Networks \"${P}-coolify\").IPAddress}}" ${P}-traefik)"

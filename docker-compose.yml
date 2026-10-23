@@ -210,7 +210,7 @@ services:
 
   # ── Reverse Proxy ──────────────────────────────────────────────
   traefik:
-    image: traefik:v3.2
+    image: traefik:v3.6.25
     restart: unless-stopped
     # required: false — enforced only when step-ca is scheduled (--profile internal).
     # Silently skipped in internet mode. Requires Compose v2.20+ (running v5.1.1).
