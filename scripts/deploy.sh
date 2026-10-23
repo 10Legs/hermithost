@@ -136,6 +136,9 @@ auto_services() {
         "$ROOT"/*) path="${path#"$ROOT"/}" ;;
         *)         continue ;;   # outside the repo (host paths, docker socket)
       esac
+      # Traefik's file provider watches traefik/conf.d and reloads it live; route
+      # changes there never need a container restart.
+      [ "$path" = "traefik/conf.d" ] && continue
       if [ -z "$path" ]; then
         # Root build context (frontend): only the SvelteKit app inputs count.
         if grep -qE '^(src/|static/|package(-lock)?\.json$|svelte\.config\.js$|vite\.config\.ts$|tsconfig\.json$|Dockerfile$)' <<<"$changed"; then

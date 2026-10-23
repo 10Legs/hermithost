@@ -94,6 +94,18 @@ if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
   done
 fi
 
+# ── Deploy-engine admin UI route (LAN only) ──────────────────────────────────
+# The route matches only Host(coolify.hh) on the public HTTPS entrypoint, so in
+# internet mode anyone could reach the engine UI by sending that Host header.
+# Install it only in LAN mode, and remove any copy left on an internet-mode host.
+_ENGINE_UI_ROUTE="${ROOT}/traefik/conf.d/coolify-ui.yml"
+if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
+  install -m 0644 "${ROOT}/traefik/lan/coolify-ui.yml" "$_ENGINE_UI_ROUTE"
+elif [ -e "$_ENGINE_UI_ROUTE" ]; then
+  rm -f "$_ENGINE_UI_ROUTE"
+  echo "[start] Removed LAN-only engine UI route (not in LAN mode)"
+fi
+
 if [ "${HERMITHOST_PORT_MODE:-}" = "lan" ]; then
   PROFILE_ARG="--profile internal"
   echo "[start] LAN mode detected — activating internal CA profile (step-ca)"
