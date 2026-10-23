@@ -912,27 +912,44 @@ router.get('/:slug', async (req: Request, res: Response) => {
 });
 
 // ── SSH → HTTPS URL conversion ────────────────────────────────────────────────
-// Converts git@github.com:owner/repo.git → https://github.com/owner/repo.git
+// Converts git@github.com:owner/repo.git or ssh://git@ssh.github.com:443/owner/repo.git
+// → https://github.com/owner/repo.git
 // Required before embedding a PAT — PAT auth uses HTTPS, not SSH transport.
 function sshUrlToHttps(url: string): string {
   const m = url.match(/^git@([^:]+):(.+?)(?:\.git)?$/);
   if (m) return `https://${m[1]}/${m[2]}.git`;
+  const s = url.match(/^ssh:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+?)(?:\.git)?$/);
+  if (s) return `https://${s[1] === 'ssh.github.com' ? 'github.com' : s[1]}/${s[2]}.git`;
   return url;
 }
 
 // ── HTTPS / short-form → SSH URL conversion ───────────────────────────────────
-// Converts any repo reference to git@github.com:owner/repo.git format.
-// Required when using SSH key auth — Coolify needs the SSH transport URL.
-function httpsToSshUrl(url: string): string {
-  if (/^git@/.test(url)) return url.endsWith('.git') ? url : `${url}.git`;
-  try {
-    const u = new URL(url.startsWith('http') ? url : `https://github.com/${url}`);
-    const path = u.pathname.replace(/^\//, '').replace(/\.git$/, '');
-    return `git@${u.host}:${path}.git`;
-  } catch {
-    // short-form: owner/repo or owner/repo.git
-    return `git@github.com:${url.replace(/\.git$/, '')}.git`;
+// Converts any repo reference to the SSH transport URL Coolify needs for SSH key auth.
+// GitHub repos go over port 443 (ssh://git@ssh.github.com:443/owner/repo.git): outbound
+// port 22 to GitHub is unreliable from some hosts (connect timeouts / stalled key exchange),
+// while 443 is not. Other hosts keep git@host:owner/repo.git.
+export function httpsToSshUrl(url: string): string {
+  let host: string;
+  let path: string;
+  const scp = url.match(/^git@([^:]+):(.+)$/);
+  if (scp) {
+    [, host, path] = scp;
+  } else {
+    try {
+      const u = new URL(/^[a-z]+:\/\//i.test(url) ? url : `https://github.com/${url}`);
+      host = u.hostname;
+      path = u.pathname.replace(/^\//, '');
+    } catch {
+      // short-form: owner/repo or owner/repo.git
+      host = 'github.com';
+      path = url;
+    }
   }
+  path = path.replace(/\.git$/, '');
+  if (host === 'github.com' || host === 'ssh.github.com') {
+    return `ssh://git@ssh.github.com:443/${path}.git`;
+  }
+  return `git@${host}:${path}.git`;
 }
 
 // ── Embed PAT into a GitHub HTTPS clone URL ───────────────────────────────────
@@ -945,7 +962,7 @@ export function embedPatInRepoUrl(repoUrl: string, token: string): string {
   // 2. short-form owner/repo[.git] → https://github.com/owner/repo.git
   // 3. already HTTPS → leave as-is
   let httpsUrl: string;
-  if (/^git@/.test(repoUrl)) {
+  if (/^(git@|ssh:\/\/)/.test(repoUrl)) {
     httpsUrl = sshUrlToHttps(repoUrl);
   } else if (/^https?:\/\//.test(repoUrl)) {
     httpsUrl = repoUrl;
