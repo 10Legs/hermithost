@@ -116,7 +116,8 @@ validate_services() {
 #   - the service's resolved compose definition differs between <old> and <new>
 auto_services() {
   local old="$1" new="$2" changed svc path old_cfg out=()
-  changed="$(git diff --name-only "$old" "$new")" || return 1
+  # --no-renames: report both sides of a move (a file moved out of a context counts).
+  changed="$(git diff --name-only --no-renames "$old" "$new")" || return 1
   [ -n "$changed" ] || return 0
 
   local old_tmp
@@ -136,6 +137,9 @@ auto_services() {
         "$ROOT"/*) path="${path#"$ROOT"/}" ;;
         *)         continue ;;   # outside the repo (host paths, docker socket)
       esac
+      # Traefik's file provider watches traefik/conf.d and reloads it live; route
+      # changes there never need a container restart.
+      [ "$path" = "traefik/conf.d" ] && continue
       if [ -z "$path" ]; then
         # Root build context (frontend): only the SvelteKit app inputs count.
         if grep -qE '^(src/|static/|package(-lock)?\.json$|svelte\.config\.js$|vite\.config\.ts$|tsconfig\.json$|Dockerfile$)' <<<"$changed"; then

@@ -1,5 +1,9 @@
 # Coolify UI — routed via Traefik at coolify.hh (LAN mode only)
 #
+# TEMPLATE: scripts/start.sh copies this into traefik/conf.d/ only when
+# HERMITHOST_PORT_MODE=lan. Never place it in conf.d on an internet-mode host:
+# the Host() rule alone would expose the engine UI to the internet.
+#
 # Removes the need for a host port binding on the coolify service.
 # The wildcard *.hh cert is pre-fetched by wildcard-internal.yml using the
 # internal-ca resolver (step-ca DNS-01). This router reuses that cert.

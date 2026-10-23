@@ -35,6 +35,8 @@ cookies.txt
 # Traefik runtime configs (generated from templates — not committed)
 traefik/conf.d/routes.yml
 traefik/conf.d/site-*.yml
+# Installed by scripts/start.sh in LAN mode only (template: traefik/lan/)
+traefik/conf.d/coolify-ui.yml
 
 # QA result snapshots
 test-dns-qa-results.json
