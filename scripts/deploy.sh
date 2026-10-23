@@ -92,6 +92,8 @@ has_build()    { jq -e --arg s "$1" '.services[$s].build != null' <<<"$CFG" >/de
 image_ref() {
   local ref
   ref="$(jq -r --arg s "$1" --arg p "$COMPOSE_PROJECT_NAME" '.services[$s].image // ($p + "-" + $s)' <<<"$CFG")"
+  # `compose config` resolves pinned images to repo:tag@sha256:<digest>; tags are what we manage.
+  ref="${ref%%@*}"
   [[ "$ref" =~ :[^/]+$ ]] || ref="${ref}:latest"
   echo "$ref"
 }
