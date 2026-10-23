@@ -1,7 +1,9 @@
 services:
   # ── Coolify — Deployment Engine ────────────────────────────────
   coolify:
-    image: "ghcr.io/coollabsio/coolify:latest"
+    # Pinned (was :latest). 4.5.0 ships PHP 8.4.27 — fixes php2shell
+    # (CVE-2026-109618/109619). Bump deliberately, after the castitat upgrade test.
+    image: "ghcr.io/coollabsio/coolify:4.5.0"
     restart: unless-stopped
     extra_hosts:
       - host.docker.internal:host-gateway
@@ -27,17 +29,21 @@ services:
       ROOT_USER_EMAIL: "${COOLIFY_ADMIN_EMAIL}"
       ROOT_USER_PASSWORD: "${COOLIFY_ADMIN_PASSWORD}"
       PHP_MEMORY_LIMIT: "256M"
+      # Realtime runs inside this container since engine 4.4 (it replaced the
+      # separate coolify-realtime service).
+      PUSHER_BACKEND_PORT: "6001"
     depends_on:
       coolify-db:
         condition: service_healthy
       coolify-redis:
         condition: service_healthy
-      coolify-realtime:
-        condition: service_healthy
     networks:
-      - hermithost-net
+      hermithost-net:
+        # Keeps the old realtime hostname working for anything still pointed at it.
+        aliases:
+          - coolify-realtime
     healthcheck:
-      test: curl --fail http://127.0.0.1:8080/api/health || exit 1
+      test: curl --fail http://127.0.0.1:8080/api/health && curl --fail http://127.0.0.1:6001/up || exit 1
       interval: 10s
       retries: 15
       timeout: 3s
@@ -72,24 +78,6 @@ services:
       - hermithost-net
     healthcheck:
       test: redis-cli -a ${COOLIFY_REDIS_PASSWORD} ping
-      interval: 5s
-      retries: 10
-      timeout: 2s
-
-  coolify-realtime:
-    image: "ghcr.io/coollabsio/coolify-realtime:1.0.13"
-    restart: unless-stopped
-    environment:
-      APP_NAME: "Coolify"
-      SOKETI_DEBUG: "false"
-      SOKETI_DEFAULT_APP_ID: "${COOLIFY_PUSHER_APP_ID}"
-      SOKETI_DEFAULT_APP_KEY: "${COOLIFY_PUSHER_APP_KEY}"
-      SOKETI_DEFAULT_APP_SECRET: "${COOLIFY_PUSHER_APP_SECRET}"
-      SOKETI_HOST: "0.0.0.0"
-    networks:
-      - hermithost-net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:6001/ready || exit 1"]
       interval: 5s
       retries: 10
       timeout: 2s
