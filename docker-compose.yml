@@ -3,7 +3,7 @@ services:
   coolify:
     # Pinned (was :latest). 4.5.0 ships PHP 8.4.27 — fixes php2shell
     # (CVE-2026-109618/109619). Bump deliberately, after the castitat upgrade test.
-    image: "ghcr.io/coollabsio/coolify:4.5.0"
+    image: "ghcr.io/coollabsio/coolify:4.5.0@sha256:79321612a4e4aae90378f647ab0b31afaaad3be47f20953289d3fef3883f4ac8"
     restart: unless-stopped
     extra_hosts:
       - host.docker.internal:host-gateway
