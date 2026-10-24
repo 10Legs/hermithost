@@ -458,6 +458,15 @@ Contributions are welcome. To contribute:
 
 Note: The pre-commit hook (`git config core.hooksPath .githooks`) blocks accidental commits of secrets, API keys, and email addresses.
 
+### Demo videos for visible changes
+
+Every PR that changes something a user can see (layout, styling, text, links, navigation, forms, new screens, changed interactions) must embed a 15–60 s demo video at the top of its description: the change working in a real browser on the PR's build, with on-screen captions, the full user path, the case that used to fail for bug fixes, and only safe test data with external services stubbed. Backend-, infra-, docs- or test-only PRs don't need one; if unsure, include one.
+
+- Record: `node demos/record.mjs <scenario> [--before origin/main] [--mobile]` (scenarios in `demos/scenarios/`).
+- Publish: commit the GIF + MP4 to the never-merged `demos` branch in a folder named after the PR branch, and embed them by that commit's SHA.
+
+Details: [`demos/README.md`](demos/README.md).
+
 ## License
 
 HermitHost is licensed under the MIT License. See [LICENSE](LICENSE) for details.

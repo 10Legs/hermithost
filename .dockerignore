@@ -1,0 +1,3 @@
+# Demo recorder and its output never ship in an image.
+demos/
+.scratch/
