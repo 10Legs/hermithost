@@ -40,3 +40,6 @@ traefik/conf.d/coolify-ui.yml
 
 # QA result snapshots
 test-dns-qa-results.json
+
+# Local scratch space (demo worktrees and recordings, harness output)
+.scratch/
