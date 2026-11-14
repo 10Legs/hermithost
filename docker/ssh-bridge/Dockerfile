@@ -18,7 +18,8 @@ COPY 00-hermithost-keys-only.conf /etc/ssh/sshd_config.d/00-hermithost-keys-only
 # Fail the build if the drop-in isn't picked up (sshd uses the first value it sees).
 RUN sshd -t && \
     sshd -T | grep -qx 'passwordauthentication no' && \
-    sshd -T | grep -qx 'kbdinteractiveauthentication no'
+    sshd -T | grep -qx 'kbdinteractiveauthentication no' && \
+    sshd -T | grep -qx 'permitemptypasswords no'
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 EXPOSE 22
