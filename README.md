@@ -403,8 +403,8 @@ Operator-configurable variables in `.env`. For the complete list, see `.env.temp
 | **Coolify** | coolify/coolify | Application deployment engine (internal) | — |
 | **Technitium DNS** | technitium/technitium-core | DNS resolver and authoritative server | 53 (or DNS_PORT) |
 | **step-ca** | smallstep/step-ca | Internal CA (LAN mode only) | 9000 |
-| **PostgreSQL** | postgres:15 | Coolify database | 5432 |
-| **Redis** | redis:7 | Coolify cache and queue | 6379 |
+| **PostgreSQL** | postgres:15.20 | Coolify database | 5432 |
+| **Redis** | redis:7.4.12 | Coolify cache and queue | 6379 |
 
 ### Volumes
 
