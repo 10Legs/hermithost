@@ -256,7 +256,8 @@ function detectDeployAuth(
   }
   try {
     const url = new URL(gitUrl);
-    if (url.username) {
+    // ssh://git@host/... carries a transport user, not a PAT.
+    if (url.username && /^https?:$/.test(url.protocol)) {
       url.username = '';
       url.password = '';
       return { deployAuth: 'pat', cleanUrl: url.toString() };
