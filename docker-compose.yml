@@ -1,9 +1,10 @@
 services:
   # ── Coolify — Deployment Engine ────────────────────────────────
   coolify:
-    # Pinned (was :latest). 4.5.0 ships PHP 8.4.27 — fixes php2shell
-    # (CVE-2026-109618/109619). Bump deliberately, after the castitat upgrade test.
-    image: "ghcr.io/coollabsio/coolify:4.5.0@sha256:79321612a4e4aae90378f647ab0b31afaaad3be47f20953289d3fef3883f4ac8"
+    # Pinned by digest. 4.7.6 carries the 4.5.1 secret-permission and webhook-
+    # signature fixes (4.5.0 already had PHP 8.4.27 for php2shell). Bump
+    # deliberately, after the castitat upgrade test.
+    image: "ghcr.io/coollabsio/coolify:4.7.6@sha256:95d25ed900d0f0cb6e621c3bade63efdf1df85ba5c63e76ae3c92beba1debb90"
     restart: unless-stopped
     extra_hosts:
       - host.docker.internal:host-gateway
