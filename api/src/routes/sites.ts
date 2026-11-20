@@ -995,8 +995,8 @@ router.post('/', async (req: Request, res: Response) => {
     return;
   }
   body.name = normalizeSiteText(String(body.name)).trim();
-  if (body.description !== undefined) body.description = normalizeSiteText(String(body.description)).trim();
-  const metaError = siteNameError(body.name) ?? (body.description !== undefined ? siteDescriptionError(body.description) : null);
+  if (typeof body.description === 'string') body.description = normalizeSiteText(body.description).trim();
+  const metaError = siteNameError(body.name) ?? (typeof body.description === 'string' ? siteDescriptionError(body.description) : null);
   if (metaError) {
     res.status(400).json({ error: metaError });
     return;
@@ -1231,10 +1231,10 @@ router.patch('/:slug', async (req: Request, res: Response) => {
     }
   }
   if (body.name !== undefined) body.name = normalizeSiteText(String(body.name)).trim();
-  if (body.description !== undefined) body.description = normalizeSiteText(String(body.description)).trim();
+  if (typeof body.description === 'string') body.description = normalizeSiteText(body.description).trim();
   const metaError =
     (body.name !== undefined ? siteNameError(body.name) : null) ??
-    (body.description !== undefined ? siteDescriptionError(body.description) : null);
+    (typeof body.description === 'string' ? siteDescriptionError(body.description) : null);
   if (metaError) {
     res.status(400).json({ error: metaError });
     return;
