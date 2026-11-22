@@ -3,6 +3,7 @@ import { createCoolifyClient } from './coolify';
 import { createTechnitiumClient } from './technitium';
 import { createDnsProvider } from './dns';
 import { embedPatInRepoUrl, linkGithubKey } from '../routes/sites';
+import { sanitizeSiteName, sanitizeSiteDescription } from '../lib/validation';
 import { readNsHostname, readNsServerIp, readNetworkMode } from '../routes/config';
 
 // Basic FQDN pattern — rejects bare hostnames, IPs, and embedded paths.
@@ -371,7 +372,7 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
     }
 
     for (const site of data.sites) {
-      if (liveNames.has(site.name)) {
+      if (liveNames.has(site.name) || liveNames.has(sanitizeSiteName(site.name))) {
         result.sites.skipped.push(`${site.name}: already exists`);
         continue;
       }
@@ -389,7 +390,8 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
           : undefined;
         const app = await coolify.createApplication({
           type: site.deploy_auth === 'pat' ? 'public' : 'private',
-          name: site.name,
+          // Older backups may hold names/descriptions the engine now rejects.
+          name: sanitizeSiteName(site.name),
           git_repository: resolvedRepo,
           git_branch: site.git_branch,
           build_pack: 'nixpacks',
@@ -400,7 +402,7 @@ export async function importBackup(data: BackupFile): Promise<ImportResult> {
           project_uuid,
           environment_name: 'production',
           instant_deploy: false,
-          ...(site.description ? { description: site.description } : {}),
+          ...(site.description ? { description: sanitizeSiteDescription(site.description) } : {}),
           ...(coolifyFqdn ? { domains: coolifyFqdn } : {}),
         });
         if (site.deploy_auth !== 'pat') {

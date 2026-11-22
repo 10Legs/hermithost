@@ -18,7 +18,14 @@ import {
   UpdateEnvPayload,
 } from '../services/coolify';
 import { extractEnvVars, generateSecretValue } from '../lib/composeEnv';
-import { FQDN_RE, SLUG_RE, domainHasDangerousChars } from '../lib/validation';
+import {
+  FQDN_RE,
+  SLUG_RE,
+  domainHasDangerousChars,
+  normalizeSiteText,
+  siteNameError,
+  siteDescriptionError,
+} from '../lib/validation';
 import { mapSite, mapDeploy, resolveRouteDomain } from '../services/mapper';
 import { clearProbeCache, probeSite } from '../services/healthProbe';
 import { createDnsProvider, DnsOperationError } from '../services/dns';
@@ -987,6 +994,13 @@ router.post('/', async (req: Request, res: Response) => {
     });
     return;
   }
+  body.name = normalizeSiteText(String(body.name)).trim();
+  if (typeof body.description === 'string') body.description = normalizeSiteText(body.description).trim();
+  const metaError = siteNameError(body.name) ?? (typeof body.description === 'string' ? siteDescriptionError(body.description) : null);
+  if (metaError) {
+    res.status(400).json({ error: metaError });
+    return;
+  }
   const deployAuth = body.deploy_auth ?? 'ssh_key';
   if (deployAuth === 'pat' && !body.deploy_token?.trim()) {
     res.status(400).json({ error: 'deploy_token is required when deploy_auth is pat' });
@@ -1215,6 +1229,15 @@ router.patch('/:slug', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'Invalid domain: must be a valid FQDN' });
       return;
     }
+  }
+  if (body.name !== undefined) body.name = normalizeSiteText(String(body.name)).trim();
+  if (typeof body.description === 'string') body.description = normalizeSiteText(body.description).trim();
+  const metaError =
+    (body.name !== undefined ? siteNameError(body.name) : null) ??
+    (typeof body.description === 'string' ? siteDescriptionError(body.description) : null);
+  if (metaError) {
+    res.status(400).json({ error: metaError });
+    return;
   }
   if (body.include_source_commit !== undefined && typeof body.include_source_commit !== 'boolean') {
     res.status(400).json({ error: 'include_source_commit must be a boolean' });
