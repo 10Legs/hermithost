@@ -812,6 +812,9 @@
 		// SSH: git@github.com:owner/repo[.git]
 		const sshMatch = url.match(/^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/);
 		if (sshMatch) return sshMatch[1];
+		// SSH over 443: ssh://git@ssh.github.com:443/owner/repo[.git]
+		const sshUrlMatch = url.match(/^ssh:\/\/(?:[^@/]+@)?(?:ssh\.)?github\.com(?::\d+)?\/([^/]+\/[^/]+?)(?:\.git)?$/);
+		if (sshUrlMatch) return sshUrlMatch[1];
 		// HTTPS: https://github.com/owner/repo[.git]
 		const httpsMatch = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?(?:\/.*)?$/);
 		if (httpsMatch) return httpsMatch[1];
