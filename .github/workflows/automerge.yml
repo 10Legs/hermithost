@@ -1,0 +1,129 @@
+name: automerge
+
+# Merge a pull request once it is approved and every check on it is green, then deploy main.
+#
+# Triggers: an "Approve" review from an OWNER / MEMBER / COLLABORATOR or from grunt-buzz[bot]
+# (the hive's PR approver App; GitHub labels an App's reviews author_association NONE, so it is
+# matched by login), or a PR comment that is exactly "+1", ":+1:", "👍" or "LGTM" (any case,
+# surrounding whitespace ignored) from an OWNER / MEMBER / COLLABORATOR.
+#
+# Branch protection on main still applies: the merge below is refused unless the PR already
+# satisfies it (required checks, required reviews, CODEOWNERS). This workflow never bypasses it.
+#
+# Safety:
+#   - the PR head commit is pinned when the approval arrives; a later push needs a fresh one
+#     (merge uses --match-head-commit, so GitHub refuses if the head moved);
+#   - every check run on that commit (other than this job) must succeed (skipped/neutral count
+#     as passing); any failure or a 45-minute timeout aborts without merging;
+#   - drafts and PRs from forks are ignored;
+#   - nothing here checks out or runs PR code, and no job targets a self-hosted runner
+#     (this repository is public; see deploy.yml).
+#
+# A merge made with GITHUB_TOKEN does not fire `push` workflows, so the last step dispatches
+# deploy.yml on main explicitly. Deploy keeps its own tiers: low-impact services deploy
+# automatically, anything else waits on the `production-approval` environment.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: automerge-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  automerge:
+    if: >-
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      ) || (
+        github.event_name == 'pull_request_review' &&
+        github.event.review.state == 'approved' &&
+        (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association) ||
+        github.event.review.user.login == 'grunt-buzz[bot]')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Match the +1
+        if: github.event_name == 'issue_comment'
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          norm="$(printf '%s' "$BODY" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+          case "$norm" in
+            '+1'|':+1:'|'👍'|'lgtm') echo "matched +1" ;;
+            *) echo "not a +1 comment; nothing to do"; echo "SKIP=1" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Pin the head commit
+        if: env.SKIP != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          read -r draft cross base sha < <(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isCrossRepository,baseRefName,headRefOid \
+            --jq '"\(.isDraft) \(.isCrossRepository) \(.baseRefName) \(.headRefOid)"')
+          if [ "$draft" = true ] || [ "$cross" = true ] || [ "$base" != main ]; then
+            echo "draft, fork, or non-main PR; not merging"; echo "SKIP=1" >> "$GITHUB_ENV"; exit 0
+          fi
+          echo "HEAD_SHA=$sha" >> "$GITHUB_ENV"
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" \
+            --body "automerge: approval received for ${sha:0:7}. Merging when every check on it passes."
+
+      - name: Wait for every check on that commit
+        if: env.SKIP != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Latest run per check name: a cancelled or re-run duplicate on the same commit must not block.
+          deadline=$(( $(date +%s) + 45*60 ))
+          while :; do
+            runs="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" \
+              --jq '[.check_runs[] | select(.name != "automerge")]
+                    | group_by(.name) | map(max_by(.id) | {status, conclusion})')"
+            total=$(jq 'length' <<<"$runs")
+            pending=$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")
+            bad=$(jq '[.[] | select(.status == "completed" and (.conclusion | IN("success","skipped","neutral") | not))] | length' <<<"$runs")
+            echo "checks: total=$total pending=$pending failed=$bad"
+            if [ "$bad" -gt 0 ]; then echo "a check failed; not merging" >&2; exit 1; fi
+            if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then break; fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then echo "timed out waiting for checks" >&2; exit 1; fi
+            sleep 30
+          done
+
+      - name: Squash-merge
+        if: env.SKIP != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --squash --delete-branch --match-head-commit "$HEAD_SHA"
+
+      - name: Deploy main
+        # A merge made with github.token does not fire `push` workflows, so start the deploy explicitly.
+        if: env.SKIP != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deploy.yml --repo "$GITHUB_REPOSITORY" --ref main -f services=auto
+
+      - name: Report failure on the PR
+        if: failure() && env.SKIP != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" \
+            --body "automerge: not merged (a check failed, timed out, the head moved, or branch protection refused the merge). Fix it and approve again. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
